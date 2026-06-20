@@ -1,0 +1,6 @@
+{
+  "name": "CampusAI",
+  "description": "校园达人 - 帮助大学生量化管理时间、AI效率分析、校园二手交易及社区互动的全功能微应用平台",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
