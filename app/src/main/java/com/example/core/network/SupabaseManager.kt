@@ -79,6 +79,10 @@ object SupabaseManager {
         appDir = context.filesDir
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val userJson = prefs.getString(KEY_SESSION_USER, null)
+        val userJwt = prefs.getString("session_user_jwt", null)
+        if (userJwt != null) {
+            SupabaseClient.userJwt = userJwt
+        }
         if (userJson != null) {
             try {
                 val adapter = moshi.adapter(SupabaseUser::class.java)
@@ -93,14 +97,21 @@ object SupabaseManager {
         isInitialized = true
     }
 
-    private fun saveSession(context: Context, user: SupabaseUser?) {
+    private fun saveSession(context: Context, user: SupabaseUser?, jwt: String = "") {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (user == null) {
-            prefs.edit().remove(KEY_SESSION_USER).apply()
+            prefs.edit().remove(KEY_SESSION_USER).remove("session_user_jwt").apply()
             _currentUser.value = null
+            SupabaseClient.userJwt = ""
         } else {
             val adapter = moshi.adapter(SupabaseUser::class.java)
-            prefs.edit().putString(KEY_SESSION_USER, adapter.toJson(user)).apply()
+            val editor = prefs.edit()
+            editor.putString(KEY_SESSION_USER, adapter.toJson(user))
+            if (jwt.isNotEmpty()) {
+                editor.putString("session_user_jwt", jwt)
+                SupabaseClient.userJwt = jwt
+            }
+            editor.apply()
             _currentUser.value = user
         }
     }
@@ -140,8 +151,11 @@ object SupabaseManager {
                         val userIdMatch = "\"id\"\\s*:\\s*\"([^\"]+)\"".toRegex().find(responseStr)
                         val id = userIdMatch?.groupValues?.get(1) ?: "sb_user_${System.currentTimeMillis()}"
                         
-                        // Check if email domain implies role
-                        val role = if (normalizedEmail.contains("admin")) "admin" else "user"
+                        val tokenMatch = "\"access_token\"\\s*:\\s*\"([^\"]+)\"".toRegex().find(responseStr)
+                        val token = tokenMatch?.groupValues?.get(1) ?: ""
+
+                        // Registered users always start as default 'user' to prevent privilege escalation
+                        val role = "user"
 
                         val rawUser = SupabaseUser(
                             id = id,
@@ -158,7 +172,7 @@ object SupabaseManager {
                         // Write profile user records to PostgREST users table
                         insertUserToSupabase(rawUser)
                         
-                        saveSession(context, rawUser)
+                        saveSession(context, rawUser, token)
                         // Sync with local table
                         val currentList = _allUsers.value.toMutableList()
                         currentList.add(rawUser)
@@ -167,7 +181,7 @@ object SupabaseManager {
 
                         Result.success(rawUser)
                     } else {
-                        Result.failure(Exception(parseSupabaseAuthError(response.code, responseStr)))
+                        Result.failure(Exception("注册失败: HTTP ${response.code}\n信息: $responseStr"))
                     }
                 }
             } catch (e: Exception) {
@@ -181,7 +195,7 @@ object SupabaseManager {
             }
 
             val id = "local_usr_${System.currentTimeMillis()}"
-            val role = if (normalizedEmail.contains("admin")) "admin" else "user"
+            val role = "user"
             val user = SupabaseUser(
                 id = id,
                 nickname = nickname,
@@ -223,13 +237,16 @@ object SupabaseManager {
                         val userIdMatch = "\"id\"\\s*:\\s*\"([^\"]+)\"".toRegex().find(responseStr)
                         val id = userIdMatch?.groupValues?.get(1) ?: ""
                         
+                        val tokenMatch = "\"access_token\"\\s*:\\s*\"([^\"]+)\"".toRegex().find(responseStr)
+                        val token = tokenMatch?.groupValues?.get(1) ?: ""
+
                         // Query user record from PostgREST users table
                         val profileResult = fetchUserProfile(id)
                         if (profileResult != null) {
                             if (profileResult.isBlocked) {
                                 return@withContext Result.failure(Exception("您的账号因违规已被封禁限制！请联系 school_admin 申诉。"))
                             }
-                            saveSession(context, profileResult)
+                            saveSession(context, profileResult, token)
                             Result.success(profileResult)
                         } else {
                             // Automatically insert user record as precaution
@@ -243,11 +260,11 @@ object SupabaseManager {
                                 grade = "大一"
                             )
                             insertUserToSupabase(defaultUser)
-                            saveSession(context, defaultUser)
+                            saveSession(context, defaultUser, token)
                             Result.success(defaultUser)
                         }
                     } else {
-                        Result.failure(Exception(parseSupabaseAuthError(response.code, responseStr)))
+                        Result.failure(Exception("登录失败：邮箱或密码错误。\n${responseStr.take(100)}"))
                     }
                 }
             } catch (e: Exception) {
@@ -281,6 +298,27 @@ object SupabaseManager {
             college = college,
             grade = grade,
             bio = bio
+        )
+        _currentUser.value = updated
+        saveSession(context, updated)
+
+        // Sync with global users list
+        val uList = _allUsers.value.map { if (it.id == current.id) updated else it }
+        _allUsers.value = uList
+        writeLocalData("users.json", uList)
+
+        // Write back to Supabase
+        if (SupabaseClient.isConfigured()) {
+            CoroutineScope(Dispatchers.IO).launch {
+                insertUserToSupabase(updated)
+            }
+        }
+    }
+
+    fun updateUserAvatar(context: Context, avatarUrl: String) {
+        val current = _currentUser.value ?: return
+        val updated = current.copy(
+            avatar = avatarUrl
         )
         _currentUser.value = updated
         saveSession(context, updated)
@@ -715,7 +753,7 @@ object SupabaseManager {
 
         if (SupabaseClient.isConfigured()) {
             CoroutineScope(Dispatchers.IO).launch {
-                SupabaseClient.updateGeneric("users", "id", userId, """{"isBlocked":$isBlocked}""")
+                SupabaseClient.updateGeneric("profiles", "id", userId, """{"isBlocked":$isBlocked}""")
             }
         }
     }
@@ -732,160 +770,6 @@ object SupabaseManager {
                 SupabaseClient.updateGeneric("reports", "id", "$reportId", """{"status":"$newStatus"}""")
             }
         }
-    }
-
-    fun adminUpdateUserRole(userId: String, newRole: String) {
-        val list = _allUsers.value.map {
-            if (it.id == userId) it.copy(role = newRole) else it
-        }
-        _allUsers.value = list
-        writeLocalData("users.json", list)
-
-        // If currently logged-in user is updated, keep current session role in sync!
-        if (currentUser.value?.id == userId) {
-            _currentUser.value = _currentUser.value?.copy(role = newRole)
-        }
-
-        if (SupabaseClient.isConfigured()) {
-            CoroutineScope(Dispatchers.IO).launch {
-                SupabaseClient.updateGeneric("users", "id", userId, """{"role":"$newRole"}""")
-            }
-        }
-    }
-
-    suspend fun uploadAndUpdateAvatarBytes(context: Context, fileBytes: ByteArray, formatExtension: String): Result<String> = withContext(Dispatchers.IO) {
-        val userId = currentUser.value?.id ?: return@withContext Result.failure(Exception("用户未登录"))
-        
-        val uploadResult = SupabaseClient.uploadAvatarBytes(fileBytes, userId, formatExtension)
-        if (uploadResult.isSuccess) {
-            val publicUrl = uploadResult.getOrThrow()
-            
-            // Sync-write databases
-            if (SupabaseClient.isConfigured()) {
-                val jsonPatch = """{"avatar_url":"$publicUrl","avatar":"$publicUrl","avatar_updated_at":${System.currentTimeMillis()}}"""
-                val client = OkHttpClient()
-                val type = "application/json; charset=utf-8".toMediaType()
-                val request = Request.Builder()
-                    .url("${SupabaseClient.supabaseUrl}/rest/v1/users?id=eq.$userId")
-                    .addHeader("apikey", SupabaseClient.supabaseAnonKey)
-                    .addHeader("Authorization", "Bearer ${SupabaseClient.supabaseAnonKey}")
-                    .addHeader("Content-Type", "application/json")
-                    .patch(jsonPatch.toRequestBody(type))
-                    .build()
-                try { client.newCall(request).execute().close() } catch (e: Exception) {
-                    Log.e("SupabaseManager", "Error updating user avatar fields in db: ${e.message}")
-                }
-            }
-            
-            val updatedUser = currentUser.value?.copy(
-                avatar = publicUrl,
-                avatar_url = publicUrl,
-                avatar_updated_at = System.currentTimeMillis()
-            )
-            
-            _currentUser.value = updatedUser
-            val list = _allUsers.value.map {
-                if (it.id == userId) updatedUser!! else it
-            }
-            _allUsers.value = list
-            writeLocalData("users.json", list)
-            saveSession(context, updatedUser)
-            
-            Result.success(publicUrl)
-        } else {
-            Result.failure(uploadResult.exceptionOrNull() ?: Exception("上传失败"))
-        }
-    }
-
-    suspend fun deleteAvatar(context: Context): Result<Boolean> = withContext(Dispatchers.IO) {
-        val userId = currentUser.value?.id ?: return@withContext Result.failure(Exception("用户未登录"))
-        val fallbackDefault = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=200"
-        
-        if (SupabaseClient.isConfigured()) {
-            val jsonPatch = """{"avatar_url":null,"avatar":"$fallbackDefault","avatar_updated_at":${System.currentTimeMillis()}}"""
-            val client = OkHttpClient()
-            val type = "application/json; charset=utf-8".toMediaType()
-            val request = Request.Builder()
-                .url("${SupabaseClient.supabaseUrl}/rest/v1/users?id=eq.$userId")
-                .addHeader("apikey", SupabaseClient.supabaseAnonKey)
-                .addHeader("Authorization", "Bearer ${SupabaseClient.supabaseAnonKey}")
-                .addHeader("Content-Type", "application/json")
-                .patch(jsonPatch.toRequestBody(type))
-                .build()
-            try { client.newCall(request).execute().close() } catch (e: Exception) {}
-        }
-        
-        val updatedUser = currentUser.value?.copy(
-            avatar = fallbackDefault,
-            avatar_url = null,
-            avatar_updated_at = System.currentTimeMillis()
-        )
-        _currentUser.value = updatedUser
-        val list = _allUsers.value.map {
-            if (it.id == userId) updatedUser!! else it
-        }
-        _allUsers.value = list
-        writeLocalData("users.json", list)
-        saveSession(context, updatedUser)
-        
-        Result.success(true)
-    }
-
-    suspend fun updateUserProfileRemote(
-        context: Context,
-        nickname: String,
-        school: String,
-        college: String,
-        grade: String,
-        bio: String
-    ): Result<Boolean> = withContext(Dispatchers.IO) {
-        val userId = currentUser.value?.id ?: return@withContext Result.failure(Exception("用户未登录"))
-        
-        if (SupabaseClient.isConfigured()) {
-            val jsonPatch = """{
-                "nickname":"$nickname",
-                "school":"$school",
-                "college":"$college",
-                "grade":"$grade",
-                "bio":"$bio"
-            }"""
-            val client = OkHttpClient()
-            val type = "application/json; charset=utf-8".toMediaType()
-            val request = Request.Builder()
-                .url("${SupabaseClient.supabaseUrl}/rest/v1/users?id=eq.$userId")
-                .addHeader("apikey", SupabaseClient.supabaseAnonKey)
-                .addHeader("Authorization", "Bearer ${SupabaseClient.supabaseAnonKey}")
-                .addHeader("Content-Type", "application/json")
-                .patch(jsonPatch.toRequestBody(type))
-                .build()
-            try {
-                client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        return@withContext Result.failure(Exception("DB update failed: HTTP ${response.code}"))
-                    }
-                }
-            } catch (e: Exception) {
-                return@withContext Result.failure(e)
-            }
-        }
-        
-        val updatedUser = currentUser.value?.copy(
-            nickname = nickname,
-            school = school,
-            college = college,
-            grade = grade,
-            bio = bio
-        )
-        
-        _currentUser.value = updatedUser
-        val list = _allUsers.value.map {
-            if (it.id == userId) updatedUser!! else it
-        }
-        _allUsers.value = list
-        writeLocalData("users.json", list)
-        saveSession(context, updatedUser)
-        
-        Result.success(true)
     }
 
     fun adminDeletePost(postId: Int) {
@@ -1097,7 +981,7 @@ object SupabaseManager {
     // ==========================================
 
     private suspend fun fetchUserProfile(userId: String): SupabaseUser? {
-        val url = "${SupabaseClient.supabaseUrl}/rest/v1/users?id=eq.$userId&select=*"
+        val url = "${SupabaseClient.supabaseUrl}/rest/v1/profiles?id=eq.$userId&select=*"
         val request = Request.Builder()
             .url(url)
             .addHeader("apikey", SupabaseClient.supabaseAnonKey)
@@ -1120,7 +1004,7 @@ object SupabaseManager {
 
     private suspend fun insertUserToSupabase(user: SupabaseUser) {
         val recordJson = moshi.adapter(SupabaseUser::class.java).toJson(user)
-        val url = "${SupabaseClient.supabaseUrl}/rest/v1/users"
+        val url = "${SupabaseClient.supabaseUrl}/rest/v1/profiles"
         val request = Request.Builder()
             .url(url)
             .addHeader("apikey", SupabaseClient.supabaseAnonKey)
@@ -1188,38 +1072,4 @@ private fun SupabaseClient.updateGeneric(table: String, idColumn: String, idValu
         .patch(jsonPatch.toRequestBody(type))
         .build()
     try { client.newCall(request).execute().close() } catch (e: Exception) {}
-}
-
-private fun parseSupabaseAuthError(responseCode: Int, responseStr: String): String {
-    return try {
-        val errorDescriptionMatch = "\"error_description\"\\s*:\\s*\"([^\"]+)\"".toRegex().find(responseStr)
-        val errorMatch = "\"error\"\\s*:\\s*\"([^\"]+)\"".toRegex().find(responseStr)
-        val messageMatch = "\"message\"\\s*:\\s*\"([^\"]+)\"".toRegex().find(responseStr)
-        val msgMatch = "\"msg\"\\s*:\\s*\"([^\"]+)\"".toRegex().find(responseStr)
-        
-        val desc = errorDescriptionMatch?.groupValues?.get(1) 
-            ?: msgMatch?.groupValues?.get(1) 
-            ?: messageMatch?.groupValues?.get(1) 
-            ?: errorMatch?.groupValues?.get(1)
-            
-        if (desc != null) {
-            when {
-                desc.contains("Email not confirmed", ignoreCase = true) -> 
-                    "登录失败：邮箱尚未激活验证！请查收您的注册激活邮件，或前往 Supabase 管理后台在 [Authentication] -> [Providers] -> [Email] 手动关闭 [Confirm email] 并保存配置，然后再试。"
-                desc.contains("Invalid login credentials", ignoreCase = true) || desc.contains("invalid_credentials", ignoreCase = true) -> 
-                    "登录失败：邮箱或密码不正确，或者是该账号目前尚未创建。请切换至\"注册\"页面创建并绑定。"
-                desc.contains("User not found", ignoreCase = true) -> 
-                    "登录失败：该账号不存在，请切换至\"注册\"页快速建号。"
-                desc.contains("rate limit", ignoreCase = true) -> 
-                    "操作频繁：触发了 Supabase 的防护限制，请稍候 30 秒至 1 分钟后重新尝试。"
-                desc.contains("signup is disabled", ignoreCase = true) -> 
-                    "注册失败：自主邮箱密码注册已被您的 Supabase 实例管理员禁用。"
-                else -> "失败：$desc"
-            }
-        } else {
-            "HTTP 状态码 $responseCode\n原始信息: $responseStr"
-        }
-    } catch (e: Exception) {
-        "HTTP 状态码 $responseCode\n原始异常: $responseStr"
-    }
 }

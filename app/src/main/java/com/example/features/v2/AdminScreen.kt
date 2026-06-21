@@ -226,51 +226,7 @@ fun AdminUsersView() {
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(usr.nickname, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                            Text("${usr.school} · ${usr.college}", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
-                            
-                            // Interactive Role Selector Dropdown
-                            val context = LocalContext.current
-                            var roleMenuExpanded by remember { mutableStateOf(false) }
-                            Box(modifier = Modifier.padding(vertical = 2.dp)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f))
-                                        .clickable { roleMenuExpanded = true }
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                ) {
-                                    Text(
-                                        text = "角色: ${usr.role.uppercase()}",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                                    )
-                                    Icon(
-                                        imageVector = Icons.Default.ArrowDropDown,
-                                        contentDescription = "change role",
-                                        modifier = Modifier.size(14.dp),
-                                        tint = MaterialTheme.colorScheme.onPrimaryContainer
-                                    )
-                                }
-                                
-                                DropdownMenu(
-                                    expanded = roleMenuExpanded,
-                                    onDismissRequest = { roleMenuExpanded = false }
-                                ) {
-                                    listOf("user", "moderator", "admin", "super_admin").forEach { possibleRole ->
-                                        DropdownMenuItem(
-                                            text = { Text(possibleRole.uppercase(), fontSize = 12.sp, fontWeight = FontWeight.Bold) },
-                                            onClick = {
-                                                roleMenuExpanded = false
-                                                SupabaseManager.adminUpdateUserRole(usr.id, possibleRole)
-                                                Toast.makeText(context, "已成功变更 ${usr.nickname} 的权限角色为: ${possibleRole.uppercase()}", Toast.LENGTH_SHORT).show()
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-
+                            Text("${usr.school} · ${usr.college} · ${usr.role}", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
                             Text(usr.email, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         

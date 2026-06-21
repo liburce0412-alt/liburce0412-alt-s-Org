@@ -6,8 +6,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -75,279 +73,242 @@ fun AuthScreen(onAuthSuccess: () -> Unit) {
         )
     )
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        containerColor = Color(0xFF0F1115)
-    ) { paddingValues ->
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0F1115)) // Twilight Canvas
+    ) {
+        // Aesthetic Glowing Gradients (Gemini soft glass glow)
         Box(
             modifier = Modifier
+                .size(350.dp)
+                .align(Alignment.TopEnd)
+                .offset(x = 100.dp, y = (-80).dp)
+                .background(Brush.radialGradient(listOf(Color(0xFF4285F4).copy(alpha = 0.15f), Color.Transparent)))
+        )
+        Box(
+            modifier = Modifier
+                .size(400.dp)
+                .align(Alignment.BottomStart)
+                .offset(x = (-120).dp, y = 120.dp)
+                .background(Brush.radialGradient(listOf(Color(0xFFEC4899).copy(alpha = 0.12f), Color.Transparent)))
+        )
+
+        Column(
+            modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues)
+                .padding(24.dp)
+                .systemBarsPadding(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-            // Aesthetic Glowing Gradients (Gemini soft glass glow)
-            Box(
-                modifier = Modifier
-                    .size(350.dp)
-                    .align(Alignment.TopEnd)
-                    .offset(x = 100.dp, y = (-80).dp)
-                    .background(Brush.radialGradient(listOf(Color(0xFF4285F4).copy(alpha = 0.15f), Color.Transparent)))
+            // OpenAI × Gemini Fusion Text Title Header
+            Text(
+                text = "CampusAI",
+                style = androidx.compose.ui.text.TextStyle(
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 1.sp,
+                    fontSize = 32.sp,
+                    brush = geminiBrush
+                ),
+                textAlign = TextAlign.Center
             )
-            Box(
-                modifier = Modifier
-                    .size(400.dp)
-                    .align(Alignment.BottomStart)
-                    .offset(x = (-120).dp, y = 120.dp)
-                    .background(Brush.radialGradient(listOf(Color(0xFFEC4899).copy(alpha = 0.12f), Color.Transparent)))
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "柳比歇夫自律量化 × 校园共享网络 v2.0",
+                fontSize = 13.sp,
+                color = Color.White.copy(alpha = 0.6f),
+                textAlign = TextAlign.Center
             )
 
-            LazyColumn(
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Glassmorphic Login card (white border, low opacity surface)
+            Card(
+                shape = RoundedCornerShape(28.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2026).copy(alpha = 0.85f)),
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 24.dp)
-                    .imePadding(),
-                contentPadding = PaddingValues(top = 40.dp, bottom = 110.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                item {
-                    // OpenAI × Gemini Fusion Text Title Header
-                    Text(
-                        text = "CampusAI",
-                        style = androidx.compose.ui.text.TextStyle(
-                            fontWeight = FontWeight.ExtraBold,
-                            letterSpacing = 1.sp,
-                            fontSize = 32.sp,
-                            brush = geminiBrush
+                    .fillMaxWidth()
+                    .border(
+                        width = 1.dp,
+                        brush = Brush.verticalGradient(
+                            listOf(
+                                Color.White.copy(alpha = 0.15f),
+                                Color.White.copy(alpha = 0.05f)
+                            )
                         ),
-                        textAlign = TextAlign.Center
+                        shape = RoundedCornerShape(28.dp)
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .padding(24.dp)
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
                     Text(
-                        text = "柳比歇夫自律量化 × 校园共享网络 v2.0",
-                        fontSize = 13.sp,
-                        color = Color.White.copy(alpha = 0.6f),
+                        text = if (isSignUp) "建立您的学术账号" else "登录您的 Campus 空间",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        modifier = Modifier.fillMaxWidth(),
                         textAlign = TextAlign.Center
                     )
-                }
 
-                item {
-                    // Glassmorphic Login card (white border, low opacity surface)
-                    Card(
-                        shape = RoundedCornerShape(28.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2026).copy(alpha = 0.85f)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(
-                                width = 1.dp,
-                                brush = Brush.verticalGradient(
-                                    listOf(
-                                        Color.White.copy(alpha = 0.15f),
-                                        Color.White.copy(alpha = 0.05f)
-                                    )
-                                ),
-                                shape = RoundedCornerShape(28.dp)
-                            )
-                    ) {
-                        Column(
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    if (isSignUp) {
+                        // Avatar Selector Row
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
-                                .padding(20.dp)
-                                .fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(14.dp)
+                                .fillMaxWidth()
+                                .clickable { showAvatarPicker = true }
+                                .background(Color(0xFF262930), RoundedCornerShape(14.dp))
+                                .padding(12.dp)
                         ) {
-                            Text(
-                                text = if (isSignUp) "建立您的学术账号" else "登录您的 Campus 空间",
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White,
-                                modifier = Modifier.fillMaxWidth(),
-                                textAlign = TextAlign.Center
+                            AsyncImage(
+                                model = selectedAvatar,
+                                contentDescription = "avatar",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(CircleShape)
                             )
-
-                            Spacer(modifier = Modifier.height(4.dp))
-
-                            if (isSignUp) {
-                                // Avatar Selector Row
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { showAvatarPicker = true }
-                                        .background(Color(0xFF262930), RoundedCornerShape(14.dp))
-                                        .padding(12.dp)
-                                ) {
-                                    AsyncImage(
-                                        model = selectedAvatar,
-                                        contentDescription = "avatar",
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier
-                                            .size(44.dp)
-                                            .clip(CircleShape)
-                                    )
-                                    Spacer(modifier = Modifier.width(12.dp))
-                                    Column {
-                                        Text("选择系统专属头像", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                                        Text("点击选取更个性的面孔", color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
-                                    }
-                                    Spacer(modifier = Modifier.weight(1f))
-                                    Icon(Icons.Default.ChevronRight, "select", tint = Color.LightGray)
-                                }
-
-                                // Nickname field
-                                OutlinedTextField(
-                                    value = nickname,
-                                    onValueChange = { nickname = it },
-                                    placeholder = { Text("用户昵称 (如: 学雷锋的杰克)", color = Color.Gray, fontSize = 13.sp) },
-                                    leadingIcon = { Icon(Icons.Default.Person, "user", tint = Color.White.copy(alpha = 0.6f)) },
-                                    colors = TextFieldDefaults.colors(
-                                        focusedTextColor = Color.White,
-                                        unfocusedTextColor = Color.White,
-                                        focusedContainerColor = Color(0xFF262930),
-                                        unfocusedContainerColor = Color(0xFF262930),
-                                        focusedLabelColor = Color.White,
-                                        cursorColor = Color.White
-                                    ),
-                                    shape = RoundedCornerShape(16.dp),
-                                    modifier = Modifier.fillMaxWidth().testTag("auth_reg_nickname")
-                                )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("选择系统专属头像", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                Text("点击选取更个性的面孔", color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
                             }
-
-                            // Email field
-                            OutlinedTextField(
-                                value = email,
-                                onValueChange = { email = it },
-                                placeholder = { Text("电子邮箱 (用于 Supabase 凭证)", color = Color.Gray, fontSize = 13.sp) },
-                                leadingIcon = { Icon(Icons.Default.Email, "email", tint = Color.White.copy(alpha = 0.6f)) },
-                                colors = TextFieldDefaults.colors(
-                                    focusedTextColor = Color.White,
-                                    unfocusedTextColor = Color.White,
-                                    focusedContainerColor = Color(0xFF262930),
-                                    unfocusedContainerColor = Color(0xFF262930),
-                                    focusedLabelColor = Color.White,
-                                    cursorColor = Color.White
-                                ),
-                                shape = RoundedCornerShape(16.dp),
-                                modifier = Modifier.fillMaxWidth().testTag("auth_email")
-                            )
-
-                            // Password field
-                            OutlinedTextField(
-                                value = password,
-                                onValueChange = { password = it },
-                                placeholder = { Text("账户安全密码 (不少于6位)", color = Color.Gray, fontSize = 13.sp) },
-                                leadingIcon = { Icon(Icons.Default.Lock, "lock", tint = Color.White.copy(alpha = 0.6f)) },
-                                visualTransformation = PasswordVisualTransformation(),
-                                colors = TextFieldDefaults.colors(
-                                    focusedTextColor = Color.White,
-                                    unfocusedTextColor = Color.White,
-                                    focusedContainerColor = Color(0xFF262930),
-                                    unfocusedContainerColor = Color(0xFF262930),
-                                    focusedLabelColor = Color.White,
-                                    cursorColor = Color.White
-                                ),
-                                shape = RoundedCornerShape(16.dp),
-                                modifier = Modifier.fillMaxWidth().testTag("auth_password")
-                            )
-
-                            if (isSignUp) {
-                                // School metadata fields
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedTextField(
-                                        value = school,
-                                        onValueChange = { school = it },
-                                        placeholder = { Text("学校", color = Color.Gray, fontSize = 12.sp) },
-                                        colors = TextFieldDefaults.colors(
-                                            focusedTextColor = Color.White,
-                                            unfocusedTextColor = Color.White,
-                                            focusedContainerColor = Color(0xFF262930),
-                                            unfocusedContainerColor = Color(0xFF262930)
-                                        ),
-                                        shape = RoundedCornerShape(14.dp),
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    OutlinedTextField(
-                                        value = college,
-                                        onValueChange = { college = it },
-                                        placeholder = { Text("院系", color = Color.Gray, fontSize = 12.sp) },
-                                        colors = TextFieldDefaults.colors(
-                                            focusedTextColor = Color.White,
-                                            unfocusedTextColor = Color.White,
-                                            focusedContainerColor = Color(0xFF262930),
-                                            unfocusedContainerColor = Color(0xFF262930)
-                                        ),
-                                        shape = RoundedCornerShape(14.dp),
-                                        modifier = Modifier.weight(1.2f)
-                                    )
-                                    OutlinedTextField(
-                                        value = grade,
-                                        onValueChange = { grade = it },
-                                        placeholder = { Text("年级", color = Color.Gray, fontSize = 12.sp) },
-                                        colors = TextFieldDefaults.colors(
-                                            focusedTextColor = Color.White,
-                                            unfocusedTextColor = Color.White,
-                                            focusedContainerColor = Color(0xFF262930),
-                                            unfocusedContainerColor = Color(0xFF262930)
-                                        ),
-                                        shape = RoundedCornerShape(14.dp),
-                                        modifier = Modifier.weight(0.8f)
-                                    )
-                                }
-
-                                // Bio
-                                OutlinedTextField(
-                                    value = bio,
-                                    onValueChange = { bio = it },
-                                    placeholder = { Text("个性签名 (例如: 今日事今日毕)", color = Color.Gray, fontSize = 13.sp) },
-                                    colors = TextFieldDefaults.colors(
-                                        focusedTextColor = Color.White,
-                                        unfocusedTextColor = Color.White,
-                                        focusedContainerColor = Color(0xFF262930),
-                                        unfocusedContainerColor = Color(0xFF262930)
-                                    ),
-                                    shape = RoundedCornerShape(16.dp),
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            }
+                            Spacer(modifier = Modifier.weight(1f))
+                            Icon(Icons.Default.ChevronRight, "select", tint = Color.LightGray)
                         }
-                    }
-                }
 
-                item {
-                    // Swap Mode Toggle
-                    TextButton(
-                        onClick = { isSignUp = !isSignUp },
-                        modifier = Modifier.minimumInteractiveComponentSize().testTag("auth_swap_toggle")
-                    ) {
-                        Text(
-                            text = if (isSignUp) "已经建立过自律空间？立即登录" else "初访 CampusAI？创建独立学术账号",
-                            color = Color.White.copy(alpha = 0.7f),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
+                        // Nickname field
+                        OutlinedTextField(
+                            value = nickname,
+                            onValueChange = { nickname = it },
+                            placeholder = { Text("用户昵称 (如: 学雷锋的杰克)", color = Color.Gray, fontSize = 13.sp) },
+                            leadingIcon = { Icon(Icons.Default.Person, "user", tint = Color.White.copy(alpha = 0.6f)) },
+                            colors = TextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedContainerColor = Color(0xFF262930),
+                                unfocusedContainerColor = Color(0xFF262930),
+                                focusedLabelColor = Color.White,
+                                cursorColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.fillMaxWidth().testTag("auth_reg_nickname")
                         )
                     }
-                }
-            }
 
-            // Fixed bottom registration action container
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .windowInsetsPadding(WindowInsets.navigationBars),
-                color = Color.Transparent
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp)
-                ) {
-                    if (isLoading) {
-                        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(28.dp),
-                                color = Color(0xFF4285F4)
+                    // Email field
+                    OutlinedTextField(
+                        value = email,
+                        onValueChange = { email = it },
+                        placeholder = { Text("电子邮箱 (用于 Supabase 凭证)", color = Color.Gray, fontSize = 13.sp) },
+                        leadingIcon = { Icon(Icons.Default.Email, "email", tint = Color.White.copy(alpha = 0.6f)) },
+                        colors = TextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedContainerColor = Color(0xFF262930),
+                            unfocusedContainerColor = Color(0xFF262930),
+                            focusedLabelColor = Color.White,
+                            cursorColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth().testTag("auth_email")
+                    )
+
+                    // Password field
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        placeholder = { Text("账户安全密码 (不少于6位)", color = Color.Gray, fontSize = 13.sp) },
+                        leadingIcon = { Icon(Icons.Default.Lock, "lock", tint = Color.White.copy(alpha = 0.6f)) },
+                        visualTransformation = PasswordVisualTransformation(),
+                        colors = TextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedContainerColor = Color(0xFF262930),
+                            unfocusedContainerColor = Color(0xFF262930),
+                            focusedLabelColor = Color.White,
+                            cursorColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth().testTag("auth_password")
+                    )
+
+                    if (isSignUp) {
+                        // School metadata fields
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = school,
+                                onValueChange = { school = it },
+                                placeholder = { Text("学校", color = Color.Gray, fontSize = 12.sp) },
+                                colors = TextFieldDefaults.colors(
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedContainerColor = Color(0xFF262930),
+                                    unfocusedContainerColor = Color(0xFF262930)
+                                ),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = college,
+                                onValueChange = { college = it },
+                                placeholder = { Text("院系", color = Color.Gray, fontSize = 12.sp) },
+                                colors = TextFieldDefaults.colors(
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedContainerColor = Color(0xFF262930),
+                                    unfocusedContainerColor = Color(0xFF262930)
+                                ),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.weight(1.2f)
+                            )
+                            OutlinedTextField(
+                                value = grade,
+                                onValueChange = { grade = it },
+                                placeholder = { Text("年级", color = Color.Gray, fontSize = 12.sp) },
+                                colors = TextFieldDefaults.colors(
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedContainerColor = Color(0xFF262930),
+                                    unfocusedContainerColor = Color(0xFF262930)
+                                ),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.weight(0.8f)
                             )
                         }
+
+                        // Bio
+                        OutlinedTextField(
+                            value = bio,
+                            onValueChange = { bio = it },
+                            placeholder = { Text("个性签名 (例如: 今日事今日毕)", color = Color.Gray, fontSize = 13.sp) },
+                            colors = TextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedContainerColor = Color(0xFF262930),
+                                unfocusedContainerColor = Color(0xFF262930)
+                            ),
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.align(Alignment.CenterHorizontally).size(28.dp),
+                            color = Color(0xFF4285F4)
+                        )
                     } else {
+                        // Main Action Capsule Button
                         Button(
                             onClick = {
                                 if (email.isEmpty() || password.isEmpty() || (isSignUp && nickname.isEmpty())) {
@@ -392,12 +353,27 @@ fun AuthScreen(onAuthSuccess: () -> Unit) {
                             Text(
                                 text = if (isSignUp) "建立并登入空间" else "进入安全终端",
                                 color = Color(0xFF0F1115),
-                                fontWeight = FontWeight.ExtraBold,
+                                fontWeight = FontWeight.Bold,
                                 fontSize = 15.sp
                             )
                         }
                     }
                 }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Swap Mode Toggle
+            TextButton(
+                onClick = { isSignUp = !isSignUp },
+                modifier = Modifier.minimumInteractiveComponentSize().testTag("auth_swap_toggle")
+            ) {
+                Text(
+                    text = if (isSignUp) "已经建立过自律空间？立即登录" else "初访 CampusAI？创建独立学术账号",
+                    color = Color.White.copy(alpha = 0.7f),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
         }
     }

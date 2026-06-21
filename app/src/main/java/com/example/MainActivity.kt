@@ -30,7 +30,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -46,6 +45,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.example.core.database.CampusDatabase
 import com.example.core.model.Achievement
 import com.example.core.model.AppUpdate
@@ -69,14 +71,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.ui.graphics.graphicsLayer
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -141,7 +135,7 @@ fun CampusMainApp(
         socialViewModel.seedSampleFriendsIfEmpty()
 
         // Fast Async version update check
-        val updateInfo = updateRepo.checkUpdate(currentVersionCode = 1)
+        val updateInfo = updateRepo.checkUpdate(currentVersionCode = com.example.BuildConfig.VERSION_CODE)
         if (updateInfo != null) {
             showAppUpdateDialog = updateInfo
         }
@@ -389,7 +383,7 @@ fun CampusMainApp(
                     "admin" -> com.example.features.v2.AdminConsoleScreen(
                         onBack = { currentScreen = "dashboard" }
                     )
-                    "settings" -> SettingsScreen(onNavigate = { screen -> currentScreen = screen })
+                    "settings" -> SettingsScreen()
                 }
             }
         }
@@ -2740,7 +2734,7 @@ fun AchievementsScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onNavigate: (String) -> Unit) {
+fun SettingsScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -2756,26 +2750,49 @@ fun SettingsScreen(onNavigate: (String) -> Unit) {
 
     var isTestingConnection by remember { mutableStateOf(false) }
     var isSavingConfig by remember { mutableStateOf(false) }
+    var isUploadingAvatar by remember { mutableStateOf(false) }
 
-    // Dialog Toggle States
-    var showAvatarOptions by remember { mutableStateOf(false) }
-    var showFullAvatar by remember { mutableStateOf(false) }
-    var showCropDialog by remember { mutableStateOf(false) }
-    var selectedUriForCrop by remember { mutableStateOf<android.net.Uri?>(null) }
-    var isAvatarLoading by remember { mutableStateOf(false) }
-
-    var showEditProfile by remember { mutableStateOf(false) }
-    var showMyPosts by remember { mutableStateOf(false) }
-    var showMyGoods by remember { mutableStateOf(false) }
-    var showMyFavs by remember { mutableStateOf(false) }
-
-    // picture picker launcher
-    val selectPictureLauncher = rememberLauncherForActivityResult(
-        contract = androidx.activity.result.contract.ActivityResultContracts.GetContent()
-    ) { uri: android.net.Uri? ->
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
         if (uri != null) {
-            selectedUriForCrop = uri
-            showCropDialog = true
+            scope.launch {
+                val user = currentUser
+                if (user == null) {
+                    Toast.makeText(context, "请先登录后再修改头像！", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                isUploadingAvatar = true
+                Toast.makeText(context, "正在读取并保存临时文件...", Toast.LENGTH_SHORT).show()
+                try {
+                    val inputStream = context.contentResolver.openInputStream(uri)
+                    if (inputStream == null) {
+                        Toast.makeText(context, "读取图片失败，请重试！", Toast.LENGTH_SHORT).show()
+                        isUploadingAvatar = false
+                        return@launch
+                    }
+                    val tempFile = java.io.File(context.cacheDir, "temp_avatar_${System.currentTimeMillis()}.jpg")
+                    tempFile.outputStream().use { outStream ->
+                        inputStream.copyTo(outStream)
+                    }
+
+                    Toast.makeText(context, "正在连接云存储并上传头像...", Toast.LENGTH_SHORT).show()
+                    val result = com.example.core.network.SupabaseClient.uploadAvatar(tempFile.absolutePath, user.id)
+                    if (result.isSuccess) {
+                        val publicUrl = result.getOrThrow()
+                        Toast.makeText(context, "头像上传成功！正在更新配置...", Toast.LENGTH_SHORT).show()
+                        com.example.core.network.SupabaseManager.updateUserAvatar(context, publicUrl)
+                        Toast.makeText(context, "更新成功并已同步！", Toast.LENGTH_SHORT).show()
+                    } else {
+                        val error = result.exceptionOrNull()?.message ?: "未知错误"
+                        Toast.makeText(context, "头像上传失败: $error", Toast.LENGTH_LONG).show()
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(context, "出错: ${e.message}", Toast.LENGTH_LONG).show()
+                } finally {
+                    isUploadingAvatar = false
+                }
+            }
         }
     }
 
@@ -2793,67 +2810,40 @@ fun SettingsScreen(onNavigate: (String) -> Unit) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    // Smooth, modern gradient avatar indicator with active loader rotation
-                    val infiniteTransition = rememberInfiniteTransition()
-                    val rotationAngle by infiniteTransition.animateFloat(
-                        initialValue = 0f,
-                        targetValue = 360f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(3000, easing = LinearEasing),
-                            repeatMode = RepeatMode.Restart
-                        )
-                    )
-                    val rainbowBrush = Brush.sweepGradient(
-                        colors = listOf(
-                            Color(0xFF4285F4),
-                            Color(0xFF8B5CF6),
-                            Color(0xFFEC4899),
-                            Color(0xFFF59E0B),
-                            Color(0xFF4285F4)
-                        )
-                    )
-
-                    Box(
+                    AsyncImage(
+                        model = currentUser?.avatar ?: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=150",
+                        contentDescription = "avatar",
+                        contentScale = ContentScale.Crop,
                         modifier = Modifier
-                            .size(76.dp)
-                            .padding(2.dp)
-                            .clickable { showAvatarOptions = true },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
-                            if (isAvatarLoading) {
-                                rotate(rotationAngle) {
-                                    drawCircle(brush = rainbowBrush, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx()))
+                            .size(72.dp)
+                            .clip(CircleShape)
+                            .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
+                            .clickable {
+                                if (currentUser != null && !isUploadingAvatar) {
+                                    imagePickerLauncher.launch("image/*")
                                 }
-                            } else {
-                                drawCircle(brush = rainbowBrush, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx()))
                             }
-                        }
-
-                        AsyncImage(
-                            model = currentUser?.avatarToShow ?: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=150",
-                            contentDescription = "avatar",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(3.dp)
-                                .clip(CircleShape)
-                        )
-
-                        if (isAvatarLoading) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .clip(CircleShape)
-                                    .background(Color.Black.copy(alpha = 0.4f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
-                            }
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    if (isUploadingAvatar) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
+                    } else {
+                        TextButton(
+                            onClick = {
+                                if (currentUser != null) {
+                                    imagePickerLauncher.launch("image/*")
+                                } else {
+                                    Toast.makeText(context, "请登录后使用头像上传功能", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier.testTag("upload_avatar_btn")
+                        ) {
+                            Icon(Icons.Default.CloudUpload, contentDescription = "上传头像", modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("上传头像 (M3 UI)", fontSize = 12.sp)
                         }
                     }
-
-                    Spacer(modifier = Modifier.height(10.dp))
                     Text(
                         text = currentUser?.nickname ?: "自学自律伙伴",
                         fontWeight = FontWeight.ExtraBold,
@@ -2861,7 +2851,7 @@ fun SettingsScreen(onNavigate: (String) -> Unit) {
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "${currentUser?.school ?: "北京大学"} · ${currentUser?.college ?: "计算机系"} · ${currentUser?.grade ?: "大师班"}",
+                        text = "${currentUser?.school} · ${currentUser?.college} · ${currentUser?.grade}",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.outline
                     )
@@ -2883,133 +2873,12 @@ fun SettingsScreen(onNavigate: (String) -> Unit) {
                             Toast.makeText(context, "已成功安全撤离空间！", Toast.LENGTH_SHORT).show()
                         },
                         shape = RoundedCornerShape(100),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626)),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
                         modifier = Modifier.fillMaxWidth().testTag("logout_btn")
                     ) {
-                        Icon(Icons.Filled.Logout, "logout", modifier = Modifier.size(16.dp), tint = Color.White)
+                        Icon(Icons.Filled.Logout, "logout", modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("安全退出登录/注销", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    }
-                }
-            }
-        }
-
-        // ==========================================
-        // * NEW * Feature: Campus Square Menu Terminal
-        // ==========================================
-        item {
-            Card(
-                shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "💼 校园自律广场与服务终端",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(bottom = 6.dp)
-                    )
-
-                    // 1. Edit Profile
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showEditProfile = true }
-                            .padding(vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Filled.Edit, "edit", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text("修改自律个人偏好资料", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
-                        Icon(Icons.Filled.ChevronRight, "chevron", tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(16.dp))
-                    }
-
-                    // 2. My Plaza Posts
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showMyPosts = true }
-                            .padding(vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Filled.FormatListBulleted, "posts", tint = Color(0xFF10B981), modifier = Modifier.size(20.dp))
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text("我的学术自律广场动态", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
-                        Icon(Icons.Filled.ChevronRight, "chevron", tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(16.dp))
-                    }
-
-                    // 3. My Marketplace listings
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showMyGoods = true }
-                            .padding(vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Filled.Storefront, "goods", tint = Color(0xFFF59E0B), modifier = Modifier.size(20.dp))
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text("我上架挂卖的闲置商品", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
-                        Icon(Icons.Filled.ChevronRight, "chevron", tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(16.dp))
-                    }
-
-                    // 4. Favorited goods
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showMyFavs = true }
-                            .padding(vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Filled.Favorite, "favorites", tint = Color(0xFFEC4899), modifier = Modifier.size(20.dp))
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text("我收藏的心仪校园好物", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
-                        Icon(Icons.Filled.ChevronRight, "chevron", tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(16.dp))
-                    }
-
-                    // 5. Message center
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onNavigate("messages") }
-                            .padding(vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Filled.Forum, "messages", tint = Color(0xFF3B82F6), modifier = Modifier.size(20.dp))
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text("学术圈私聊即时消息", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
-                        Icon(Icons.Filled.ChevronRight, "chevron", tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(16.dp))
-                    }
-
-                    // 6. Admin Panel Entry Point (Only shown if isUserAdmin)
-                    val isUserAdmin = currentUser?.userRole() == com.example.core.model.UserRole.ADMIN || currentUser?.userRole() == com.example.core.model.UserRole.SUPER_ADMIN
-                    if (isUserAdmin) {
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(
-                                    width = 1.dp,
-                                    brush = Brush.linearGradient(listOf(Color(0xFF8B5CF6), Color(0xFF3B82F6))),
-                                    shape = RoundedCornerShape(12.dp)
-                                )
-                                .background(Color(0xFF8B5CF6).copy(alpha = 0.08f), RoundedCornerShape(12.dp))
-                                .clickable { onNavigate("admin") }
-                                .padding(horizontal = 12.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Filled.AdminPanelSettings, "admin", tint = Color(0xFFC084FC), modifier = Modifier.size(22.dp))
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("🔒 系统核心控制管理后台", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFFE9D5FF))
-                                Text("等级权限: ${currentUser?.role?.uppercase()}", fontSize = 10.sp, color = Color(0xFFA5B4FC))
-                            }
-                            Icon(Icons.Filled.ChevronRight, "chevron", tint = Color(0xFFC084FC), modifier = Modifier.size(16.dp))
-                        }
                     }
                 }
             }
@@ -3210,415 +3079,6 @@ fun SettingsScreen(onNavigate: (String) -> Unit) {
                 }
             }
         }
-    }
-
-    // ==========================================
-    // * DIALOG PORTALS * Personal Customization Panels
-    // ==========================================
-
-    // 1. Avatar Action Picker
-    if (showAvatarOptions) {
-        val hasCustomAvatar = currentUser?.avatarToShow?.contains("unsplash") == false
-        AlertDialog(
-            onDismissRequest = { showAvatarOptions = false },
-            title = { Text("修改自学自律形象头像", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
-            text = { Text("展现独一无二的学术气场！您可以上传新照片或者查看当前清晰大图。", fontSize = 13.sp) },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showAvatarOptions = false
-                        selectPictureLauncher.launch("image/*")
-                    }
-                ) {
-                    Text("📷 上传新头像", fontSize = 12.sp)
-                }
-            },
-            dismissButton = {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = {
-                        showAvatarOptions = false
-                        showFullAvatar = true
-                    }) {
-                        Text("🔍 查看大图", fontSize = 12.sp)
-                    }
-                    if (hasCustomAvatar) {
-                        TextButton(
-                            onClick = {
-                                showAvatarOptions = false
-                                isAvatarLoading = true
-                                scope.launch {
-                                    val result = com.example.core.network.SupabaseManager.deleteAvatar(context)
-                                    isAvatarLoading = false
-                                    if (result.isSuccess) {
-                                        Toast.makeText(context, "已恢复使用系统内置头像", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        Toast.makeText(context, "恢复内置头像失败：${result.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            }
-                        ) {
-                            Text("🗑️ 恢复默认", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-        )
-    }
-
-    // 2. Full Image View Screen
-    if (showFullAvatar) {
-        androidx.compose.ui.window.Dialog(onDismissRequest = { showFullAvatar = false }) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1f)
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(Color.Black),
-                contentAlignment = Alignment.Center
-            ) {
-                AsyncImage(
-                    model = currentUser?.avatarToShow ?: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=150",
-                    contentDescription = "full_avatar",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-        }
-    }
-
-    // 3. Image Optimization Crop & Upload
-    if (showCropDialog && selectedUriForCrop != null) {
-        AlertDialog(
-            onDismissRequest = {
-                showCropDialog = false
-                selectedUriForCrop = null
-            },
-            title = { Text("确认裁剪并上传头像", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
-            text = {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    Text("系统将自动对所选照片的长宽比例进行智能优化裁剪，确认将其设为新头像吗？", fontSize = 13.sp)
-                    Spacer(modifier = Modifier.height(16.dp))
-                    AsyncImage(
-                        model = selectedUriForCrop,
-                        contentDescription = "preview",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .size(120.dp)
-                            .clip(CircleShape)
-                            .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val uri = selectedUriForCrop
-                        if (uri != null) {
-                            showCropDialog = false
-                            selectedUriForCrop = null
-                            isAvatarLoading = true
-                            scope.launch {
-                                try {
-                                    val inputStream = context.contentResolver.openInputStream(uri)
-                                    val bytes = inputStream?.readBytes()
-                                    inputStream?.close()
-                                    if (bytes != null) {
-                                        val extension = when {
-                                            uri.toString().endsWith("png", ignoreCase = true) -> "png"
-                                            uri.toString().endsWith("gif", ignoreCase = true) -> "gif"
-                                            else -> "jpg"
-                                        }
-                                        val result = com.example.core.network.SupabaseManager.uploadAndUpdateAvatarBytes(context, bytes, extension)
-                                        if (result.isSuccess) {
-                                            Toast.makeText(context, "🌟 头像更新成功！已同步至云端", Toast.LENGTH_SHORT).show()
-                                        } else {
-                                            Toast.makeText(context, "❌ 上传头像失败: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
-                                        }
-                                    } else {
-                                        Toast.makeText(context, "❌ 无法读取文件数据", Toast.LENGTH_SHORT).show()
-                                    }
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "❌ 回调错误: ${e.message}", Toast.LENGTH_LONG).show()
-                                } finally {
-                                    isAvatarLoading = false
-                                }
-                            }
-                        }
-                    }
-                ) {
-                    Text("切片并同步上传")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    showCropDialog = false
-                    selectedUriForCrop = null
-                }) {
-                    Text("放弃")
-                }
-            }
-        )
-    }
-
-    // 4. Edit user self bio fields
-    if (showEditProfile) {
-        var nickname by remember { mutableStateOf(currentUser?.nickname ?: "") }
-        var school by remember { mutableStateOf(currentUser?.school ?: "北京大学") }
-        var college by remember { mutableStateOf(currentUser?.college ?: "计算机系") }
-        var grade by remember { mutableStateOf(currentUser?.grade ?: "大师班") }
-        var bio by remember { mutableStateOf(currentUser?.bio ?: "") }
-
-        AlertDialog(
-            onDismissRequest = { showEditProfile = false },
-            title = { Text("修改考研自律偏好资料", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
-            text = {
-                androidx.compose.foundation.lazy.LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)
-                ) {
-                    item {
-                        OutlinedTextField(
-                            value = nickname,
-                            onValueChange = { nickname = it },
-                            label = { Text("我的自律名称 (Nickname)") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    item {
-                        OutlinedTextField(
-                            value = school,
-                            onValueChange = { school = it },
-                            label = { Text("所在学府 (School)") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    item {
-                        OutlinedTextField(
-                            value = college,
-                            onValueChange = { college = it },
-                            label = { Text("研究学院/系别 (College)") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    item {
-                        OutlinedTextField(
-                            value = grade,
-                            onValueChange = { grade = it },
-                            label = { Text("攻读年级/学位 (Grade)") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    item {
-                        OutlinedTextField(
-                            value = bio,
-                            onValueChange = { bio = it },
-                            label = { Text("学海自强宣言 (Bio Signature)") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        if (nickname.isBlank()) {
-                            Toast.makeText(context, "自律名称不能为空！", Toast.LENGTH_SHORT).show()
-                            return@Button
-                        }
-                        com.example.core.network.SupabaseManager.updateUserProfile(
-                            context = context,
-                            nickname = nickname,
-                            school = school,
-                            college = college,
-                            grade = grade,
-                            bio = bio
-                        )
-                        showEditProfile = false
-                        Toast.makeText(context, "🌟 更改已完美同步更新！", Toast.LENGTH_SHORT).show()
-                    }
-                ) {
-                    Text("保存偏好修改")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showEditProfile = false }) {
-                    Text("取消")
-                }
-            }
-        )
-    }
-
-    // 5. My Posts Dialog
-    if (showMyPosts) {
-        val allPosts by com.example.core.network.SupabaseManager.posts.collectAsStateWithLifecycle()
-        val myPosts = remember(allPosts, currentUser) {
-            allPosts.filter { it.authorId == currentUser?.id }
-        }
-
-        AlertDialog(
-            onDismissRequest = { showMyPosts = false },
-            title = { Text("我的自律广场动态", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
-            text = {
-                if (myPosts.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
-                        Text("您尚未发布任何广场帖！", color = MaterialTheme.colorScheme.outline, fontSize = 12.sp)
-                    }
-                } else {
-                    androidx.compose.foundation.lazy.LazyColumn(
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)
-                    ) {
-                        items(myPosts) { post ->
-                            Card(
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(modifier = Modifier.padding(10.dp)) {
-                                    Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                        Text(post.topic, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
-                                        IconButton(
-                                            onClick = {
-                                                com.example.core.network.SupabaseManager.adminDeletePost(post.id)
-                                                Toast.makeText(context, "贴文已成功撤回删除", Toast.LENGTH_SHORT).show()
-                                            },
-                                            modifier = Modifier.size(24.dp)
-                                        ) {
-                                            Icon(Icons.Default.Delete, "delete", tint = Color.Red, modifier = Modifier.size(16.dp))
-                                        }
-                                    }
-                                    Text(post.content, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showMyPosts = false }) {
-                    Text("关闭")
-                }
-            }
-        )
-    }
-
-    // 6. My Marketplace Items Dialog
-    if (showMyGoods) {
-        val allProducts by com.example.core.network.SupabaseManager.products.collectAsStateWithLifecycle()
-        val myProducts = remember(allProducts, currentUser) {
-            allProducts.filter { it.sellerId == currentUser?.id }
-        }
-
-        AlertDialog(
-            onDismissRequest = { showMyGoods = false },
-            title = { Text("我上架挂卖的闲置商品", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
-            text = {
-                if (myProducts.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
-                        Text("您还没在商城发布闲置循环物品哦！", color = MaterialTheme.colorScheme.outline, fontSize = 12.sp)
-                    }
-                } else {
-                    androidx.compose.foundation.lazy.LazyColumn(
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)
-                    ) {
-                        items(myProducts) { prod ->
-                            Card(
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    AsyncImage(
-                                        model = prod.imageUrl,
-                                        contentDescription = "prod img",
-                                        modifier = Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(prod.title, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                        Text("价格: ￥${prod.price}", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
-                                    }
-                                    IconButton(
-                                        onClick = {
-                                            com.example.core.network.SupabaseManager.adminTakeDownProduct(prod.id)
-                                            Toast.makeText(context, "闲置商品下架成功", Toast.LENGTH_SHORT).show()
-                                        }
-                                    ) {
-                                        Icon(Icons.Default.Delete, "del products", tint = Color.Red, modifier = Modifier.size(18.dp))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showMyGoods = false }) {
-                    Text("关闭")
-                }
-            }
-        )
-    }
-
-    // 7. My Favorited listings Dialog
-    if (showMyFavs) {
-        val allProducts by com.example.core.network.SupabaseManager.products.collectAsStateWithLifecycle()
-        val favorites by com.example.core.network.SupabaseManager.favorites.collectAsStateWithLifecycle()
-        val myFavProducts = remember(allProducts, favorites, currentUser) {
-            val userFavProductIds = favorites.filter { it.userId == currentUser?.id }.map { it.productId }
-            allProducts.filter { it.id in userFavProductIds }
-        }
-
-        AlertDialog(
-            onDismissRequest = { showMyFavs = false },
-            title = { Text("我收藏的校园好物", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
-            text = {
-                if (myFavProducts.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
-                        Text("您还没有收藏任何校园二手闲置！", color = MaterialTheme.colorScheme.outline, fontSize = 12.sp)
-                    }
-                } else {
-                    androidx.compose.foundation.lazy.LazyColumn(
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)
-                    ) {
-                        items(myFavProducts) { prod ->
-                            Card(
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    AsyncImage(
-                                        model = prod.imageUrl,
-                                        contentDescription = "prod img",
-                                        modifier = Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(prod.title, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                        Text("价格: ￥${prod.price}", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
-                                    }
-                                    IconButton(
-                                        onClick = {
-                                            com.example.core.network.SupabaseManager.toggleProductFavorite(prod.id)
-                                            Toast.makeText(context, "已取消收藏该商品", Toast.LENGTH_SHORT).show()
-                                        }
-                                    ) {
-                                        Icon(Icons.Default.Favorite, "fav icon", tint = Color(0xFFEC4899), modifier = Modifier.size(18.dp))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showMyFavs = false }) {
-                    Text("完成")
-                }
-            }
-        )
     }
 }
 

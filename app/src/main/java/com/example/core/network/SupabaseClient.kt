@@ -27,6 +27,8 @@ object SupabaseClient {
             "https://your-project.supabase.co"
         }
 
+    var userJwt: String = ""
+
     val supabaseAnonKey: String
         get() = try {
             BuildConfig.SUPABASE_ANON_KEY
@@ -101,39 +103,6 @@ object SupabaseClient {
     // ==========================================
     // 2. Supabase Storage REST (Avatar Upload)
     // ==========================================
-    suspend fun uploadAvatarBytes(fileBytes: ByteArray, userId: String, formatExtension: String): Result<String> = withContext(Dispatchers.IO) {
-        if (!isConfigured()) {
-            Log.d("SupabaseStorage", "Supabase credentials are NOT set! Returning fallback avatar.")
-            return@withContext Result.success("https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=200")
-        }
-
-        val fileName = "$userId/avatar.$formatExtension"
-        val url = "$supabaseUrl/storage/v1/object/avatars/$fileName"
-        
-        try {
-            val mediaType = "image/$formatExtension".toMediaType()
-            val request = Request.Builder()
-                .url(url)
-                .addHeader("apikey", supabaseAnonKey)
-                .addHeader("Authorization", "Bearer $supabaseAnonKey")
-                .addHeader("Content-Type", "image/$formatExtension")
-                .addHeader("x-upsert", "true")
-                .post(fileBytes.toRequestBody(OCTET_MEDIA_TYPE))
-                .build()
-
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    val publicUrl = "$supabaseUrl/storage/v1/object/public/avatars/$fileName?t=${System.currentTimeMillis()}"
-                    Result.success(publicUrl)
-                } else {
-                    Result.failure(Exception("Storage Upload error: ${response.code} ${response.message}"))
-                }
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
     suspend fun uploadAvatar(filePath: String, userId: String): Result<String> = withContext(Dispatchers.IO) {
         val file = File(filePath)
         if (!file.exists()) {
@@ -146,17 +115,21 @@ object SupabaseClient {
             return@withContext Result.success("https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=200")
         }
 
-        val fileName = "${userId}_avatar_${System.currentTimeMillis()}.png"
+        val fileName = "$userId/avatar.jpg"
         val url = "$supabaseUrl/storage/v1/object/avatars/$fileName"
         
         try {
+            Log.d("StorageUpload", "bucket=avatars path=$fileName")
+            Log.d("StorageUpload", "jwtExists=${userJwt.isNotBlank()}")
+
             val fileBytes = file.readBytes()
+            val mediaType = "image/jpeg".toMediaType()
             val request = Request.Builder()
                 .url(url)
                 .addHeader("apikey", supabaseAnonKey)
-                .addHeader("Authorization", "Bearer $supabaseAnonKey")
-                .addHeader("Content-Type", "image/png")
-                .post(fileBytes.toRequestBody(OCTET_MEDIA_TYPE))
+                .addHeader("Authorization", "Bearer $userJwt")
+                .addHeader("Content-Type", "image/jpeg")
+                .post(fileBytes.toRequestBody(mediaType))
                 .build()
 
             client.newCall(request).execute().use { response ->
@@ -164,7 +137,9 @@ object SupabaseClient {
                     val publicUrl = "$supabaseUrl/storage/v1/object/public/avatars/$fileName"
                     Result.success(publicUrl)
                 } else {
-                    Result.failure(Exception("Storage Upload error: ${response.code} ${response.message}"))
+                    val errorBody = response.body?.string() ?: ""
+                    Log.e("SupabaseStorage", "Storage Upload Error Details: $errorBody, response.code = ${response.code}")
+                    Result.failure(Exception("Storage Upload error: ${response.code} $errorBody"))
                 }
             }
         } catch (e: Exception) {

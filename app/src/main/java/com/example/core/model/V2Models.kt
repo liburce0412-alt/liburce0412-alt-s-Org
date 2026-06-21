@@ -20,7 +20,7 @@ enum class UserRole {
 data class SupabaseUser(
     val id: String,
     val nickname: String,
-    val avatar: String, // Keep for fallback compatibility
+    val avatar: String,
     val email: String,
     val school: String,
     val college: String,
@@ -28,14 +28,9 @@ data class SupabaseUser(
     val bio: String = "",
     val createdAt: Long = System.currentTimeMillis(),
     val role: String = "user",
-    val isBlocked: Boolean = false,
-    val avatar_url: String? = null,
-    val avatar_updated_at: Long? = null
+    val isBlocked: Boolean = false
 ) : Serializable {
     fun userRole() = UserRole.fromString(role)
-
-    val avatarToShow: String
-        get() = if (!avatar_url.isNullOrBlank()) avatar_url else if (avatar.isNotBlank()) avatar else "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=200"
 }
 
 data class SupabasePost(
