@@ -17,6 +17,7 @@ if (System.getProperty("os.name").startsWith("Windows") && projectDir.absolutePa
 android {
   namespace = "com.campusai"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
+  ndkVersion = "28.2.13676358"
 
   defaultConfig {
     applicationId = "com.aistudio.campusai.ywtpzx"
@@ -26,6 +27,13 @@ android {
     versionName = System.getenv("VERSION_NAME") ?: "1.0.0-dev"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    ndk { abiFilters += "arm64-v8a" }
+    externalNativeBuild {
+      cmake {
+        cppFlags += listOf("-std=c++17")
+        arguments += listOf("-DANDROID_STL=c++_shared")
+      }
+    }
   }
 
   signingConfigs {
@@ -58,10 +66,18 @@ android {
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
+    isCoreLibraryDesugaringEnabled = true
   }
   buildFeatures {
     compose = true
     buildConfig = true
+  }
+  sourceSets.getByName("androidTest").assets.directories.add("$projectDir/schemas")
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
+    }
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
 }
@@ -103,6 +119,8 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.mlkit.text.recognition.chinese)
   implementation(libs.okhttp)
+  implementation(libs.androidx.work.runtime.ktx)
+  coreLibraryDesugaring(libs.desugar.jdk.libs)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
@@ -117,6 +135,7 @@ dependencies {
   androidTestImplementation(libs.androidx.espresso.core)
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.runner)
+  androidTestImplementation(libs.androidx.room.testing)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)

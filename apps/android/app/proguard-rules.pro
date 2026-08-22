@@ -19,3 +19,7 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# JNI entry points and callback names used by the pinned MNN 3.6.1 bridge.
+-keep class com.campusai.core.localai.MnnNativeBridge { *; }
+-keep class com.campusai.core.localai.MnnTokenListener { *; }

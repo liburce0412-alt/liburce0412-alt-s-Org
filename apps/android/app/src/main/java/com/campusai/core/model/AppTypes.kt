@@ -5,6 +5,23 @@ enum class MotionMode { ON, OFF }
 enum class RenderQuality { AUTO, LOW, HIGH }
 enum class SpectraEnvironment { ORIGINAL, OCEAN, ULTRAVIOLET, EMBER }
 enum class AiMode { FAST, DEEP }
+enum class AiProvider { AUTO, DEEPSEEK, LOCAL }
+
+sealed interface LocalModelState {
+    data object NotDownloaded : LocalModelState
+    data object Checking : LocalModelState
+    data class Downloading(
+        val progress: Float,
+        val downloadedBytes: Long,
+        val totalBytes: Long,
+    ) : LocalModelState
+    data class Paused(val downloadedBytes: Long, val totalBytes: Long) : LocalModelState
+    data object Verifying : LocalModelState
+    data object Ready : LocalModelState
+    data object Loading : LocalModelState
+    data class Error(val code: String, val recoverable: Boolean, val message: String) : LocalModelState
+    data class Incompatible(val reason: String) : LocalModelState
+}
 
 sealed interface UiState<out T> {
     data object Loading : UiState<Nothing>

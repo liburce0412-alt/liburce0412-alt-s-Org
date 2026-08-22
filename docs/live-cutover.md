@@ -12,7 +12,7 @@
 4. 已建立本地 reconciliation：旧表整体隔离到不可公开访问的 `legacy` schema，再执行 `products → listings`、`user → student`、旧帖子收藏、关系与媒体路径的增量导入；现有 Auth 用户会补建 profile。
 5. 为差异新增一份版本化 reconciliation migration；禁止在 Dashboard 临时改表后不回写 migration。
 6. 在隔离环境从备份恢复，运行 `supabase db reset` / lint，并逐表核对数量、孤儿外键与 Storage 对象。
-7. 验证普通用户、版主、管理员三类 RLS；验证订单状态、点赞/收藏、撤销和审计 RPC 的并发行为。
+7. 验证普通用户、版主、管理员三类 RLS；验证订单状态、点赞/收藏、消息幂等、时间/课程版本冲突、撤销和审计 RPC 的并发行为。
 8. 在维护窗口执行手动 `Deploy Supabase (backup gated)` workflow，输入真实备份 ID 和确认短语。
 9. 部署后运行只读核对，再开放 Android/Web 客户端。
 

@@ -27,3 +27,10 @@ apps/admin/test-results/
 apps/admin/playwright-report/
 .supabase/
 supabase/.temp/
+
+# Local AI model data is downloaded into noBackupFilesDir at runtime and must
+# never be checked into source control. The small, reviewed manifest remains tracked.
+*.mnn
+*.mnn.weight
+*.part
+**/models/

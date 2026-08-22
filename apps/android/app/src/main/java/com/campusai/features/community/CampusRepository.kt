@@ -3,6 +3,9 @@ package com.campusai.features.community
 import com.campusai.core.network.SupabaseClient
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
+
+data class UploadImage(val bytes: ByteArray, val contentType: String)
 
 data class CommunityPost(
     val id: String,
@@ -14,6 +17,16 @@ data class CommunityPost(
     val anonymous: Boolean,
     val likes: Int,
     val comments: Int,
+    val createdAt: String,
+)
+
+data class CommunityComment(
+    val id: String,
+    val postId: String,
+    val authorId: String,
+    val author: String,
+    val body: String,
+    val moderationStatus: String,
     val createdAt: String,
 )
 
@@ -30,6 +43,48 @@ data class MarketplaceListing(
     val createdAt: String,
 )
 
+data class ConversationSummary(
+    val id: String,
+    val listingId: String,
+    val listingTitle: String,
+    val otherUserId: String,
+    val otherName: String,
+    val lastMessage: String,
+    val lastMessageAt: String,
+    val unreadCount: Int,
+)
+
+data class CampusMessage(
+    val id: String,
+    val conversationId: String,
+    val senderId: String,
+    val body: String,
+    val createdAt: String,
+)
+
+data class MarketplaceOrder(
+    val id: String,
+    val listingId: String,
+    val listingTitle: String,
+    val listingMediaUrl: String,
+    val buyerId: String,
+    val buyerName: String,
+    val sellerId: String,
+    val sellerName: String,
+    val priceCents: Int,
+    val status: String,
+    val version: Int,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
+fun allowedOrderTransitions(status: String, isBuyer: Boolean): List<String> = when (status) {
+    "pending_payment" -> if (isBuyer) listOf("paid", "cancelled") else listOf("cancelled")
+    "paid" -> if (isBuyer) listOf("disputed") else listOf("meeting", "disputed")
+    "meeting" -> if (isBuyer) listOf("completed", "disputed") else listOf("disputed")
+    else -> emptyList()
+}
+
 class CampusRepository {
     suspend fun loadPosts(): Result<List<CommunityPost>> = SupabaseClient.restGet(
         table = "posts",
@@ -41,15 +96,20 @@ class CampusRepository {
         ),
     ).map { rows -> List(rows.length()) { index -> parsePost(rows.getJSONObject(index)) } }
 
-    suspend fun publishPost(userId: String, body: String, topic: String, anonymous: Boolean): Result<CommunityPost> =
-        SupabaseClient.restInsert(
+    suspend fun publishPost(userId: String, body: String, topic: String, anonymous: Boolean, image: UploadImage?): Result<CommunityPost> {
+        val mediaPath = image?.let { uploadPublicImage("post-media", userId, it).getOrElse { error -> return Result.failure(error) } }
+        val result = SupabaseClient.restInsert(
             "posts",
             JSONObject()
                 .put("author_id", userId)
                 .put("body", body.trim())
                 .put("topic", topic.trim().ifBlank { JSONObject.NULL })
-                .put("is_anonymous", anonymous),
+                .put("is_anonymous", anonymous)
+                .put("media_paths", if (mediaPath == null) JSONArray() else JSONArray().put(mediaPath)),
         ).map(::parsePost)
+        if (result.isFailure && mediaPath != null) SupabaseClient.deleteObject("post-media", mediaPath)
+        return result
+    }
 
     suspend fun togglePostLike(postId: String): Result<Pair<Boolean, Int>> = SupabaseClient.rpc(
         "toggle_post_like",
@@ -60,6 +120,41 @@ class CampusRepository {
         "toggle_post_bookmark",
         JSONObject().put("target_post", postId),
     ).map { it.optString("value").toBooleanStrictOrNull() ?: false }
+
+    suspend fun loadComments(postId: String): Result<List<CommunityComment>> = friendly(
+        SupabaseClient.restGet(
+            table = "comments",
+            parameters = mapOf(
+                "select" to "id,post_id,author_id,body,moderation_status,created_at,author:profiles!comments_author_id_fkey(display_name)",
+                "post_id" to "eq.$postId",
+                "deleted_at" to "is.null",
+                "order" to "created_at.asc",
+                "limit" to "200",
+            ),
+        ).map { rows -> List(rows.length()) { index -> parseComment(rows.getJSONObject(index)) } },
+    )
+
+    suspend fun publishComment(postId: String, body: String): Result<CommunityComment> = friendly(
+        SupabaseClient.rpc(
+            "create_comment",
+            JSONObject()
+                .put("target_post", postId)
+                .put("comment_body", body.trim())
+                .put("parent_comment", JSONObject.NULL),
+        ).map(::parseComment),
+    )
+
+    suspend fun submitReport(userId: String, targetType: String, targetId: String, reason: String, details: String): Result<Unit> = friendly(
+        SupabaseClient.restInsert(
+            "reports",
+            JSONObject()
+                .put("reporter_id", userId)
+                .put("target_type", targetType)
+                .put("target_id", targetId)
+                .put("reason", reason.trim())
+                .put("details", details.trim()),
+        ).map { Unit },
+    )
 
     suspend fun loadListings(): Result<List<MarketplaceListing>> = SupabaseClient.restGet(
         table = "listings",
@@ -76,7 +171,10 @@ class CampusRepository {
         description: String,
         priceCents: Int,
         location: String,
-    ): Result<MarketplaceListing> = SupabaseClient.restInsert(
+        image: UploadImage?,
+    ): Result<MarketplaceListing> {
+        val mediaPath = image?.let { uploadPublicImage("listing-media", userId, it).getOrElse { error -> return Result.failure(error) } }
+        val result = SupabaseClient.restInsert(
         "listings",
         JSONObject()
             .put("seller_id", userId)
@@ -86,13 +184,97 @@ class CampusRepository {
             .put("category", "其他")
             .put("condition", "良好")
             .put("location", location.trim())
-            .put("status", "active"),
+            .put("media_paths", if (mediaPath == null) JSONArray() else JSONArray().put(mediaPath)),
     ).map(::parseListing)
+        if (result.isFailure && mediaPath != null) SupabaseClient.deleteObject("listing-media", mediaPath)
+        return result
+    }
 
     suspend fun toggleFavorite(listingId: String): Result<Boolean> = SupabaseClient.rpc(
         "toggle_favorite",
         JSONObject().put("target_listing", listingId),
     ).map { it.optString("value").toBooleanStrictOrNull() ?: false }
+
+    suspend fun openConversation(otherUserId: String, listingId: String?): Result<String> = friendly(
+        SupabaseClient.rpc(
+            "open_conversation",
+            JSONObject()
+                .put("other_user", otherUserId)
+                .put("related_listing", listingId ?: JSONObject.NULL),
+        ).mapCatching { response ->
+            response.optString("value").ifBlank { response.optString("open_conversation") }
+                .ifBlank { error("消息会话没有成功创建。") }
+        },
+    )
+
+    suspend fun loadConversations(): Result<List<ConversationSummary>> = friendly(
+        SupabaseClient.rpcArray("list_conversation_summaries").map { rows ->
+            List(rows.length()) { index ->
+                rows.getJSONObject(index).let { item ->
+                    ConversationSummary(
+                        id = item.optString("id"),
+                        listingId = item.optString("listing_id"),
+                        listingTitle = item.optString("listing_title"),
+                        otherUserId = item.optString("other_user_id"),
+                        otherName = item.optString("other_name").ifBlank { "CampusAI 用户" },
+                        lastMessage = item.optString("last_message"),
+                        lastMessageAt = item.optString("last_message_at"),
+                        unreadCount = item.optInt("unread_count"),
+                    )
+                }
+            }
+        },
+    )
+
+    suspend fun loadMessages(conversationId: String): Result<List<CampusMessage>> = friendly(
+        SupabaseClient.restGet(
+            table = "messages",
+            parameters = mapOf(
+                "select" to "id,conversation_id,sender_id,body,created_at",
+                "conversation_id" to "eq.$conversationId",
+                "deleted_at" to "is.null",
+                "order" to "created_at.asc",
+                "limit" to "200",
+            ),
+        ).map { rows -> List(rows.length()) { index -> parseMessage(rows.getJSONObject(index)) } },
+    )
+
+    suspend fun sendMessage(conversationId: String, body: String): Result<CampusMessage> = friendly(
+        SupabaseClient.rpc(
+            "send_message",
+            JSONObject()
+                .put("target_conversation", conversationId)
+                .put("client_message", UUID.randomUUID().toString())
+                .put("message_body", body.trim()),
+        ).map(::parseMessage),
+    )
+
+    suspend fun markConversationRead(conversationId: String): Result<Unit> = friendly(
+        SupabaseClient.rpc("mark_conversation_read", JSONObject().put("target_conversation", conversationId)).map { Unit },
+    )
+
+    suspend fun loadOrders(): Result<List<MarketplaceOrder>> = friendly(
+        SupabaseClient.rpcArray("list_my_orders").map { rows ->
+            List(rows.length()) { index -> parseOrder(rows.getJSONObject(index)) }
+        },
+    )
+
+    suspend fun createOrder(listingId: String): Result<String> = friendly(
+        SupabaseClient.rpc("create_order", JSONObject().put("target_listing", listingId)).mapCatching { response ->
+            response.optString("value").ifBlank { response.optString("create_order") }
+                .ifBlank { error("订单没有成功创建。") }
+        },
+    )
+
+    suspend fun transitionOrder(orderId: String, version: Int, nextStatus: String): Result<MarketplaceOrder> = friendly(
+        SupabaseClient.rpc(
+            "transition_order",
+            JSONObject()
+                .put("target_order", orderId)
+                .put("expected_version", version)
+                .put("next_status", nextStatus),
+        ).map(::parseOrder),
+    )
 
     private fun parsePost(item: JSONObject): CommunityPost {
         val media = item.optJSONArray("media_paths") ?: JSONArray()
@@ -112,6 +294,16 @@ class CampusRepository {
         )
     }
 
+    private fun parseComment(item: JSONObject) = CommunityComment(
+        id = item.optString("id"),
+        postId = item.optString("post_id"),
+        authorId = item.optString("author_id"),
+        author = item.optJSONObject("author")?.optString("display_name").orEmpty().ifBlank { "CampusAI 用户" },
+        body = item.optString("body"),
+        moderationStatus = item.optString("moderation_status"),
+        createdAt = item.optString("created_at"),
+    )
+
     private fun parseListing(item: JSONObject): MarketplaceListing {
         val media = item.optJSONArray("media_paths") ?: JSONArray()
         return MarketplaceListing(
@@ -126,5 +318,62 @@ class CampusRepository {
             status = item.optString("status"),
             createdAt = item.optString("created_at"),
         )
+    }
+
+    private fun parseMessage(item: JSONObject) = CampusMessage(
+        id = item.optString("id"),
+        conversationId = item.optString("conversation_id"),
+        senderId = item.optString("sender_id"),
+        body = item.optString("body"),
+        createdAt = item.optString("created_at"),
+    )
+
+    private fun parseOrder(item: JSONObject): MarketplaceOrder {
+        val media = item.optJSONArray("listing_media_paths") ?: JSONArray()
+        return MarketplaceOrder(
+            id = item.optString("id"),
+            listingId = item.optString("listing_id"),
+            listingTitle = item.optString("listing_title").ifBlank { "校园交易" },
+            listingMediaUrl = media.optString(0).takeIf { it.isNotBlank() }?.let { SupabaseClient.publicMediaUrl("listing-media", it) }.orEmpty(),
+            buyerId = item.optString("buyer_id"),
+            buyerName = item.optString("buyer_name").ifBlank { "买家" },
+            sellerId = item.optString("seller_id"),
+            sellerName = item.optString("seller_name").ifBlank { "卖家" },
+            priceCents = item.optInt("price_cents"),
+            status = item.optString("status"),
+            version = item.optInt("version", 1),
+            createdAt = item.optString("created_at"),
+            updatedAt = item.optString("updated_at"),
+        )
+    }
+
+    private fun <T> friendly(result: Result<T>): Result<T> = result.fold(
+        onSuccess = { Result.success(it) },
+        onFailure = { error -> Result.failure(IllegalStateException(remoteErrorMessage(error.message), error)) },
+    )
+
+    private fun remoteErrorMessage(raw: String?): String = when {
+        raw.isNullOrBlank() -> "服务没有返回可用信息，请稍后重试。"
+        "cannot_buy_own_listing" in raw -> "不能购买自己发布的商品。"
+        "listing_unavailable" in raw || "listing_not_available" in raw -> "商品已被预订、下架或仍在审核，请刷新后重试。"
+        "order_conflict" in raw -> "订单刚刚发生了变化，请刷新后再操作。"
+        "invalid_order_transition" in raw -> "当前订单阶段不能执行这个操作。"
+        "conversation_not_available" in raw || "forbidden" in raw -> "你已无法访问这段会话。"
+        "message_body_invalid" in raw -> "消息需为 1–4000 个字符。"
+        "comment_body_invalid" in raw -> "评论需为 1–2000 个字符。"
+        "post_not_available" in raw -> "帖子已被移除或仍在审核，请刷新后重试。"
+        else -> raw
+    }
+
+    private suspend fun uploadPublicImage(bucket: String, userId: String, image: UploadImage): Result<String> {
+        if (image.bytes.size > 15 * 1024 * 1024) return Result.failure(IllegalArgumentException("图片不能超过 15MB。"))
+        val extension = when (image.contentType.lowercase()) {
+            "image/jpeg" -> "jpg"
+            "image/png" -> "png"
+            "image/webp" -> "webp"
+            else -> return Result.failure(IllegalArgumentException("只支持 JPEG、PNG 或 WebP 图片。"))
+        }
+        val path = "$userId/${UUID.randomUUID()}.$extension"
+        return SupabaseClient.uploadObject(bucket, path, image.bytes, image.contentType).map { path }
     }
 }

@@ -18,8 +18,12 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: gradle
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "ndk;28.2.13676358" "cmake;3.22.1"
       - uses: gradle/actions/setup-gradle@v6
-      - run: ./gradlew :apps:android:app:testDebugUnitTest :apps:android:app:assembleDebug --stacktrace
+      - run: ./gradlew :apps:android:app:testDebugUnitTest :apps:android:app:assembleDebug :apps:android:app:lintDebug --stacktrace
+      - shell: pwsh
+        run: ./scripts/verify-local-ai-package.ps1
       - uses: actions/upload-artifact@v6
         with:
           name: campusai-debug-apk
@@ -45,7 +49,7 @@ jobs:
         if: always()
         with:
           name: admin-visual-evidence
-          path: design/visual-tests
+          path: apps/admin/test-results
 
   supabase:
     runs-on: ubuntu-latest
@@ -57,7 +61,8 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
-      - run: deno check supabase/functions/ai-chat/index.ts
+      - run: deno check supabase/functions/ai-chat/index.ts supabase/functions/ai-chat/protocol_test.ts
+      - run: deno test supabase/functions/ai-chat/protocol_test.ts
       - run: npx supabase@2.115.0 start -x studio,imgproxy,logflare,vector
       - run: npx supabase@2.115.0 db reset --local
       - run: npx supabase@2.115.0 db lint --local --level warning

@@ -15,6 +15,6 @@
 - 线上 Supabase 数据接入后的加载、空、错误、离线、权限不足和部分失败状态。
 - 原正式签名证书覆盖安装验证。
 
-Web 截图由 `npm run test:visual` 生成；Android 图片来自已安装 debug APK 的真实模拟器画面。
+Web 普通回归通过 `npm run test:visual` 将截图保存为每次运行独立的 Playwright 工件，避免覆盖已被预览程序占用的版本化基准。确认需要更新基准时，在 PowerShell 中执行 `$env:UPDATE_VISUAL_BASELINES='1'; npm run test:visual`。Android 图片来自已安装 debug APK 的真实模拟器画面。
 
 Android 当前证据：`android-home-live.png`、`android-time-live.png`、`android-import-live.png`、`android-course-preview-live.png`、`android-login-live.png`。

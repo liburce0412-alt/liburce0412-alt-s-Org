@@ -1,10 +1,11 @@
+import { modelForMode, thinkingForMode, type Mode } from './protocol.ts'
+
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
-type Mode = 'fast' | 'deep'
 type ChatMessage = { role: 'user' | 'assistant'; content: string }
 type RequestBody = {
   mode: Mode
@@ -59,7 +60,7 @@ Deno.serve(async (request) => {
     return jsonError(503, 'quota_check_failed', '暂时无法确认可用额度，请稍后重试。')
   }
 
-  const model = body.mode === 'fast' ? 'deepseek-v4-flash' : 'deepseek-v4-pro'
+  const model = modelForMode(body.mode)
   const contextMessage = body.context ? { role:'system' as const, content:`CampusAI 用户上下文（仅用于本次回答）：${JSON.stringify(body.context)}` } : null
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), body.mode === 'deep' ? 120_000 : 45_000)
@@ -70,7 +71,7 @@ Deno.serve(async (request) => {
       headers:{Authorization:`Bearer ${deepseekKey}`,'Content-Type':'application/json'},
       body:JSON.stringify({
         model, stream:true, stream_options:{include_usage:true}, temperature:body.mode === 'fast' ? .45 : .3,
-        thinking:{type:body.mode === 'deep' ? 'enabled' : 'disabled'},
+        thinking:thinkingForMode(body.mode),
         messages:[...(contextMessage?[contextMessage]:[]),...body.messages],
       }),
     })

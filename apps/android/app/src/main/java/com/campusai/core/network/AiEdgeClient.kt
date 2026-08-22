@@ -1,5 +1,7 @@
 package com.campusai.core.network
 
+import com.campusai.core.ai.AiEvent
+import com.campusai.core.model.AiProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -7,24 +9,19 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Call
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
-
-sealed interface AiStreamEvent {
-    data class Meta(val model: String) : AiStreamEvent
-    data class Status(val stage: String, val elapsedMs: Long) : AiStreamEvent
-    data class Delta(val text: String) : AiStreamEvent
-    data class Done(val elapsedMs: Long) : AiStreamEvent
-    data class Error(val code: String, val message: String) : AiStreamEvent
-}
+import java.util.concurrent.atomic.AtomicReference
 
 class AiEdgeClient {
     private val client = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(130, TimeUnit.SECONDS).build()
+    private val activeCall = AtomicReference<Call?>(null)
 
-    suspend fun stream(mode: String, messages: List<Pair<String,String>>, context: JSONObject, onEvent: (AiStreamEvent) -> Unit) = withContext(Dispatchers.IO) {
+    suspend fun stream(mode: String, messages: List<Pair<String,String>>, context: JSONObject, onEvent: suspend (AiEvent) -> Unit) = withContext(Dispatchers.IO) {
         if (!SupabaseClient.isConfigured()) error("Supabase 尚未配置，AI 请求不会在客户端降级到不安全的直连模式。")
         if (SupabaseClient.userJwt.isBlank()) error("请先登录，再使用 AI 洞察。")
         val payload = JSONObject().apply {
@@ -40,35 +37,52 @@ class AiEdgeClient {
             .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
         val call = client.newCall(request)
+        activeCall.set(call)
         currentCoroutineContext().job.invokeOnCompletion { cause -> if (cause != null) call.cancel() }
-        call.execute().use { response ->
-            if (!response.isSuccessful) {
-                val raw = response.body?.string().orEmpty()
-                val message = runCatching { JSONObject(raw).getJSONObject("error").getString("message") }.getOrElse { "AI 请求失败（${response.code}），请稍后重试。" }
-                error(message)
-            }
-            val source = response.body?.source() ?: error("AI 没有返回数据流。")
-            var eventName = ""
-            while (!source.exhausted()) {
-                currentCoroutineContext().ensureActive()
-                val line = source.readUtf8Line() ?: break
-                when {
-                    line.startsWith("event:") -> eventName = line.substringAfter(':').trim()
-                    line.startsWith("data:") -> parseEvent(eventName, line.substringAfter(':').trim())?.let(onEvent)
-                    line.isBlank() -> eventName = ""
+        try {
+            call.execute().use { response ->
+                if (!response.isSuccessful) {
+                    val raw = response.body?.string().orEmpty()
+                    val message = runCatching { JSONObject(raw).getJSONObject("error").getString("message") }.getOrElse { "AI 请求失败（${response.code}），请稍后重试。" }
+                    error(message)
+                }
+                val source = response.body?.source() ?: error("AI 没有返回数据流。")
+                var eventName = ""
+                while (!source.exhausted()) {
+                    currentCoroutineContext().ensureActive()
+                    val line = source.readUtf8Line() ?: break
+                    when {
+                        line.startsWith("event:") -> eventName = line.substringAfter(':').trim()
+                        line.startsWith("data:") -> AiSseParser.parse(eventName, line.substringAfter(':').trim())?.let { onEvent(it) }
+                        line.isBlank() -> eventName = ""
+                    }
                 }
             }
+        } finally {
+            activeCall.compareAndSet(call, null)
         }
     }
 
-    private fun parseEvent(name: String, raw: String): AiStreamEvent? = runCatching {
+    fun cancel() {
+        activeCall.getAndSet(null)?.cancel()
+    }
+}
+
+object AiSseParser {
+    fun parse(name: String, raw: String): AiEvent? = runCatching {
         val json = JSONObject(raw)
         when (name) {
-            "meta" -> AiStreamEvent.Meta(json.optString("model"))
-            "status" -> AiStreamEvent.Status(json.optString("stage"), json.optLong("elapsedMs"))
-            "delta" -> AiStreamEvent.Delta(json.optString("text"))
-            "done" -> AiStreamEvent.Done(json.optLong("elapsedMs"))
-            "error" -> AiStreamEvent.Error(json.optString("code"), json.optString("message"))
+            "meta" -> AiEvent.Meta(json.optString("model"), AiProvider.DEEPSEEK)
+            "status" -> AiEvent.Status(json.optString("stage"), json.optLong("elapsedMs"))
+            "delta" -> AiEvent.Delta(json.optString("text"))
+            "done" -> json.optJSONObject("usage").let { usage ->
+                AiEvent.Done(
+                    elapsedMs = json.optLong("elapsedMs"),
+                    inputTokens = usage?.optLong("inputTokens"),
+                    outputTokens = usage?.optLong("outputTokens"),
+                )
+            }
+            "error" -> AiEvent.Error(json.optString("code"), json.optString("message"))
             else -> null
         }
     }.getOrNull()

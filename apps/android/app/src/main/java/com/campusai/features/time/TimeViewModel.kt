@@ -1,5 +1,6 @@
 package com.campusai.features.time
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -13,14 +14,20 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.Calendar
+import com.campusai.core.sync.CampusSyncScheduler
 
-class TimeViewModel(private val dao: CampusDao) : ViewModel() {
+@OptIn(ExperimentalCoroutinesApi::class)
+class TimeViewModel(private val dao: CampusDao, private val appContext: Context, initialUserId: String?) : ViewModel() {
+
+    private val activeUser = MutableStateFlow(initialUserId?.takeIf { it.isNotBlank() } ?: "local_user")
 
     // Reactive complete record list mapped to domain layer
-    val timeRecords: StateFlow<List<TimeRecord>> = dao.getAllTimeRecordsFlow()
+    val timeRecords: StateFlow<List<TimeRecord>> = activeUser.flatMapLatest { userId -> dao.getAllTimeRecordsFlow(userId, userId != "local_user") }
         .map { list -> list.map { it.toDomain() } }
         .stateIn(
             scope = viewModelScope,
@@ -28,12 +35,16 @@ class TimeViewModel(private val dao: CampusDao) : ViewModel() {
             initialValue = emptyList()
         )
 
-    val courses: StateFlow<List<CourseSchedule>> = dao.getCourseSchedulesFlow()
+    val courses: StateFlow<List<CourseSchedule>> = activeUser.flatMapLatest { userId -> dao.getCourseSchedulesFlow(userId, userId != "local_user") }
         .map { list -> list.map { it.toDomain() } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _isInserting = MutableStateFlow(false)
     val isInserting: StateFlow<Boolean> = _isInserting.asStateFlow()
+
+    fun setActiveUser(userId: String?) {
+        activeUser.value = userId?.takeIf { it.isNotBlank() } ?: "local_user"
+    }
 
     // Add record
     fun addTimeRecord(
@@ -56,9 +67,11 @@ class TimeViewModel(private val dao: CampusDao) : ViewModel() {
                 startTime = startTime,
                 endTime = endTime,
                 durationMinutes = durationMin,
-                remark = remark
+                remark = remark,
+                userId = activeUser.value,
             )
             dao.insertTimeRecord(TimeRecordEntity.fromDomain(record))
+            CampusSyncScheduler.enqueue(appContext)
             _isInserting.value = false
         }
     }
@@ -66,14 +79,33 @@ class TimeViewModel(private val dao: CampusDao) : ViewModel() {
     // Delete record
     fun deleteTimeRecord(id: Int) {
         viewModelScope.launch {
-            dao.deleteTimeRecordById(id)
+            dao.softDeleteTimeRecord(id)
+        }
+    }
+
+    fun confirmDeleteTimeRecord() = CampusSyncScheduler.enqueue(appContext)
+
+    fun undoDeleteTimeRecord(id: Int) {
+        viewModelScope.launch {
+            dao.undoDeleteTimeRecord(id)
+            CampusSyncScheduler.enqueue(appContext)
+        }
+    }
+
+    fun editTimeRecord(id: Int, title: String, category: String, startTime: Long, endTime: Long, remark: String) {
+        viewModelScope.launch {
+            val duration = ((endTime - startTime) / 60_000L).coerceAtLeast(0)
+            dao.editTimeRecord(id, title, category, startTime, endTime, duration, remark)
+            CampusSyncScheduler.enqueue(appContext)
         }
     }
 
     fun importCourses(courses: List<CourseSchedule>, onComplete: (inserted: Int, duplicates: Int) -> Unit) {
         viewModelScope.launch {
-            val results = dao.insertCourseSchedules(courses.map(CourseScheduleEntity::fromDomain))
+            val owner = activeUser.value
+            val results = dao.insertCourseSchedules(courses.map { CourseScheduleEntity.fromDomain(it, owner) })
             val inserted = results.count { it != -1L }
+            if (inserted > 0) CampusSyncScheduler.enqueue(appContext)
             onComplete(inserted, results.size - inserted)
         }
     }
@@ -171,11 +203,11 @@ class TimeViewModel(private val dao: CampusDao) : ViewModel() {
     }
 }
 
-class TimeViewModelFactory(private val dao: CampusDao) : ViewModelProvider.Factory {
+class TimeViewModelFactory(private val dao: CampusDao, private val appContext: Context, private val initialUserId: String?) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(TimeViewModel::class.java)) {
-            return TimeViewModel(dao) as T
+            return TimeViewModel(dao, appContext.applicationContext, initialUserId) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }

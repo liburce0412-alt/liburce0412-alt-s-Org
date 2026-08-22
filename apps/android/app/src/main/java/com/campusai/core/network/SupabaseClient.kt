@@ -66,13 +66,47 @@ object SupabaseClient {
                 .url("$supabaseUrl/rest/v1/rpc/$name")
                 .post(payload.toString().toRequestBody(jsonMediaType))
                 .build()
-        }.mapCatching { raw -> if (raw.trimStart().startsWith('{')) JSONObject(raw) else JSONObject().put("value", raw.trim().trim('"')) }
+        }.mapCatching { raw ->
+            when {
+                raw.trimStart().startsWith('{') -> JSONObject(raw)
+                raw.trimStart().startsWith('[') -> JSONArray(raw).optJSONObject(0) ?: JSONObject()
+                else -> JSONObject().put("value", raw.trim().trim('"'))
+            }
+        }
+    }
+
+    suspend fun rpcArray(name: String, payload: JSONObject = JSONObject()): Result<JSONArray> = withContext(Dispatchers.IO) {
+        authenticatedRequest {
+            Request.Builder()
+                .url("$supabaseUrl/rest/v1/rpc/$name")
+                .post(payload.toString().toRequestBody(jsonMediaType))
+                .build()
+        }.mapCatching { raw -> JSONArray(raw) }
     }
 
     fun publicMediaUrl(bucket: String, path: String): String {
         if (!isConfigured() || path.isBlank()) return ""
         val encodedPath = path.split('/').joinToString("/") { URLEncoder.encode(it, Charsets.UTF_8.name()).replace("+", "%20") }
         return "$supabaseUrl/storage/v1/object/public/$bucket/$encodedPath"
+    }
+
+    suspend fun uploadObject(bucket: String, path: String, bytes: ByteArray, contentType: String): Result<Unit> = withContext(Dispatchers.IO) {
+        if (bytes.isEmpty()) return@withContext Result.failure(IllegalArgumentException("图片内容为空。"))
+        authenticatedRequest {
+            val encodedPath = path.split('/').joinToString("/") { URLEncoder.encode(it, Charsets.UTF_8.name()).replace("+", "%20") }
+            Request.Builder()
+                .url("$supabaseUrl/storage/v1/object/$bucket/$encodedPath")
+                .header("x-upsert", "false")
+                .post(bytes.toRequestBody(contentType.toMediaType()))
+                .build()
+        }.map { Unit }
+    }
+
+    suspend fun deleteObject(bucket: String, path: String): Result<Unit> = withContext(Dispatchers.IO) {
+        authenticatedRequest {
+            val encodedPath = path.split('/').joinToString("/") { URLEncoder.encode(it, Charsets.UTF_8.name()).replace("+", "%20") }
+            Request.Builder().url("$supabaseUrl/storage/v1/object/$bucket/$encodedPath").delete().build()
+        }.map { Unit }
     }
 
     suspend fun signIn(email: String, password: String): Result<AuthSession> = authRequest(

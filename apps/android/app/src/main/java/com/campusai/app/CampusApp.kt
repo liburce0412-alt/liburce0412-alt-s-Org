@@ -34,6 +34,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -55,6 +56,7 @@ import com.campusai.core.designsystem.GlassPanel
 import com.campusai.core.designsystem.SpectraBackdrop
 import com.campusai.core.designsystem.SpectraColors
 import com.campusai.core.model.MotionMode
+import com.campusai.core.model.UiState
 import com.campusai.core.preferences.UserPreferences
 import com.campusai.core.preferences.UserPreferencesRepository
 import com.campusai.features.time.TimeViewModel
@@ -63,6 +65,9 @@ import com.campusai.features.ai.AiScreen
 import com.campusai.features.ai.AiViewModel
 import com.campusai.features.ai.AiViewModelFactory
 import com.campusai.features.community.CampusViewModel
+import com.campusai.core.sync.CampusSyncScheduler
+import com.campusai.core.localai.LocalMnnAiEngine
+import com.campusai.core.localai.LocalModelManager
 import kotlinx.coroutines.delay
 
 enum class MainDestination(val label: String, val icon: ImageVector) {
@@ -77,19 +82,40 @@ enum class MainDestination(val label: String, val icon: ImageVector) {
 fun CampusApp(dao: CampusDao) {
     val context = LocalContext.current
     val preferencesRepository = remember { UserPreferencesRepository(context.applicationContext) }
+    val localModelManager = remember { LocalModelManager(context.applicationContext) }
+    val localAiEngine = remember { LocalMnnAiEngine(context.applicationContext, localModelManager) }
+    DisposableEffect(localModelManager, localAiEngine) {
+        onDispose {
+            localAiEngine.shutdown()
+            localModelManager.close()
+        }
+    }
     val authRepository = remember { AuthRepository(context.applicationContext) }
     val authState by authRepository.state.collectAsState()
     val preferences by preferencesRepository.preferences.collectAsState(initial = UserPreferences())
-    val timeViewModel: TimeViewModel = viewModel(factory = TimeViewModelFactory(dao))
-    val aiViewModel: AiViewModel = viewModel(factory = AiViewModelFactory(dao))
+    val timeViewModel: TimeViewModel = viewModel(factory = TimeViewModelFactory(dao, context.applicationContext, authState.userId.takeIf { authState.signedIn }))
+    val aiViewModel: AiViewModel = viewModel(factory = AiViewModelFactory(dao, context.applicationContext, preferencesRepository, localModelManager, localAiEngine))
     val campusViewModel: CampusViewModel = viewModel()
     val campusState by campusViewModel.state.collectAsState()
     val records by timeViewModel.timeRecords.collectAsState()
+    val courses by timeViewModel.courses.collectAsState()
     var destination by rememberSaveable { mutableStateOf(MainDestination.HOME) }
     var focusMinutes by rememberSaveable { mutableStateOf<Int?>(null) }
     var showAi by rememberSaveable { mutableStateOf(false) }
     var showLogin by rememberSaveable { mutableStateOf(false) }
+    var showMessages by rememberSaveable { mutableStateOf(false) }
+    var showOrders by rememberSaveable { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
+    val unreadMessages = when (val conversations = campusState.conversations) {
+        is UiState.Data -> conversations.value.sumOf { it.unreadCount }
+        is UiState.Offline -> conversations.value.sumOf { it.unreadCount }
+        else -> 0
+    }
+    val activeOrders = when (val orders = campusState.orders) {
+        is UiState.Data -> orders.value.count { it.status !in listOf("completed", "cancelled") }
+        is UiState.Offline -> orders.value.count { it.status !in listOf("completed", "cancelled") }
+        else -> 0
+    }
 
     LaunchedEffect(authState.signedIn) {
         if (authState.signedIn) {
@@ -102,6 +128,10 @@ fun CampusApp(dao: CampusDao) {
     }
 
     LaunchedEffect(authState.signedIn) { campusViewModel.setSignedIn(authState.signedIn) }
+    LaunchedEffect(authState.signedIn, authState.userId) {
+        timeViewModel.setActiveUser(authState.userId.takeIf { authState.signedIn })
+        if (authState.signedIn) CampusSyncScheduler.enqueue(context.applicationContext)
+    }
 
     CampusTheme(preferences.themeMode) {
         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -112,7 +142,7 @@ fun CampusApp(dao: CampusDao) {
                     snackbarHost = { SnackbarHost(snackbar) },
                     bottomBar = {
                         AnimatedVisibility(
-                            visible = focusMinutes == null && !showAi,
+                            visible = focusMinutes == null && !showAi && !showMessages && !showOrders,
                             enter = slideInVertically { it } + fadeIn(),
                             exit = slideOutVertically { it } + fadeOut(),
                         ) { SpectraDock(destination = destination, onDestination = { destination = it }) }
@@ -123,7 +153,7 @@ fun CampusApp(dao: CampusDao) {
                             MainDestination.HOME -> HomeScreen(
                                 records = records,
                                 onStartRecord = { destination = MainDestination.TIME },
-                                onOpenAi = { if (authState.signedIn) showAi = true else showLogin = true },
+                                onOpenAi = { showAi = true },
                                 contentPadding = padding,
                             )
                             MainDestination.TIME -> TimeScreen(
@@ -147,6 +177,15 @@ fun CampusApp(dao: CampusDao) {
                                 userId = authState.userId,
                                 viewModel = campusViewModel,
                                 onLogin = { showLogin = true },
+                                onOpenConversation = { conversationId ->
+                                    campusViewModel.openMessageThread(conversationId)
+                                    showOrders = false
+                                    showMessages = true
+                                },
+                                onOrderCreated = {
+                                    showMessages = false
+                                    showOrders = true
+                                },
                                 contentPadding = padding,
                             )
                             MainDestination.PROFILE -> ProfileScreen(
@@ -154,8 +193,14 @@ fun CampusApp(dao: CampusDao) {
                                 repository = preferencesRepository,
                                 records = records,
                                 authState = authState,
+                                unreadMessages = unreadMessages,
+                                activeOrders = activeOrders,
                                 onLogin = { showLogin = true },
                                 onSignOut = authRepository::signOut,
+                                onOpenMessages = { showOrders = false; showMessages = true },
+                                onOpenOrders = { showMessages = false; showOrders = true },
+                                localModelManager = localModelManager,
+                                localAiEngine = localAiEngine,
                                 contentPadding = padding,
                             )
                         }
@@ -175,9 +220,31 @@ fun CampusApp(dao: CampusDao) {
                     )
                 }
                 if (showAi && focusMinutes == null) {
-                    val todayStart = remember { java.util.Calendar.getInstance().apply { set(java.util.Calendar.HOUR_OF_DAY,0);set(java.util.Calendar.MINUTE,0);set(java.util.Calendar.SECOND,0);set(java.util.Calendar.MILLISECOND,0) }.timeInMillis }
-                    val todayRecords = records.filter { it.startTime >= todayStart }
-                    AiScreen(aiViewModel,todayRecords.sumOf { it.durationMinutes },todayRecords.size,onBack={showAi=false})
+                    AiScreen(aiViewModel,records,courses,onBack={showAi=false})
+                }
+                if (showMessages && focusMinutes == null && !showAi) {
+                    MessageCenterScreen(
+                        state = campusState,
+                        userId = authState.userId,
+                        viewModel = campusViewModel,
+                        onBack = {
+                            campusViewModel.closeMessageThread()
+                            showMessages = false
+                        },
+                    )
+                }
+                if (showOrders && focusMinutes == null && !showAi && !showMessages) {
+                    OrdersScreen(
+                        state = campusState,
+                        userId = authState.userId,
+                        viewModel = campusViewModel,
+                        onBack = { showOrders = false },
+                        onOpenConversation = { conversationId ->
+                            campusViewModel.openMessageThread(conversationId)
+                            showOrders = false
+                            showMessages = true
+                        },
+                    )
                 }
             }
             if (showLogin && focusMinutes == null) {

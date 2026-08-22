@@ -4,6 +4,7 @@ import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.os.Build
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -232,6 +233,7 @@ fun TimeScreen(
     val courses by viewModel.courses.collectAsState()
     var range by rememberSaveable { mutableStateOf("日") }
     var showAdd by rememberSaveable { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<TimeRecord?>(null) }
     var showImport by rememberSaveable { mutableStateOf(false) }
     var importDrafts by remember { mutableStateOf<List<CourseDraft>?>(null) }
     var importError by remember { mutableStateOf<String?>(null) }
@@ -263,8 +265,8 @@ fun TimeScreen(
     LaunchedEffect(deleted) {
         val record = deleted ?: return@LaunchedEffect
         if (onMessage("已删除“${record.title}”", "撤销") == SnackbarResult.ActionPerformed) {
-            viewModel.addTimeRecord(record.title, record.category, record.startTime, record.endTime, record.remark)
-        }
+            viewModel.undoDeleteTimeRecord(record.id)
+        } else viewModel.confirmDeleteTimeRecord()
         deleted = null
     }
 
@@ -340,7 +342,7 @@ fun TimeScreen(
                     GlassPanel(Modifier.fillMaxWidth(), radius = 16) {
                         Column {
                             filtered.forEachIndexed { index, record ->
-                                TimelineRow(record, onDelete = { viewModel.deleteTimeRecord(record.id); deleted = record })
+                                TimelineRow(record, onEdit = { editing = record }, onDelete = { viewModel.deleteTimeRecord(record.id); deleted = record })
                                 if (index < filtered.lastIndex) HorizontalDivider(Modifier.padding(start = 62.dp), color = SpectraColors.Silver.copy(.65f))
                             }
                         }
@@ -356,9 +358,14 @@ fun TimeScreen(
             contentColor = Color.White,
         ) { Icon(Icons.Rounded.Add, "新增记录") }
     }
-    if (showAdd) AddTimeRecordDialog(onDismiss = { showAdd = false }, onSave = { title, category, minutes, note ->
+    if (showAdd) AddTimeRecordDialog(initial = null, onDismiss = { showAdd = false }, onSave = { title, category, minutes, note ->
         val end = System.currentTimeMillis(); viewModel.addTimeRecord(title, category, end - minutes * 60_000L, end, note); showAdd = false
     })
+    editing?.let { record -> AddTimeRecordDialog(initial = record, onDismiss = { editing = null }, onSave = { title, category, minutes, note ->
+        val end = record.endTime
+        viewModel.editTimeRecord(record.id, title, category, end - minutes * 60_000L, end, note)
+        editing = null
+    }) }
     if (showImport) ImportScheduleSourceDialog(
         onDismiss = { showImport = false },
         onImage = { showImport = false; imagePicker.launch("image/*") },
@@ -421,7 +428,7 @@ private fun SchedulePreviewDialog(initial:List<CourseDraft>,onDismiss:()->Unit,o
 }
 
 @Composable
-private fun TimelineRow(record: TimeRecord, onDelete: () -> Unit) {
+private fun TimelineRow(record: TimeRecord, onEdit: () -> Unit, onDelete: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(36.dp).background(Brush.linearGradient(listOf(SpectraColors.Cyan.copy(.8f), SpectraColors.Violet.copy(.7f))), CircleShape), contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Bolt, null, tint = Color.White, modifier = Modifier.size(18.dp)) }
         Spacer(Modifier.width(12.dp))
@@ -430,21 +437,22 @@ private fun TimelineRow(record: TimeRecord, onDelete: () -> Unit) {
             Text("${record.category} · ${SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(record.startTime))}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(.58f))
         }
         Text(formatDuration(record.durationMinutes), style = MaterialTheme.typography.labelMedium)
+        IconButton(onClick = onEdit) { Icon(Icons.Rounded.EditNote, "编辑", tint = MaterialTheme.colorScheme.onSurface.copy(.55f)) }
         IconButton(onClick = onDelete) { Icon(Icons.Rounded.DeleteOutline, "删除", tint = MaterialTheme.colorScheme.onSurface.copy(.55f)) }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AddTimeRecordDialog(onDismiss: () -> Unit, onSave: (String, String, Long, String) -> Unit) {
-    var title by rememberSaveable { mutableStateOf("") }
-    var category by rememberSaveable { mutableStateOf("学习") }
-    var note by rememberSaveable { mutableStateOf("") }
-    var minutes by rememberSaveable { mutableIntStateOf(50) }
+private fun AddTimeRecordDialog(initial: TimeRecord?, onDismiss: () -> Unit, onSave: (String, String, Long, String) -> Unit) {
+    var title by rememberSaveable(initial?.id) { mutableStateOf(initial?.title.orEmpty()) }
+    var category by rememberSaveable(initial?.id) { mutableStateOf(initial?.category ?: "学习") }
+    var note by rememberSaveable(initial?.id) { mutableStateOf(initial?.remark.orEmpty()) }
+    var minutes by rememberSaveable(initial?.id) { mutableIntStateOf(initial?.durationMinutes?.toInt()?.coerceIn(5, 240) ?: 50) }
     AlertDialog(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(24.dp),
-        title = { Text("补录时间", style = MaterialTheme.typography.headlineMedium) },
+        title = { Text(if (initial == null) "补录时间" else "编辑记录", style = MaterialTheme.typography.headlineMedium) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(title, { title = it }, label = { Text("做了什么") }, singleLine = true, shape = RoundedCornerShape(12.dp))
@@ -477,7 +485,12 @@ fun FocusSessionScreen(
             completed = true; running = false
             if (soundEnabled) ToneGenerator(AudioManager.STREAM_NOTIFICATION, 32).apply { startTone(ToneGenerator.TONE_PROP_ACK, 900); delay(950); release() }
             val vibrator = context.getSystemService(Vibrator::class.java)
-            vibrator?.vibrate(VibrationEffect.createOneShot(90, VibrationEffect.DEFAULT_AMPLITUDE))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator?.vibrate(VibrationEffect.createOneShot(90, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator?.vibrate(90)
+            }
         }
     }
     Box(Modifier.fillMaxSize().background(SpectraColors.Night.copy(.84f))) {

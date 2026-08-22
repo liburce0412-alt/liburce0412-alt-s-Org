@@ -6,6 +6,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -15,7 +18,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -33,11 +40,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -47,6 +62,7 @@ import com.campusai.core.model.MotionMode
 import com.campusai.core.model.RenderQuality
 import com.campusai.core.model.SpectraEnvironment
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 @Composable
 fun SpectraBackdrop(
@@ -151,6 +167,80 @@ fun TelemetryChip(text: String, selected: Boolean, onClick: () -> Unit, modifier
         contentColor = if (selected) Color.White else MaterialTheme.colorScheme.onSurface,
         border = BorderStroke(1.dp, if (selected) SpectraColors.Violet.copy(.75f) else SpectraColors.Silver.copy(.8f)),
     ) { Box(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), contentAlignment = Alignment.Center) { Text(text, style = MaterialTheme.typography.labelMedium) } }
+}
+
+@Composable
+fun SlideConfirm(
+    text: String,
+    onConfirm: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    val density = LocalDensity.current
+    val horizontalInset = with(density) { 8.dp.toPx() }
+    val thumbWidth = with(density) { 48.dp.toPx() }
+    var trackWidth by remember { mutableStateOf(0f) }
+    var dragOffset by remember { mutableStateOf(0f) }
+    val maxOffset = (trackWidth - thumbWidth - horizontalInset).coerceAtLeast(0f)
+    val progress = if (maxOffset == 0f) 0f else (dragOffset / maxOffset).coerceIn(0f, 1f)
+    val shape = CircleShape
+    val dragState = rememberDraggableState { delta ->
+        if (enabled) dragOffset = (dragOffset + delta).coerceIn(0f, maxOffset)
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .onSizeChanged { trackWidth = it.width.toFloat(); dragOffset = dragOffset.coerceAtMost(maxOffset) }
+            .clip(shape)
+            .background(if (enabled) SpectraColors.Ink else SpectraColors.Ink.copy(.45f))
+            .border(
+                1.dp,
+                Brush.horizontalGradient(listOf(SpectraColors.Cyan.copy(.55f), SpectraColors.Violet.copy(.7f), SpectraColors.Warm.copy(.45f))),
+                shape,
+            )
+            .semantics {
+                role = Role.Button
+                onClick(label = text) {
+                    if (enabled) onConfirm()
+                    enabled
+                }
+            }
+            .draggable(
+                state = dragState,
+                orientation = Orientation.Horizontal,
+                enabled = enabled,
+                onDragStopped = {
+                    if (progress >= .82f) onConfirm()
+                    dragOffset = 0f
+                },
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, color = Color.White.copy(alpha = .72f + progress * .28f), style = MaterialTheme.typography.labelLarge)
+        Box(
+            Modifier
+                .align(Alignment.CenterStart)
+                .offset { IntOffset((4.dp.toPx() + dragOffset).roundToInt(), 0) }
+                .size(48.dp)
+                .background(Color.White.copy(if (enabled) .94f else .56f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                Modifier
+                    .size(14.dp)
+                    .background(
+                        Brush.linearGradient(
+                            listOf(SpectraColors.Cyan, SpectraColors.Violet, SpectraColors.Warm),
+                            start = Offset.Zero,
+                            end = Offset.Infinite,
+                        ),
+                        CircleShape,
+                    ),
+            )
+        }
+    }
 }
 
 @Composable
