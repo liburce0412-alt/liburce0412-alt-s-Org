@@ -1,0 +1,9 @@
+{
+  "scannedAt": "2026-08-22",
+  "framework": "Android Jetpack Compose",
+  "fontStack": "Platform sans-serif",
+  "palette": "Legacy Gemini hard-coded colors",
+  "motion": "Compose infinite transition and AnimatedContent",
+  "spacing": "Ad hoc dp values",
+  "decision": "Replace legacy visual foundation with approved CampusAI SPECTRA tokens"
+}

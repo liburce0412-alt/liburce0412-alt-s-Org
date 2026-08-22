@@ -1,0 +1,40 @@
+name: Deploy Supabase (backup gated)
+
+on:
+  workflow_dispatch:
+    inputs:
+      backup_id:
+        description: 'Verified backup identifier from the Supabase dashboard'
+        required: true
+        type: string
+      confirm:
+        description: 'Type APPLY_MIGRATIONS_AFTER_BACKUP'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: inputs.confirm == 'APPLY_MIGRATIONS_AFTER_BACKUP' && inputs.backup_id != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Link project
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: npx supabase@2.115.0 link --project-ref mcpjecboqddqelgikvvc --password "$SUPABASE_DB_PASSWORD"
+      - name: Apply versioned schema
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: npx supabase@2.115.0 db push --include-all --password "$SUPABASE_DB_PASSWORD"
+      - name: Deploy AI gateway
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: npx supabase@2.115.0 functions deploy ai-chat --project-ref mcpjecboqddqelgikvvc
