@@ -30,6 +30,7 @@ object SecurePreferences {
                     KEY_ALIAS,
                     KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
                 )
+                    .setKeySize(256)
                     .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                     .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                     .build()
@@ -66,8 +67,8 @@ object SecurePreferences {
                 val iv = cipher.iv
                 val encryptedBytes = cipher.doFinal(plainText.toByteArray(Charsets.UTF_8))
                 
-                val ivString = Base64.encodeToString(iv, Base64.DEFAULT)
-                val encryptedString = Base64.encodeToString(encryptedBytes, Base64.DEFAULT)
+                val ivString = Base64.encodeToString(iv, Base64.NO_WRAP)
+                val encryptedString = Base64.encodeToString(encryptedBytes, Base64.NO_WRAP)
                 
                 prefs.edit()
                     .putString("${key}_iv", ivString)
@@ -94,8 +95,8 @@ object SecurePreferences {
         try {
             val secretKey = getSecretKey()
             if (secretKey != null && ivString != null) {
-                val iv = Base64.decode(ivString, Base64.DEFAULT)
-                val encryptedBytes = Base64.decode(encryptedString, Base64.DEFAULT)
+                val iv = Base64.decode(ivString, Base64.NO_WRAP)
+                val encryptedBytes = Base64.decode(encryptedString, Base64.NO_WRAP)
                 
                 val cipher = Cipher.getInstance(TRANSFORMATION)
                 val spec = GCMParameterSpec(128, iv)

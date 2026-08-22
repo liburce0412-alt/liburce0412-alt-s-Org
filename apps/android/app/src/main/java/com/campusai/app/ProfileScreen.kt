@@ -39,6 +39,10 @@ import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
@@ -47,6 +51,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -60,6 +66,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.campusai.core.designsystem.BrandMark
 import com.campusai.core.designsystem.GlassPanel
@@ -80,6 +88,7 @@ import com.campusai.core.preferences.UserPreferences
 import com.campusai.core.preferences.UserPreferencesRepository
 import com.campusai.core.localai.LocalMnnAiEngine
 import com.campusai.core.localai.LocalModelManager
+import com.campusai.core.security.PersonalDeepSeekKeyStore
 import kotlinx.coroutines.launch
 import androidx.compose.ui.window.Dialog
 
@@ -97,6 +106,7 @@ fun ProfileScreen(
     onOpenOrders: () -> Unit,
     localModelManager: LocalModelManager,
     localAiEngine: LocalMnnAiEngine,
+    personalDeepSeekKeyStore: PersonalDeepSeekKeyStore,
     contentPadding: PaddingValues,
 ) {
     val scope = rememberCoroutineScope()
@@ -150,6 +160,7 @@ fun ProfileScreen(
                 repository = repository,
                 manager = localModelManager,
                 engine = localAiEngine,
+                personalKeyStore = personalDeepSeekKeyStore,
             )
         }
         item { Text("外观与体验", style = MaterialTheme.typography.titleLarge) }
@@ -206,12 +217,17 @@ private fun LocalAiSettings(
     repository: UserPreferencesRepository,
     manager: LocalModelManager,
     engine: LocalMnnAiEngine,
+    personalKeyStore: PersonalDeepSeekKeyStore,
 ) {
     val scope = rememberCoroutineScope()
     val state by manager.state.collectAsState()
     var confirmMobile by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmRedownload by remember { mutableStateOf(false) }
+    var personalKey by remember { mutableStateOf("") }
+    var personalKeyVisible by remember { mutableStateOf(false) }
+    var personalKeySaved by remember { mutableStateOf(personalKeyStore.hasKey()) }
+    var personalKeyMessage by remember { mutableStateOf<String?>(null) }
     val manifest = manager.manifest
     val actionLabel = when (state) {
         LocalModelState.NotDownloaded -> "下载离线模型"
@@ -235,18 +251,84 @@ private fun LocalAiSettings(
     GlassPanel(Modifier.fillMaxWidth(), radius = 16, emphasized = true) {
         Column {
             SettingSelector(Icons.Rounded.Cloud, "AI 运行方式", AiProvider.entries, preferences.aiProvider, {
-                when (it) { AiProvider.AUTO -> "自动"; AiProvider.DEEPSEEK -> "DeepSeek 云端"; AiProvider.LOCAL -> "本地离线" }
+                when (it) { AiProvider.AUTO -> "自动"; AiProvider.DEEPSEEK -> "DeepSeek · 我的 Key"; AiProvider.LOCAL -> "本地离线" }
             }) { scope.launch { repository.setAiProvider(it) } }
             Text(
                 when (preferences.aiProvider) {
-                    AiProvider.AUTO -> "在线时使用 DeepSeek；离线且模型 Ready 时使用本地快速模式。云端请求会离开设备。"
-                    AiProvider.DEEPSEEK -> "固定使用 DeepSeek，不会自动切换本地。提示词与裁剪后的结构化上下文经 Supabase Edge Function 发送。"
+                    AiProvider.AUTO -> "在线时使用你自己的 DeepSeek Key；离线且模型 Ready 时使用本地快速模式。没有 Key 时不会借用平台额度。"
+                    AiProvider.DEEPSEEK -> "固定使用你自己的 DeepSeek Key，不会自动切换本地，也不会调用 CampusAI 平台额度。"
                     AiProvider.LOCAL -> "提示词、学习统计、课程表与回复仅在本机处理；本地失败不会静默调用云端。"
                 },
                 Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(.66f),
             )
+            DividerInset()
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Key, null)
+                    Spacer(Modifier.size(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("DeepSeek 个人 Key", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            if (personalKeySaved) personalKeyStore.maskedLabel() else "尚未保存",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(.58f),
+                        )
+                    }
+                }
+                Text(
+                    "Key 使用 Android Keystore 加密保存，不参与备份；生成时只发送到 api.deepseek.com，不经过 Supabase。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(.66f),
+                )
+                OutlinedTextField(
+                    value = personalKey,
+                    onValueChange = { personalKey = it; personalKeyMessage = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(if (personalKeySaved) "粘贴新 Key 以替换" else "DeepSeek API Key") },
+                    singleLine = true,
+                    visualTransformation = if (personalKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { personalKeyVisible = !personalKeyVisible }) {
+                            Icon(if (personalKeyVisible) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility, if (personalKeyVisible) "隐藏 Key" else "显示 Key")
+                        }
+                    },
+                )
+                personalKeyMessage?.let { message ->
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (personalKeySaved) SpectraColors.Success else SpectraColors.Error,
+                    )
+                }
+                SpectraPrimaryButton(
+                    text = if (personalKeySaved) "安全替换 Key" else "安全保存 Key",
+                    onClick = {
+                        personalKeyStore.save(personalKey).fold(
+                            onSuccess = {
+                                personalKey = ""
+                                personalKeySaved = true
+                                personalKeyMessage = "已加密保存。下次云端生成将使用这个 Key。"
+                            },
+                            onFailure = { personalKeyMessage = it.message ?: "Key 保存失败，请重试。" },
+                        )
+                    },
+                    icon = Icons.Rounded.Save,
+                    enabled = personalKey.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (personalKeySaved) TextButton(
+                    onClick = {
+                        if (personalKeyStore.delete()) {
+                            personalKey = ""
+                            personalKeySaved = false
+                            personalKeyMessage = "个人 Key 已从本机删除。"
+                        } else personalKeyMessage = "删除失败，请重试。"
+                    },
+                    modifier = Modifier.align(Alignment.End),
+                ) { Text("删除个人 Key", color = SpectraColors.Error) }
+            }
             DividerInset()
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {

@@ -21,7 +21,7 @@ import org.junit.Test
 
 class AiEngineRouterTest {
     @Test fun `auto follows online and offline rules`() {
-        assertEquals(AiRouteDecision.Use(AiRoute.DEEPSEEK), decideAiRoute(AiProvider.AUTO, AiMode.FAST, true, false))
+        assertEquals(AiRouteDecision.Use(AiRoute.PERSONAL_DEEPSEEK), decideAiRoute(AiProvider.AUTO, AiMode.FAST, true, false, true))
         assertEquals(AiRouteDecision.Use(AiRoute.LOCAL), decideAiRoute(AiProvider.AUTO, AiMode.FAST, false, true))
         assertEquals("offline_model_missing", (decideAiRoute(AiProvider.AUTO, AiMode.FAST, false, false) as AiRouteDecision.Block).code)
         assertEquals("deep_requires_network", (decideAiRoute(AiProvider.AUTO, AiMode.DEEP, false, true) as AiRouteDecision.Block).code)
@@ -34,13 +34,45 @@ class AiEngineRouterTest {
         assertTrue(missing.canUseCloudOnce)
     }
 
+    @Test fun `online cloud route requires the users own key`() {
+        val missing = decideAiRoute(AiProvider.AUTO, AiMode.FAST, true, true, false) as AiRouteDecision.Block
+        assertEquals("personal_key_missing", missing.code)
+        assertEquals(
+            AiRouteDecision.Use(AiRoute.PERSONAL_DEEPSEEK),
+            decideAiRoute(AiProvider.DEEPSEEK, AiMode.DEEP, true, false, true),
+        )
+    }
+
     @Test fun `local engine failure does not call cloud`() = runTest {
-        val cloud = FakeEngine()
+        val personalDeepSeek = FakeEngine()
         val local = FakeEngine(fail = true)
-        val router = AiEngineRouter(cloud, local, { AiProvider.LOCAL }, { true }) { LocalModelState.Ready }
+        val router = AiEngineRouter(
+            personalDeepSeek = personalDeepSeek,
+            local = local,
+            provider = { AiProvider.LOCAL },
+            personalKeyAvailable = { true },
+            isOnline = { true },
+            localState = { LocalModelState.Ready },
+        )
         runCatching { router.stream(AiRequest(AiMode.FAST, listOf(AiConversationMessage("user", "test")))).toList() }
-        assertEquals(0, cloud.calls)
+        assertEquals(0, personalDeepSeek.calls)
         assertEquals(1, local.calls)
+    }
+
+    @Test fun `missing personal key never calls any engine`() = runTest {
+        val personalDeepSeek = FakeEngine()
+        val local = FakeEngine()
+        val router = AiEngineRouter(
+            personalDeepSeek = personalDeepSeek,
+            local = local,
+            provider = { AiProvider.DEEPSEEK },
+            personalKeyAvailable = { false },
+            isOnline = { true },
+            localState = { LocalModelState.Ready },
+        )
+        runCatching { router.stream(AiRequest(AiMode.FAST, listOf(AiConversationMessage("user", "test")))).toList() }
+        assertEquals(0, personalDeepSeek.calls)
+        assertEquals(0, local.calls)
     }
 
     private class FakeEngine(private val fail: Boolean = false) : AiEngine {

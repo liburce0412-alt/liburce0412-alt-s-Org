@@ -61,7 +61,7 @@ fun AiScreen(viewModel: AiViewModel, records: List<TimeRecord>, courses: List<Co
         Column(Modifier.fillMaxSize()) {
             Row(Modifier.fillMaxWidth().padding(horizontal=12.dp,vertical=10.dp),verticalAlignment=Alignment.CenterVertically){
                 IconButton(onClick=onBack){Icon(Icons.AutoMirrored.Rounded.ArrowBack,"返回")}
-                Column(Modifier.weight(1f)){Text("AI 洞察",style=MaterialTheme.typography.headlineMedium);Text(if(state.model.isBlank()) when(state.provider){AiProvider.AUTO->"自动选择 · 在线云端 / 离线本地";AiProvider.DEEPSEEK->"DeepSeek 云端";AiProvider.LOCAL->"本地离线"} else state.model,style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurface.copy(.56f))}
+                Column(Modifier.weight(1f)){Text("AI 洞察",style=MaterialTheme.typography.headlineMedium);Text(if(state.model.isBlank()) when(state.provider){AiProvider.AUTO->"自动选择 · 我的 Key / 离线本地";AiProvider.DEEPSEEK->"DeepSeek · 我的 Key";AiProvider.LOCAL->"本地离线"} else state.model,style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurface.copy(.56f))}
                 IconButton(onClick={showHistory=!showHistory}){Icon(Icons.Rounded.History,"报告历史")}
                 IconButton(onClick=viewModel::newConversation){Icon(Icons.Rounded.AddComment,"新对话")}
             }
@@ -92,7 +92,7 @@ fun AiScreen(viewModel: AiViewModel, records: List<TimeRecord>, courses: List<Co
                         }
                     }
                     if(state.streaming) item{Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(9.dp)){CircularProgressIndicator(Modifier.size(18.dp),strokeWidth=2.dp);Text(state.stage.ifBlank{"接收真实数据块"},style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurface.copy(.6f))}}
-                    state.error?.let { error->item{GlassPanel(Modifier.fillMaxWidth(),radius=16){Column(Modifier.padding(14.dp)){Text("这次没有完成",style=MaterialTheme.typography.titleMedium,color=SpectraColors.Error);Text(error,style=MaterialTheme.typography.bodyMedium);Text(if(state.errorCode=="local_model_not_ready"||state.errorCode=="offline_model_missing")"前往“我的 → AI 运行方式”下载并校验模型。" else "根据上面的原因恢复后可以重试。",style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurface.copy(.6f));if(state.canUseCloudOnce)TextButton(onClick=viewModel::useCloudOnce){Text("确认：本次改用 DeepSeek 云端")}}}} }
+                    state.error?.let { error->item{GlassPanel(Modifier.fillMaxWidth(),radius=16){Column(Modifier.padding(14.dp)){Text("这次没有完成",style=MaterialTheme.typography.titleMedium,color=SpectraColors.Error);Text(error,style=MaterialTheme.typography.bodyMedium);Text(when(state.errorCode){"local_model_not_ready","offline_model_missing"->"前往“我的 → AI 运行方式”下载并校验模型。";"personal_key_missing"->"前往“我的 → AI 运行方式”安全保存自己的 DeepSeek Key。";else->"根据上面的原因恢复后可以重试。"},style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurface.copy(.6f));if(state.canUseCloudOnce)TextButton(onClick=viewModel::useCloudOnce){Text("确认：本次使用我的 DeepSeek Key")}}}} }
                 }
             }
             if(!showHistory) Row(Modifier.fillMaxWidth().padding(12.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)){

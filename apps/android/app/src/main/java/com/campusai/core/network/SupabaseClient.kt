@@ -20,6 +20,12 @@ data class AuthSession(
     val userId: String,
 )
 
+data class AuthSignUpResult(
+    val session: AuthSession?,
+    val email: String,
+    val userId: String,
+)
+
 object SupabaseClient {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -114,6 +120,38 @@ object SupabaseClient {
         payload = JSONObject().put("email", email.trim()).put("password", password),
     )
 
+    suspend fun signUp(email: String, password: String): Result<AuthSignUpResult> = withContext(Dispatchers.IO) {
+        if (!isConfigured()) return@withContext Result.failure(IllegalStateException("Supabase 尚未配置，暂时无法注册。"))
+        val normalizedEmail = email.trim()
+        val request = Request.Builder()
+            .url("$supabaseUrl/auth/v1/signup")
+            .header("apikey", supabaseAnonKey)
+            .header("Content-Type", "application/json")
+            .post(JSONObject().put("email", normalizedEmail).put("password", password).toString().toRequestBody(jsonMediaType))
+            .build()
+        runCatching {
+            client.newCall(request).execute().use { response ->
+                val raw = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val detail = runCatching {
+                        val json = JSONObject(raw)
+                        json.optString("msg").ifBlank { json.optString("error_description") }.ifBlank { json.optString("message") }
+                    }.getOrDefault("")
+                    val message = when {
+                        response.code == 422 && detail.contains("registered", ignoreCase = true) -> "这个邮箱已经注册，请直接登录。"
+                        response.code == 422 -> detail.ifBlank { "邮箱或密码不符合注册要求。" }
+                        response.code == 429 -> "注册操作过于频繁，请稍后再试。"
+                        else -> detail.ifBlank { "注册服务暂时不可用（${response.code}）。" }
+                    }
+                    error(message)
+                }
+                parseSignUpResponse(raw, normalizedEmail).also { result ->
+                    result.session?.let { userJwt = it.accessToken }
+                }
+            }
+        }
+    }
+
     suspend fun refresh(refreshToken: String): Result<AuthSession> = authRequest(
         grant = "refresh_token",
         payload = JSONObject().put("refresh_token", refreshToken),
@@ -168,4 +206,20 @@ object SupabaseClient {
             }
         }
     }
+}
+
+internal fun parseSignUpResponse(raw: String, fallbackEmail: String): AuthSignUpResult {
+    val json = JSONObject(raw)
+    val user = json.optJSONObject("user") ?: json
+    val email = user.optString("email").ifBlank { fallbackEmail }
+    val userId = user.optString("id")
+    val accessToken = json.optString("access_token")
+    val refreshToken = json.optString("refresh_token")
+    val session = if (accessToken.isNotBlank() && refreshToken.isNotBlank()) AuthSession(
+        accessToken = accessToken,
+        refreshToken = refreshToken,
+        email = email,
+        userId = userId,
+    ) else null
+    return AuthSignUpResult(session, email, userId)
 }

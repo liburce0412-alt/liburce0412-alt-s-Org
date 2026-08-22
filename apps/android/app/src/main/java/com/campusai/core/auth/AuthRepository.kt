@@ -16,6 +16,7 @@ data class AuthState(
     val userId: String = "",
     val busy: Boolean = false,
     val error: String? = null,
+    val notice: String? = null,
 )
 
 class AuthRepository(private val context: Context) {
@@ -53,6 +54,33 @@ class AuthRepository(private val context: Context) {
         )
     }
 
+    suspend fun signUp(email: String, password: String): Boolean {
+        _state.value = _state.value.copy(busy = true, error = null, notice = null)
+        return SupabaseClient.signUp(email, password).fold(
+            onSuccess = { result ->
+                val session = result.session
+                if (session == null) {
+                    _state.value = AuthState(
+                        email = result.email,
+                        notice = "账号已创建，但 Supabase 仍要求邮箱确认。请先确认邮箱，或由项目管理员关闭邮箱确认后直接登录。",
+                    )
+                    false
+                } else if (!persist(session)) {
+                    SupabaseClient.clearSession()
+                    _state.value = AuthState(error = "账号已创建，但设备安全存储不可用，未能保存登录状态。请返回登录页重试。")
+                    false
+                } else {
+                    _state.value = AuthState(signedIn = true, email = session.email, userId = session.userId, notice = "注册成功，已直接登录。")
+                    true
+                }
+            },
+            onFailure = { error ->
+                _state.value = AuthState(error = error.message ?: "注册失败，请稍后重试。")
+                false
+            },
+        )
+    }
+
     suspend fun refresh(): Boolean {
         val refreshToken = SecurePreferences.decrypt(context, refreshKey)
         if (refreshToken.isBlank()) return false
@@ -72,7 +100,7 @@ class AuthRepository(private val context: Context) {
         _state.value = AuthState()
     }
 
-    fun clearError() { _state.value = _state.value.copy(error = null) }
+    fun clearError() { _state.value = _state.value.copy(error = null, notice = null) }
 
     private fun persist(session: AuthSession): Boolean {
         val email = session.email.ifBlank { _state.value.email }

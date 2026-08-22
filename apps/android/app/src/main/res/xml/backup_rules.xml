@@ -2,4 +2,5 @@
 <full-backup-content>
     <exclude domain="root" path="models/" />
     <exclude domain="file" path="models/" />
+    <exclude domain="sharedpref" path="campus_ai_secure_prefs.xml" />
 </full-backup-content>

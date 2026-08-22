@@ -9,7 +9,7 @@ import com.campusai.core.ai.AiEngineRouter
 import com.campusai.core.ai.AiEvent
 import com.campusai.core.ai.AiRequest
 import com.campusai.core.ai.AiRoutingException
-import com.campusai.core.ai.DeepSeekAiEngine
+import com.campusai.core.ai.PersonalDeepSeekAiEngine
 import com.campusai.core.ai.NetworkAvailability
 import com.campusai.core.database.AiReportEntity
 import com.campusai.core.database.CampusDao
@@ -22,6 +22,8 @@ import com.campusai.core.model.AiReport
 import com.campusai.core.model.CourseSchedule
 import com.campusai.core.model.TimeRecord
 import com.campusai.core.preferences.UserPreferencesRepository
+import com.campusai.core.network.PersonalDeepSeekClient
+import com.campusai.core.security.PersonalDeepSeekKeyStore
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -56,11 +58,19 @@ class AiViewModel(
     private val preferences: UserPreferencesRepository,
     private val modelManager: LocalModelManager,
     private val localEngine: LocalMnnAiEngine,
-    private val deepSeekEngine: AiEngine = DeepSeekAiEngine(),
+    private val personalKeyStore: PersonalDeepSeekKeyStore,
+    private val personalDeepSeekEngine: AiEngine = PersonalDeepSeekAiEngine(PersonalDeepSeekClient(personalKeyStore)),
 ) : ViewModel() {
     private val provider = AtomicReference(AiProvider.AUTO)
     private val network = NetworkAvailability(context.applicationContext)
-    private val router = AiEngineRouter(deepSeekEngine, localEngine, provider::get, network::isOnline) { modelManager.state.value }
+    private val router = AiEngineRouter(
+        personalDeepSeek = personalDeepSeekEngine,
+        local = localEngine,
+        provider = provider::get,
+        personalKeyAvailable = personalKeyStore::hasKey,
+        isOnline = network::isOnline,
+        localState = { modelManager.state.value },
+    )
     private val _state = MutableStateFlow(AiUiState())
     val state: StateFlow<AiUiState> = _state.asStateFlow()
     val history: StateFlow<List<AiReport>> = dao.getAiReportsFlow().map { rows -> rows.map { it.toDomain() } }
@@ -96,7 +106,7 @@ class AiViewModel(
 
     fun cancel() {
         router.cancel()
-        deepSeekEngine.cancel()
+        personalDeepSeekEngine.cancel()
         localEngine.cancel()
         generation?.cancel()
         generation = null
@@ -118,7 +128,7 @@ class AiViewModel(
         _state.value = _state.value.copy(
             messages = initial,
             streaming = true,
-            stage = if (cloudOnce) "正在明确切换到 DeepSeek" else "选择运行方式",
+            stage = if (cloudOnce) "正在使用你的 DeepSeek Key" else "选择运行方式",
             error = null,
             errorCode = null,
             canUseCloudOnce = false,
@@ -133,10 +143,10 @@ class AiViewModel(
             structuredContextJson = context.toString(),
             maxOutputTokens = 512,
         )
-        val engine = if (cloudOnce) deepSeekEngine else router
         generation = viewModelScope.launch {
             runCatching {
-                engine.stream(request).collect(::consumeEvent)
+                if (cloudOnce) router.streamCloudOnce(request).collect(::consumeEvent)
+                else router.stream(request).collect(::consumeEvent)
             }.onFailure { error ->
                 val routing = error as? AiRoutingException
                 _state.value = _state.value.copy(
@@ -199,7 +209,8 @@ class AiViewModelFactory(
     private val preferences: UserPreferencesRepository,
     private val modelManager: LocalModelManager,
     private val localEngine: LocalMnnAiEngine,
+    private val personalKeyStore: PersonalDeepSeekKeyStore,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
-    override fun <T : ViewModel> create(modelClass: Class<T>): T = AiViewModel(dao, context, preferences, modelManager, localEngine) as T
+    override fun <T : ViewModel> create(modelClass: Class<T>): T = AiViewModel(dao, context, preferences, modelManager, localEngine, personalKeyStore) as T
 }

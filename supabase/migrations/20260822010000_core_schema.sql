@@ -1,7 +1,8 @@
 begin;
 
 create extension if not exists pgcrypto;
-create extension if not exists pg_trgm;
+create schema if not exists extensions;
+create extension if not exists pg_trgm with schema extensions;
 
 do $$ begin create type public.app_role as enum ('student','moderator','admin','super_admin'); exception when duplicate_object then null; end $$;
 do $$ begin create type public.sync_state as enum ('local_only','pending','synced','conflict','failed'); exception when duplicate_object then null; end $$;
@@ -163,14 +164,14 @@ create index if not exists time_entries_user_starts_idx on public.time_entries(u
 create index if not exists course_schedules_user_day_idx on public.course_schedules(user_id,weekday,start_minute) where deleted_at is null;
 create index if not exists focus_sessions_user_started_idx on public.focus_sessions(user_id,started_at desc);
 create index if not exists posts_feed_idx on public.posts(created_at desc) where deleted_at is null;
-create index if not exists posts_body_trgm_idx on public.posts using gin(body gin_trgm_ops);
+create index if not exists posts_body_trgm_idx on public.posts using gin(body extensions.gin_trgm_ops);
 create index if not exists comments_post_idx on public.comments(post_id,created_at) where deleted_at is null;
 create index if not exists comments_author_idx on public.comments(author_id);
 create index if not exists post_likes_user_idx on public.post_likes(user_id,created_at desc);
 create index if not exists post_bookmarks_user_idx on public.post_bookmarks(user_id,created_at desc);
 create index if not exists listings_feed_idx on public.listings(status,created_at desc);
 create index if not exists listings_seller_idx on public.listings(seller_id,created_at desc);
-create index if not exists listings_title_trgm_idx on public.listings using gin(title gin_trgm_ops);
+create index if not exists listings_title_trgm_idx on public.listings using gin(title extensions.gin_trgm_ops);
 create index if not exists favorites_user_idx on public.favorites(user_id,created_at desc);
 create index if not exists conversation_members_user_idx on public.conversation_members(user_id,created_at desc);
 create index if not exists messages_conversation_idx on public.messages(conversation_id,created_at) where deleted_at is null;

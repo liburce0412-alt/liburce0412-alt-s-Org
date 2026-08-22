@@ -68,6 +68,7 @@ import com.campusai.features.community.CampusViewModel
 import com.campusai.core.sync.CampusSyncScheduler
 import com.campusai.core.localai.LocalMnnAiEngine
 import com.campusai.core.localai.LocalModelManager
+import com.campusai.core.security.PersonalDeepSeekKeyStore
 import kotlinx.coroutines.delay
 
 enum class MainDestination(val label: String, val icon: ImageVector) {
@@ -84,6 +85,7 @@ fun CampusApp(dao: CampusDao) {
     val preferencesRepository = remember { UserPreferencesRepository(context.applicationContext) }
     val localModelManager = remember { LocalModelManager(context.applicationContext) }
     val localAiEngine = remember { LocalMnnAiEngine(context.applicationContext, localModelManager) }
+    val personalDeepSeekKeyStore = remember { PersonalDeepSeekKeyStore(context.applicationContext) }
     DisposableEffect(localModelManager, localAiEngine) {
         onDispose {
             localAiEngine.shutdown()
@@ -94,7 +96,7 @@ fun CampusApp(dao: CampusDao) {
     val authState by authRepository.state.collectAsState()
     val preferences by preferencesRepository.preferences.collectAsState(initial = UserPreferences())
     val timeViewModel: TimeViewModel = viewModel(factory = TimeViewModelFactory(dao, context.applicationContext, authState.userId.takeIf { authState.signedIn }))
-    val aiViewModel: AiViewModel = viewModel(factory = AiViewModelFactory(dao, context.applicationContext, preferencesRepository, localModelManager, localAiEngine))
+    val aiViewModel: AiViewModel = viewModel(factory = AiViewModelFactory(dao, context.applicationContext, preferencesRepository, localModelManager, localAiEngine, personalDeepSeekKeyStore))
     val campusViewModel: CampusViewModel = viewModel()
     val campusState by campusViewModel.state.collectAsState()
     val records by timeViewModel.timeRecords.collectAsState()
@@ -201,6 +203,7 @@ fun CampusApp(dao: CampusDao) {
                                 onOpenOrders = { showMessages = false; showOrders = true },
                                 localModelManager = localModelManager,
                                 localAiEngine = localAiEngine,
+                                personalDeepSeekKeyStore = personalDeepSeekKeyStore,
                                 contentPadding = padding,
                             )
                         }
@@ -251,6 +254,8 @@ fun CampusApp(dao: CampusDao) {
                 AuthScreen(
                     state = authState,
                     onSignIn = authRepository::signIn,
+                    onSignUp = authRepository::signUp,
+                    onClearMessage = authRepository::clearError,
                     onBack = { authRepository.clearError(); showLogin = false },
                 )
             }

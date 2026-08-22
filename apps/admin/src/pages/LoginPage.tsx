@@ -31,6 +31,6 @@ export function LoginPage(){
     <div className="field"><label htmlFor="password">密码</label><input id="password" type="password" autoComplete="current-password" {...register('password')}/>{errors.password&&<span className="error-text">{errors.password.message}</span>}</div>
     {serverError&&<p className="error-text" role="alert">{serverError}</p>}
     <button className="pill-button primary" style={{width:'100%',marginTop:10}} disabled={isSubmitting}><Symbol>login</Symbol>{isSubmitting?'正在验证':'登录管理台'}</button>
-    {!isSupabaseConfigured&&<p className="muted" style={{fontSize:12}}>当前为未配置状态；不会把任何密钥写入浏览器包。</p>}
+    {!isSupabaseConfigured&&<p className="muted" style={{fontSize:12}}>当前未配置 Supabase。这里只允许使用公开 publishable key；DeepSeek 与 service-role 密钥绝不会进入浏览器包。</p>}
   </form></div></>
 }

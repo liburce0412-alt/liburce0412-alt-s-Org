@@ -17,6 +17,7 @@
 .cxx
 local.properties
 .env
+.env*.local
 debug.keystore
 apps/admin/node_modules/
 apps/admin/dist/

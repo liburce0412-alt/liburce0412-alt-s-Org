@@ -4,27 +4,27 @@
 
 ## 自动化结果
 
-- Android：`testDebugUnitTest`、`assembleDebug`、`lintDebug` 全部通过；11 个 suite、17 项测试、0 failure、0 error、0 skipped。
+- Android：`testDebugUnitTest`、`assembleDebug`、`lintDebug` 全部通过；24 项测试、0 failure。
 - Native：`campusai_mnn` 已实际编译并链接；APK 中 9 个 arm64 共享库与 MNN 3.6.1 官方归档逐文件 SHA-256 一致。
-- APK：`47,342,109` bytes；包含 arm64 runtime，不含 `.mnn`、`.mnn.weight`、tokenizer、`.part` 或模型目录；debug APK v2 签名有效。
-- DeepSeek：Deno check 通过；FAST/DEEP 固定模型与 thinking 映射、`meta/status/delta/done/error` SSE 兼容测试 2/2 通过。未调用线上 provider。
-- 本地逻辑：AUTO/DEEPSEEK/LOCAL 路由、LOCAL 失败不回退、取消入口、状态 reducer、固定 manifest/URL、SHA 失败不可 Ready、上下文裁剪、精确统计和课程冲突测试通过。
+- APK：`47,356,526` bytes（45.16 MiB）；包含 arm64 runtime，不含 `.mnn`、`.mnn.weight`、tokenizer、`.part` 或模型目录；debug APK v2 签名有效。
+- DeepSeek：服务端 Deno 基线通过；Android 个人 Key 路径固定 `api.deepseek.com`，FAST/DEEP 模型与 thinking 映射不变，响应映射为统一事件。未使用真实 Key 调用线上 provider。
+- 本地逻辑：AUTO/DEEPSEEK/LOCAL 路由、个人 Key 缺失时零引擎调用、LOCAL 失败不回退、取消入口、状态 reducer、固定 manifest/URL、SHA 失败不可 Ready、上下文裁剪、精确统计和课程冲突测试通过。
 - 质量集：30 条中文提示，`chat=8`、`study_summary=8`、`time_parse=7`、`schedule_cleanup=7`；结构和精确数字保护测试通过，真实模型回答质量待真机运行。
 - Web 回归：生产构建通过；320/375/414/768/1280/1440 px、移动导航、数据页和登录错误路径共 9/9 通过；`npm audit --omit=dev` 为 0 漏洞。
-- Supabase：10 个版本化 migration 通过 PostgreSQL AST 解析；Edge Function 未部署，线上数据未改动。
+- Supabase：11 个版本化 migration 通过 PostgreSQL AST 解析并已应用线上；Edge Function 未部署，Android 不调用平台额度。
 
 ## 验收矩阵
 
 | 验收项 | 当前结果 |
 |---|---|
-| 新 APK 不含模型 | 通过，47.34 MB |
+| 新 APK 不含模型 | 通过，45.16 MiB |
 | 未下载/下载/暂停/校验/Ready/错误状态 | reducer 与构建测试通过；完整远端下载待真机 |
 | 杀进程后恢复、Range 续传 | WorkManager + `.part` 实现完成；真机待测 |
 | SHA-256 错误绝不 Ready | 单测通过；worker 失败路径会删除损坏文件 |
 | 飞行模式聊天/总结 | 路由与本地边界通过；真实 MNN 推理待真机 |
 | LOCAL 抓包无内容上传 | 静态依赖边界通过；动态抓包待真机 |
 | 本地失败不静默调用 DeepSeek | 单测通过 |
-| DeepSeek FAST/DEEP 回归 | 协议与映射通过；线上调用未执行 |
+| DeepSeek FAST/DEEP 回归 | 个人 Key 路由、流解析与固定映射通过；线上调用未执行 |
 | AUTO/DEEPSEEK/LOCAL 路由 | 单测通过 |
 | 流式、取消、后台、内存释放 | 代码路径与构建通过；压力测试待真机 |
 | 低存储/不兼容提示 | 代码与状态测试通过；设备场景待测 |

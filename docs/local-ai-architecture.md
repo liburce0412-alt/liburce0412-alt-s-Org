@@ -4,9 +4,10 @@
 
 ## 边界
 
-- 云端：`DeepSeekAiEngine → AiEdgeClient → Supabase ai-chat Edge Function → DeepSeek`。保留 `meta/status/delta/done/error` SSE。
+- Android 云端：`PersonalDeepSeekAiEngine → PersonalDeepSeekClient → api.deepseek.com`。用户 Key 由 Android Keystore 加密保存，仅在发起固定域名请求时读取；回复仍映射为统一 `Meta/Status/Delta/Done/Error` 事件。
+- 服务端：`supabase/functions/ai-chat` 和原有五类 SSE 协议保留给 Web/服务端场景，但 Android 不调用它，也没有平台额度选项。
 - 本地：`LocalMnnAiEngine → MnnNativeBridge → MNN 3.6.1 CPU → Qwen3.5-2B MNN 4-bit`。不创建任何网络客户端。
-- 统一入口：`AiEngineRouter` 按 `AiProvider`、FAST/DEEP、网络和 `LocalModelState` 决定引擎。聊天 UI 只消费 `AiEvent`。
+- 统一入口：`AiEngineRouter` 按 `AiProvider`、个人 Key 是否存在、FAST/DEEP、网络和 `LocalModelState` 决定引擎。聊天 UI 只消费 `AiEvent`。
 - 生命周期：同一时刻只允许一个本地生成；Kotlin `Mutex` 与 native mutex 双重保护。取消按 token 生效；严重内存压力、删除模型或空闲 10 分钟后释放实例。
 
 ## 模型和运行时
