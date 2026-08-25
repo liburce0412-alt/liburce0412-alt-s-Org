@@ -2,7 +2,7 @@
 
 Caesar∞ 是一款以本地优先为核心的 Android 私人 Agent：同一个应用里组合端侧多模态模型、类型化 App 工具、可确认记忆、Health Connect、小米手环桥接，以及 SPECTRA / OpticalGlass 原生界面。
 
-> **当前状态：V1 开发分支。** 主要目标设备为 Xiaomi 15 Pro（Android 16、16 GB RAM）。模型权重、个人密钥、健康原始序列、设备日志和调试 APK 均不进入仓库。Band 9 私有协议与 Gadgetbridge 兼容性仍有实验边界；Caesar∞ 当前也**没有通用网页搜索或任意 URL 浏览能力**。
+> **当前状态：V1 开发版本。** 主要目标设备为 Xiaomi 15 Pro（Android 16、16 GB RAM）。模型权重、个人密钥、健康原始序列、设备日志和调试 APK 均不进入仓库。Band 9 私有协议与 Gadgetbridge 兼容性仍有实验边界；Caesar∞ 当前也**没有通用网页搜索或任意 URL 浏览能力**。
 
 ## 能做什么
 
