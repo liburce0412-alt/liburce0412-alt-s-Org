@@ -21,13 +21,25 @@ jobs:
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "ndk;28.2.13676358" "cmake;3.22.1"
       - uses: gradle/actions/setup-gradle@v6
+      - name: Create ephemeral debug signing key
+        shell: bash
+        run: |
+          keytool -genkeypair -v \
+            -keystore debug.keystore \
+            -storepass android \
+            -alias AndroidDebugKey \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
       - run: bash ./gradlew :apps:android:app:testDebugUnitTest :apps:android:app:assembleDebug :apps:android:app:lintDebug --stacktrace
       - shell: pwsh
         run: ./scripts/verify-local-ai-package.ps1
       - uses: actions/upload-artifact@v6
         with:
           name: campusai-debug-apk
-          path: apps/android/app/build/outputs/apk/debug/app-debug.apk
+          path: ~/.gradle/campusai-build/android-app/outputs/apk/debug/app-debug.apk
 
   admin:
     runs-on: ubuntu-latest

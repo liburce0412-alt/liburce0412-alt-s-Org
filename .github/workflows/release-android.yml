@@ -26,6 +26,19 @@ jobs:
       - run: sdkmanager "ndk;28.2.13676358" "cmake;3.22.1"
       - uses: gradle/actions/setup-gradle@v6
 
+      - name: Create ephemeral debug signing key
+        shell: bash
+        run: |
+          keytool -genkeypair -v \
+            -keystore debug.keystore \
+            -storepass android \
+            -alias AndroidDebugKey \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
       - name: Detect signing configuration
         id: signing
         shell: bash
@@ -65,8 +78,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp apps/android/app/build/outputs/apk/release/app-release.apk "dist/caesar-${GITHUB_REF_NAME}.apk"
-          cp apps/android/bandbridge/build/outputs/apk/release/bandbridge-release.apk "dist/caesar-bandbridge-${GITHUB_REF_NAME}.apk"
+          cp "$HOME/.gradle/campusai-build/android-app/outputs/apk/release/app-release.apk" "dist/caesar-${GITHUB_REF_NAME}.apk"
+          cp "$HOME/.gradle/campusai-build/bandbridge/outputs/apk/release/bandbridge-release.apk" "dist/caesar-bandbridge-${GITHUB_REF_NAME}.apk"
           cd dist
           sha256sum ./*.apk > SHA256SUMS.txt
 
