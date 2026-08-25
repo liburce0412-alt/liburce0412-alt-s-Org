@@ -72,6 +72,13 @@ android {
     compose = true
     buildConfig = true
   }
+  packaging {
+    jniLibs {
+      // MNN ships the shared C++ runtime while the local JNI target also asks
+      // the NDK for it. A clean Linux build sees both inputs; package one copy.
+      pickFirsts += "lib/arm64-v8a/libc++_shared.so"
+    }
+  }
   sourceSets.getByName("androidTest").assets.directories.add("$projectDir/schemas")
   // Robolectric reads Room migration schemas through the debug app's
   // AssetManager; keep them out of release builds while making local tests real.

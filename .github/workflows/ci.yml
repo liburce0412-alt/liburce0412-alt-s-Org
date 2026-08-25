@@ -39,7 +39,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: campusai-debug-apk
-          path: ~/.gradle/campusai-build/android-app/outputs/apk/debug/app-debug.apk
+          path: apps/android/app/build/outputs/apk/debug/app-debug.apk
 
   admin:
     runs-on: ubuntu-latest

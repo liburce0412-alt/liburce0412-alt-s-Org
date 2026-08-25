@@ -78,8 +78,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "$HOME/.gradle/campusai-build/android-app/outputs/apk/release/app-release.apk" "dist/caesar-${GITHUB_REF_NAME}.apk"
-          cp "$HOME/.gradle/campusai-build/bandbridge/outputs/apk/release/bandbridge-release.apk" "dist/caesar-bandbridge-${GITHUB_REF_NAME}.apk"
+          cp apps/android/app/build/outputs/apk/release/app-release.apk "dist/caesar-${GITHUB_REF_NAME}.apk"
+          cp apps/android/bandbridge/build/outputs/apk/release/bandbridge-release.apk "dist/caesar-bandbridge-${GITHUB_REF_NAME}.apk"
           cd dist
           sha256sum ./*.apk > SHA256SUMS.txt
 
