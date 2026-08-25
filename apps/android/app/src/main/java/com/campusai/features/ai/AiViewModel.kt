@@ -649,7 +649,7 @@ class AiViewModel(
                     _state.value = _state.value.copy(
                         streaming = false,
                         stage = "",
-                        error = error.message ?: "生成中断，请重试。",
+                        error = generationFailureMessage(error),
                         errorCode = routing?.code ?: "generation_failed",
                         canUseCloudOnce = routing?.canUseCloudOnce == true,
                         pendingCloudPrompt = prompt.takeIf { routing?.canUseCloudOnce == true },
@@ -728,6 +728,9 @@ class AiViewModel(
         super.onCleared()
     }
 }
+
+internal fun generationFailureMessage(error: Throwable): String =
+    (error as? AiRoutingException)?.message ?: "生成中断，请重试。"
 
 internal class AiGenerationEpoch {
     private val value = AtomicLong(0)

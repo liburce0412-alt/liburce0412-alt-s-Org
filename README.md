@@ -1,90 +1,167 @@
-# CampusAI
+# Caesar∞
 
-CampusAI 是面向校园场景的 Android 主产品与响应式 Web 管理台。当前仓库以 SPECTRA 光学材质为统一设计语言，后端以 Supabase 为唯一业务数据入口。Android 可选下载 Qwen3.5-2B MNN 4-bit 本地模型；联网 DeepSeek FAST / DEEP 使用每位用户自己在设备上保存的 Key。
+Caesar∞ 是一款以本地优先为核心的 Android 私人 Agent：同一个应用里组合端侧多模态模型、类型化 App 工具、可确认记忆、Health Connect、小米手环桥接，以及 SPECTRA / OpticalGlass 原生界面。
 
-## 仓库结构
+> **当前状态：V1 开发分支。** 主要目标设备为 Xiaomi 15 Pro（Android 16、16 GB RAM）。模型权重、个人密钥、健康原始序列、设备日志和调试 APK 均不进入仓库。Band 9 私有协议与 Gadgetbridge 兼容性仍有实验边界；Caesar∞ 当前也**没有通用网页搜索或任意 URL 浏览能力**。
 
-- `apps/android`：Jetpack Compose Android 应用，保留应用 ID `com.aistudio.campusai.ywtpzx`。
-- `apps/admin`：React、TypeScript、Vite、TanStack Router/Query 管理台。
-- `supabase`：版本化 migration、RLS、RPC、Storage 策略与 `ai-chat` Edge Function。
-- `design`：已批准规范、设计令牌、视觉基准与回归证据。
-- `.github/workflows`：Android/Web/Supabase 检查、签名发布和部署。
+## 能做什么
 
-设计决策以 [`design/approved-spec.md`](design/approved-spec.md) 为准。颜色、材质、圆角、布局、字体、图标、动效或文案语言变更必须先确认。
+| 能力 | 当前实现 | 边界 |
+| --- | --- | --- |
+| 本地 Agent | Qwen3.5-2B FAST 与 Qwen3.5-4B DEEP，MNN Q4，按会话锁定模型 | 两个模型可独立下载，不同时常驻 |
+| 多模态 | 文字、相册、拍照、截图分享、OCR 辅助、语音输入与 TTS | 图片和设备私密上下文强制本地；V1 不持续监听或录像 |
+| App 工具 | 类型化 Tool Registry、DAG、参数校验、确认、幂等与结果卡片 | 模型不能访问裸 SQL、令牌、任意网络或原始蓝牙命令 |
+| 个性化 | 短期任务上下文、结构化摘要、可确认长期记忆 | 记忆可查看和删除；健康原始序列不写入长期记忆 |
+| 健康感知 | Health Connect 聚合、来源与新鲜度、首页折叠卡、Agent 健康工具 | 缺失指标不会伪造成已测量值；“今日无记录”可按展示规则显示 0 |
+| Band 9 | 独立 CaesarBandBridge APK、签名保护 IPC、Gadgetbridge 同步触发与诊断 | 稳定历史数据以 Health Connect 为准；实时 HR/步数取决于 Bridge 已声明能力 |
+| 动态界面 | 类型化 CaesarSurface Compose Renderer、A2UI 稳定子集适配 | 未知组件、任意 URI、代码、SQL 和未注册 action 会被拒绝 |
+| 联网 | Supabase 业务数据；用户主动选择时直连 DeepSeek | 本地模型不会自行联网；尚无 `web.search` / `web.open` 工具 |
 
-## 最快开始
+产品界面已从校园平台调整为私人应用语义：社区对应“树洞”，市场对应“心愿墙”，“我的”页面不展示订单入口。仓库中保留 `CampusAI` 包名、目录名和部分内部类型名，仅用于升级与数据库兼容。
 
-要求：JDK 21、Android SDK、NDK `28.2.13676358`、CMake `3.22.1`、Node.js 24。Supabase 本地 migration 回放还需要 Docker。
+## 架构
+
+```mermaid
+flowchart TD
+    Input[文字 / 图片 / 语音 / App 状态] --> Runtime[Caesar Agent Runtime]
+    Runtime --> Route{规则路由与 DAG}
+    Route --> Fast[Qwen3.5-2B FAST]
+    Route --> Deep[Qwen3.5-4B DEEP]
+    Route --> Cloud[DeepSeek · 用户主动选择]
+    Fast --> Tools[Tool Registry]
+    Deep --> Tools
+    Cloud --> Tools
+    Tools --> UseCases[App Repository / UseCase]
+    UseCases --> Surface[文本 + CaesarSurface]
+    Band[小米手环 9] --> GB[Gadgetbridge]
+    GB --> Bridge[CaesarBandBridge]
+    GB --> HC[Health Connect]
+    Bridge --> Health[Health Gateway]
+    HC --> Health
+    Health --> Tools
+```
+
+内部 Agent 直接调用 Repository / UseCase。AppFunctions 只是对外安全适配层，MCP 不用于同进程通信；这样可以减少序列化、权限绕行和额外攻击面。
+
+## 快速构建
+
+需要：
+
+- JDK 21
+- Android SDK 36.1
+- Android NDK `28.2.13676358`
+- CMake `3.22.1`
+- Node.js 24（仅管理台）
+- Docker（仅本地完整回放 Supabase migration 时需要）
 
 ```powershell
-# Android 单元测试与调试 APK
-.\gradlew.bat :apps:android:app:testDebugUnitTest :apps:android:app:assembleDebug
+# Android 主应用、Band Bridge 与核心检查
+.\gradlew.bat `
+  :apps:android:app:testDebugUnitTest `
+  :apps:android:app:assembleDebug `
+  :apps:android:bandbridge:testDebugUnitTest `
+  :apps:android:bandbridge:lintDebug `
+  :apps:android:bandbridge:assembleDebug
 
 # Web 管理台
 Set-Location apps/admin
 npm ci
 npm run build
-npm run test:visual
-
-# Cloudflare Workers 静态资源部署
-npm run deploy:dry-run
-npm run deploy
+npm run test
 ```
 
-Web 本地环境放在 `apps/admin/.env.local`：
+Robolectric 首次运行会下载对应 Android SDK 测试包；在网络受限环境中，可先运行目标测试类和 `assembleDebug`，不要把依赖下载超时误判为源码失败。不要在物理手机上运行 `connectedDebugAndroidTest`。
 
-```dotenv
-VITE_SUPABASE_URL=https://mcpjecboqddqelgikvvc.supabase.co
-VITE_SUPABASE_ANON_KEY=你的公开 publishable key（sb_publishable_...）
+## 配置本地模型
+
+模型权重不在 Git 仓库，也不打入 APK。应用首次安装后，由用户在“我的 → AI 运行方式”分别下载：
+
+| 模式 | 模型 | 定位 |
+| --- | --- | --- |
+| FAST | Qwen3.5-2B MNN Q4 | 日常对话、简单读取与低功耗任务 |
+| DEEP | Qwen3.5-4B MNN Q4 | 多步骤工具、视觉理解与复杂规划 |
+
+下载器支持 Wi-Fi 约束、断点续传、进程恢复、逐文件 SHA-256、原子切换、暂停和按模型独立删除。切换默认档位只影响新会话，不会中断另一个模型的下载，也不会在会话中静默换权重。
+
+## 配置联网能力
+
+Caesar∞ 当前有两类受控网络入口：
+
+1. **Supabase**：登录、树洞、心愿墙、资料与同步等应用业务。
+2. **DeepSeek**：用户在设备上保存自己的 Key，并主动选择 DeepSeek 时，Android 直接请求固定域名 `api.deepseek.com`。
+
+DeepSeek Key 使用 Android Keystore 加密、不参与备份、不上传 Supabase。图片、健康、手环和明确的设备私密上下文不会自动发送到云端。
+
+目前没有把 OkHttp、WebView、浏览器 Cookie 或任意 URL 暴露给模型。计划中的通用联网会以有限工具实现：
+
+- `web.search(query, recency, domains)`：返回来源、摘要和抓取时间；
+- `web.open(url)`：只允许 HTTPS，并校验重定向、私网地址、响应类型、大小和超时；
+- 登录、下载、发布、支付继续使用独立工具与原生确认，不与只读搜索混用。
+
+网页、搜索结果和附件始终作为不可信数据，不能修改系统指令、权限、记忆规则或工具风险级别。
+
+## 接入 Health Connect 与 Band 9
+
+稳定链路：
+
+```text
+Band 9 → Gadgetbridge → Health Connect → Caesar Health Gateway
+                    ↘ CaesarBandBridge → 签名保护状态 IPC
 ```
 
-不要把 `service_role`、项目所有者的 DeepSeek 密钥或数据库密码写入 Android/Web 环境文件。
-Supabase `sb_publishable_...` 是公开客户端标识，可以进入 Web/Android。Android 用户只可在应用的 AI 设置中录入自己的 DeepSeek Key；Key 由 Android Keystore 加密、不参与备份，也不会上传 Supabase。
+使用顺序：
 
-## 导入课程表
+1. 在 Gadgetbridge 中完成真实 Band 9 配对和历史同步；不要从调试页面添加测试设备。
+2. 在 Health Connect 给 Gadgetbridge 写权限、给 Caesar∞ 读权限。
+3. 安装与主应用同签名的 CaesarBandBridge。
+4. 在 Caesar∞ 首页健康卡中刷新；详细来源、同步时间、连接状态和诊断位于折叠详情。
 
-在 Android 打开“时间”，点击右上角文件图标：
+手环有数据不等于 Gadgetbridge 一定能为当前固件解析并导出相同记录。V1 不承诺实时 SpO₂、实时压力、血压、VO₂max 或完整睡眠状态；不支持的实时能力必须显示为不可用，不能填入伪造值。
 
-1. 首选“选择课程表截图”。截取包含星期标题和完整时间栏的清晰图片。
-2. 应用在设备本地识别中文课程名、星期和时间，不会直接写入。
-3. 在预览里改正课程名或教室，删除误识别项，再点“确认导入”。
-4. 重复课程会按稳定指纹自动跳过，现有课程不会被覆盖。
+## 仓库结构
 
-如果教务系统可以导出日历，可选择 `.ics` 文件；识别仍不理想时使用“手动添加课程”。导入完成后，当天课程会显示在时间页。
+```text
+apps/android/app/            Caesar∞ Android 主应用
+apps/android/band-contract/  主应用与 Bridge 的稳定契约
+apps/android/bandbridge/     独立 Band 伴侣 APK
+apps/admin/                  React / TypeScript 管理台
+supabase/                    migration、RLS、RPC 与 Edge Functions
+design/                      SPECTRA、品牌与视觉验收规范
+docs/                        Agent、隐私、模型、性能和发布文档
+scripts/                     受控评测、设备测试与数据诊断脚本
+```
 
-## Supabase 与 AI
+## 隐私与安全
 
-- 目标项目：`mcpjecboqddqelgikvvc`。
-- migration 是数据库结构的唯一真相。
-- Android 的 `fast` / `deep` 直接调用固定域名 `api.deepseek.com`，且只使用当前用户在本机保存的 Key；没有 Key 时明确阻止请求，不存在平台额度回退。`supabase/functions/ai-chat` 保留为 Web/服务端能力，不被 Android 调用。
-- Android 的 AI 运行方式可选自动、DeepSeek（我的 Key）、本地离线。本地模型首次安装不下载、不进入 APK，只接受版本化固定清单并存入 `noBackupFilesDir/models`。
-- 本地模型下载支持 Wi-Fi 约束、明确移动网络确认、前台 WorkManager、断点续传、进程重启恢复、逐文件 SHA-256、原子 Ready、暂停、删除与重新下载。
-- AI 架构、路由、隐私、模型更新、用户操作和性能记录见 [`docs/local-ai-architecture.md`](docs/local-ai-architecture.md)、[`docs/ai-routing-privacy.md`](docs/ai-routing-privacy.md)、[`docs/local-ai-model-update.md`](docs/local-ai-model-update.md)、[`docs/local-ai-user-guide.md`](docs/local-ai-user-guide.md) 与 [`docs/local-ai-performance.md`](docs/local-ai-performance.md)。
-- Android 的时间记录与课程表采用 Room 本地优先；登录后由 WorkManager 同步当前账号与尚未认领的本地数据，退出后不会显示其他账号的私人记录。
-- Android 登录页提供登录/注册切换；注册只需要邮箱、密码和确认密码。Supabase 已允许注册且关闭邮箱确认，所以注册成功后直接建立会话，不增加验证码步骤。
-- 校园帖子、评论、举报、商品图片、会话、消息、购买和订单状态已接 canonical REST/RPC；管理台在真实配置下可执行审核、封禁、举报处理、公告和版本发布。
-- 官方 Supabase MCP 已连接并应用 11 份版本化 migration。线上现有 23 张 canonical public 表、33 条 policy，全部业务表启用 RLS；旧 `legacy` schema 已移除，`pg_trgm` 位于 `extensions` schema。
-- 用户明确放弃旧业务数据：旧表与旧头像文件已清理。为避免误删身份，现有 2 个 Supabase Auth 用户被保留并补建 profile；Storage 中只剩空目录占位元数据，不含旧头像内容。
-- Web 管理台已部署到 [Cloudflare Workers](https://campusai-admin.campus3ai-games.workers.dev)。公开页面只使用 Supabase publishable key；管理写入仍由服务端角色和 RLS/RPC 校验。
+- 本地模型没有裸网络、Shell、SQL 或 BLE/SPP 权限。
+- 工具在执行前进行结构、类型、风险和幂等校验。
+- 外发、不可逆、权限和账户安全操作必须经过代码策略；高风险操作使用系统确认或生物识别。
+- Prompt、图片、帖子、网页和工具结果都不能覆盖系统策略。
+- 日志和 Trace 不保存密码、令牌、配对密钥、原始健康序列或模型思维链。
+- `artifacts/`、模型权重、本机报告和设备抓取内容已被 Git 忽略。
 
-线上接管步骤与硬性门禁见 [`docs/live-cutover.md`](docs/live-cutover.md)。
-源码安全审计、已修复问题和残余发布风险见 [`docs/security-audit.md`](docs/security-audit.md)。
+Band Bridge 只使用公开可观察的 Android / Gadgetbridge Intent 边界与自有高层契约。若分发 Gadgetbridge 派生组件或复制其实现，必须另行完成 AGPL 与署名审查。
 
-## 发布所需 Secrets
+## 当前验证
 
-- Android：`ANDROID_KEYSTORE_BASE64`、`ANDROID_STORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。
-- Cloudflare Workers：`CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`、`SUPABASE_ANON_KEY`。
-- Supabase：`SUPABASE_ACCESS_TOKEN`、`SUPABASE_DB_PASSWORD`；只有启用服务端 `ai-chat` 时才另设 `DEEPSEEK_API_KEY`。Android 用户的个人 Key 不属于部署 Secret。
+本分支已完成：
 
-历史 release 签名证书当前不在仓库中。在找回并核对证书指纹前，不得声称新 APK 可覆盖安装旧正式版。
+- Android 主应用与 CaesarBandBridge debug APK 构建；
+- arm64 MNN JNI 编译与链接；
+- Band Bridge lint；
+- 输出守卫、生成代次、路由并发、本地/云选择、健康证据和健康展示定向测试；
+- 2B / 4B 独立下载、Agent 闭环、幂等、图片、语音、Health Connect 与数据库迁移测试源码。
 
-## 当前验证证据
+完整 JVM 套件仍需在 Robolectric Android 36 测试包可正常下载的环境中复跑。真机 Band 9 的长期稳定连接、全部固件历史解析和实时指标也仍是发布门禁，仓库不会把实验结果写成已稳定支持。
 
-- Android 24 项 JVM 测试、debug APK 构建与 Lint 全部通过；注册、个人 DeepSeek Key 和无平台回退已纳入回归。
-- MNN 3.6.1 arm64 原生桥已实际编译、链接并打入 APK；固定 manifest、路由、SSE、SHA、状态机、结构化事实与 30 条中文质量集测试通过。模型本体不在 APK 中。
-- API 35 模拟器已安装并验证首页、时间页、课程导入/编辑预览和独立登录页；Room 3→4 的真实数据库迁移测试通过，旧时间和课程行得到保留。
-- Web 生产构建通过；320、375、414、768、1280、1440 px 视觉回归及移动导航、数据筛选、未配置写操作门禁、登录错误路径共 9 项通过。
-- 11 份 Supabase migration 均通过 PostgreSQL AST 解析并已通过官方 MCP 应用到线上；本机没有 Docker，因此从空白容器完整回放与三角色并发集成测试仍交由 CI/后续环境完成。
-- 当前没有连接 arm64 8 GB 真机；完整模型下载、飞行模式推理、动态网络抓包和真实性能温度数据仍是发布门禁，未伪造结果。
+## 进一步阅读
 
-视觉证据与检查范围见 [`design/visual-tests/README.md`](design/visual-tests/README.md)。
+- [本地 Agent 架构](docs/local-ai-architecture.md)
+- [AI 路由与隐私](docs/ai-routing-privacy.md)
+- [本地模型用户指南](docs/local-ai-user-guide.md)
+- [Caesar Eval](docs/caesar-eval.md)
+- [图片、时间提示与视觉](docs/ai-time-prompts-and-vision.md)
+- [性能与真机门槛](docs/local-ai-performance.md)
+- [安全审计](docs/security-audit.md)
+- [上线接管](docs/live-cutover.md)
+- [SPECTRA / OpticalGlass 设计](design/caesar-adaptive-field-v1.md)
