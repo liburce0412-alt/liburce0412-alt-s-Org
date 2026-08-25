@@ -21,7 +21,7 @@ jobs:
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "ndk;28.2.13676358" "cmake;3.22.1"
       - uses: gradle/actions/setup-gradle@v6
-      - run: ./gradlew :apps:android:app:testDebugUnitTest :apps:android:app:assembleDebug :apps:android:app:lintDebug --stacktrace
+      - run: bash ./gradlew :apps:android:app:testDebugUnitTest :apps:android:app:assembleDebug :apps:android:app:lintDebug --stacktrace
       - shell: pwsh
         run: ./scripts/verify-local-ai-package.ps1
       - uses: actions/upload-artifact@v6
