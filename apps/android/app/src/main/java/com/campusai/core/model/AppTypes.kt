@@ -33,12 +33,27 @@ sealed interface UiState<out T> {
 
 enum class SyncState { LocalOnly, Pending, Synced, Conflict, Failed }
 
-data class AiConversationMessage(val role: String, val content: String)
+data class AiConversationMessage(
+    val role: String,
+    val content: String,
+    val presentationJson: String? = null,
+    val attachmentPaths: List<String> = emptyList(),
+)
 data class AiReport(
     val id: String,
+    val provider: AiProvider,
     val mode: AiMode,
+    val model: String,
     val title: String,
     val summary: String,
     val messagesJson: String,
     val createdAt: Long,
+    val updatedAt: Long,
+)
+
+data class DailyGreeting(
+    val localDate: String,
+    val text: String,
+    val provider: AiProvider,
+    val generatedAt: Long,
 )

@@ -1,3 +1,4 @@
 <resources>
-    <string name="app_name">CampusAI</string>
+    <string name="app_name">Caesar∞</string>
+    <string name="caesar_appfunctions_description">Caesar∞ 可查询课程、时间记录、树洞与心愿墙，并创建可撤销的本地时间记录。</string>
 </resources>

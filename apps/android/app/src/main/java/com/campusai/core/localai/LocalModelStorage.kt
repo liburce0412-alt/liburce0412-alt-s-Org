@@ -8,7 +8,10 @@ import java.io.File
 import java.io.FileInputStream
 import java.security.MessageDigest
 
-class LocalModelStorage(private val context: Context, val manifest: LocalModelManifest = LocalModelManifest.load(context)) {
+class LocalModelStorage(
+    private val context: Context,
+    val manifest: LocalModelManifest = LocalModelManifest.load(context),
+) {
     val root: File get() = File(context.noBackupFilesDir, "models")
     val activeDirectory: File get() = File(root, "${manifest.id}-${manifest.version}")
     val stagingDirectory: File get() = File(root, ".${manifest.id}-${manifest.version}.staging")
@@ -20,7 +23,10 @@ class LocalModelStorage(private val context: Context, val manifest: LocalModelMa
         val memory = ActivityManager.MemoryInfo().also {
             (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(it)
         }
-        if (memory.totalMem < manifest.minimumRamBytes) return "设备内存不足 6 GB，无法保证本地模型稳定运行。"
+        if (memory.totalMem < manifest.minimumRamBytes) {
+            val requiredGb = manifest.minimumRamBytes / (1024L * 1024L * 1024L)
+            return "设备内存不足 $requiredGb GB，无法保证 ${manifest.displayName} 稳定运行。"
+        }
         return null
     }
 
@@ -28,12 +34,16 @@ class LocalModelStorage(private val context: Context, val manifest: LocalModelMa
         File(activeDirectory, expected.path).let { it.isFile && it.length() == expected.size }
     }
 
-    fun downloadedBytes(): Long = sequenceOf(stagingDirectory, activeDirectory)
+    fun downloadedBytes(): Long = when {
+        stagingDirectory.exists() -> directoryBytes(stagingDirectory).coerceAtMost(manifest.totalBytes)
+        isReady() -> manifest.totalBytes
+        else -> 0L
+    }
+
+    fun occupiedBytes(): Long = sequenceOf(activeDirectory, stagingDirectory)
         .filter(File::exists)
         .flatMap { it.walkTopDown().filter(File::isFile) }
         .sumOf(File::length)
-
-    fun occupiedBytes(): Long = root.takeIf(File::exists)?.walkTopDown()?.filter(File::isFile)?.sumOf(File::length) ?: 0L
 
     fun hasEnoughSpace(): Boolean {
         root.mkdirs()
@@ -41,7 +51,14 @@ class LocalModelStorage(private val context: Context, val manifest: LocalModelMa
         return StatFs(root.absolutePath).availableBytes >= remaining + manifest.safetyMarginBytes
     }
 
-    fun deleteAll(): Boolean = !root.exists() || root.deleteRecursively()
+    fun deleteSelected(): Boolean {
+        val activeDeleted = !activeDirectory.exists() || activeDirectory.deleteRecursively()
+        val stagingDeleted = !stagingDirectory.exists() || stagingDirectory.deleteRecursively()
+        return activeDeleted && stagingDeleted
+    }
+
+    private fun directoryBytes(directory: File): Long =
+        directory.walkTopDown().filter(File::isFile).sumOf(File::length)
 
     companion object { const val READY_MARKER = ".ready.json" }
 }

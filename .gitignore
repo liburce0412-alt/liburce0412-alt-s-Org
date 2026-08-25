@@ -29,6 +29,16 @@ apps/admin/playwright-report/
 .supabase/
 supabase/.temp/
 
+# Local device/build investigation output. These folders can contain APKs,
+# decoded application data, screenshots, logs, and device-specific reports.
+/artifacts/
+/.storage-analysis.json
+/.phone-storage-analysis.json
+/phone-storage-report.html
+/design/visual-tests/current-iteration/
+/design/visual-tests/*.mp4
+/design/visual-tests/*.xml
+
 # Local AI model data is downloaded into noBackupFilesDir at runtime and must
 # never be checked into source control. The small, reviewed manifest remains tracked.
 *.mnn

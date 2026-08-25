@@ -11,7 +11,12 @@ import java.time.temporal.TemporalAdjusters
 
 enum class CampusAiTask { CHAT, HOME_INSIGHT, TODAY_SUMMARY, WEEK_SUMMARY, MONTH_SUMMARY, STRUCTURED_ADVICE, SCHEDULE_CLEANUP, TIME_PARSE }
 
-data class CampusAiPayload(val prompt: String, val structuredContext: JSONObject)
+data class CampusAiPayload(
+    val prompt: String,
+    val structuredContext: JSONObject,
+    val displayPrompt: String = prompt,
+    val presentation: AiTaskPresentation? = null,
+)
 
 object CampusAiTaskFactory {
     fun create(
@@ -30,18 +35,34 @@ object CampusAiTaskFactory {
         val facts = learningFacts(records, range, nowMillis, zone)
         val prompt = when (task) {
             CampusAiTask.CHAT -> userInput
-            CampusAiTask.HOME_INSIGHT -> "只根据已计算数据生成一句今日洞察和一个可执行动作。"
-            CampusAiTask.TODAY_SUMMARY -> "总结今日学习数据：先结论，再给两条行动。不得重新计算数字。"
-            CampusAiTask.WEEK_SUMMARY -> "总结本周学习数据：说明趋势，再给下周行动。不得重新计算数字。"
-            CampusAiTask.MONTH_SUMMARY -> "总结本月学习数据：说明投入和目标完成情况。不得重新计算数字。"
-            CampusAiTask.STRUCTURED_ADVICE -> "根据结构化学习数据给三条建议，所有数字原样保留。"
+            CampusAiTask.HOME_INSIGHT -> "只把 analysisStatements 的事实合成一句今日洞察，再用一句话复述 suggestedActionPlan.blocks 的第一项行动。不得加入 statements 之外的判断；对象与时长必须逐字照用计划字段。"
+            CampusAiTask.TODAY_SUMMARY -> "只使用 analysisStatements 写今日分析，然后按顺序复述 suggestedActionPlan.blocks，并说明 remainingAfterPlanMinutes。不得写本周、本月、效率、休息习惯或 statements 中没有的判断；对象、时长、休息和剩余差距必须逐字照用计划字段。"
+            CampusAiTask.WEEK_SUMMARY -> "只使用 analysisStatements 写本周分析，然后把 suggestedActionPlan 作为下一步启动计划逐项复述。不得加入 statements 之外的原因、成绩或效率判断；对象、时长、休息和剩余差距必须照用计划字段。"
+            CampusAiTask.MONTH_SUMMARY -> "只使用 analysisStatements 写本月分析，然后把 suggestedActionPlan 作为下一步启动计划逐项复述。不得加入 statements 之外的原因、成绩或效率判断；对象、时长、休息和剩余差距必须照用计划字段。"
+            CampusAiTask.STRUCTURED_ADVICE -> "只使用 analysisStatements 说明依据，再逐项复述 suggestedActionPlan。不得增加 statements 或计划之外的判断、对象或数字。"
             CampusAiTask.SCHEDULE_CLEANUP -> "整理课程表字段并指出已计算出的时间冲突；缺失字段标记待确认，不得猜测。"
             CampusAiTask.TIME_PARSE -> "把自然语言记录整理成标题、分类、开始时间、结束时间和时长；只使用解析器已确定的字段，未知项标记待确认。"
         }
-        val context = JSONObject().put("task", task.name.lowercase()).put("learningFacts", facts)
+        val context = JSONObject().put("task", task.name.lowercase())
+        if (task != CampusAiTask.CHAT) context.put("learningFacts", facts)
         if (task == CampusAiTask.SCHEDULE_CLEANUP) context.put("scheduleFacts", scheduleFacts(courses))
         if (task == CampusAiTask.TIME_PARSE) context.put("timeParseFacts", parseTimeFacts(userInput, nowMillis, zone))
-        return CampusAiPayload(prompt, context)
+        val displayPrompt = when (task) {
+            CampusAiTask.CHAT -> userInput
+            CampusAiTask.HOME_INSIGHT -> "今日洞察"
+            CampusAiTask.TODAY_SUMMARY -> "今日总结"
+            CampusAiTask.WEEK_SUMMARY -> "本周总结"
+            CampusAiTask.MONTH_SUMMARY -> "本月总结"
+            CampusAiTask.STRUCTURED_ADVICE -> "生成学习建议"
+            CampusAiTask.SCHEDULE_CLEANUP -> "整理课程表"
+            CampusAiTask.TIME_PARSE -> userInput.takeIf(String::isNotBlank)?.let { "解析记录：${it.take(80)}" } ?: "解析时间记录"
+        }
+        return CampusAiPayload(
+            prompt = prompt,
+            structuredContext = context,
+            displayPrompt = displayPrompt,
+            presentation = facts.toPresentation(task),
+        )
     }
 
     private enum class LearningRange { TODAY, WEEK, MONTH }
@@ -58,25 +79,140 @@ object CampusAiTaskFactory {
         val selected = records.filter { it.startTime in start until end }
         val total = selected.sumOf(TimeRecord::durationMinutes)
         val days = generateSequence(startDate) { it.plusDays(1) }.takeWhile { !it.isAfter(today) }.toList()
-        val daily = JSONArray(days.map { day ->
+        val perDay = days.map { day ->
             val dayStart = day.atStartOfDay(zone).toInstant().toEpochMilli()
             val dayEnd = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-            JSONObject().put("date", day.toString()).put("minutes", selected.filter { it.startTime in dayStart until dayEnd }.sumOf(TimeRecord::durationMinutes))
+            day to selected.filter { it.startTime in dayStart until dayEnd }.sumOf(TimeRecord::durationMinutes)
+        }
+        val daily = JSONArray(perDay.map { (day, minutes) ->
+            JSONObject().put("date", day.toString()).put("minutes", minutes)
         })
         val categories = JSONObject()
-        selected.groupBy(TimeRecord::category).toSortedMap().forEach { (category, values) -> categories.put(category, values.sumOf(TimeRecord::durationMinutes)) }
+        val categoryTotals = selected.groupBy(TimeRecord::category).toSortedMap().mapValues { (_, values) ->
+            values.sumOf(TimeRecord::durationMinutes)
+        }
+        categoryTotals.forEach(categories::put)
+        val categoryShares = JSONObject()
+        categoryTotals.forEach { (category, minutes) ->
+            categoryShares.put(category, if (total == 0L) 0L else minutes * 10_000L / total)
+        }
         val target = when (range) { LearningRange.TODAY -> 240L; LearningRange.WEEK -> 1_680L; LearningRange.MONTH -> 7_200L }
         val goalRateBasisPoints = if (target == 0L) 0L else total * 10_000L / target
+        val activeDays = perDay.count { (_, minutes) -> minutes > 0L }
+        val currentStreakDays = perDay.asReversed().takeWhile { (_, minutes) -> minutes > 0L }.size
+        val peak = perDay.maxByOrNull { (_, minutes) -> minutes }?.takeIf { (_, minutes) -> minutes > 0L }
+        val trend = computeTrend(perDay.map { (_, minutes) -> minutes })
+        val recentRecords = selected.sortedByDescending(TimeRecord::startTime).take(6)
+        val subjectNames = recentRecords.map(TimeRecord::title).filter(String::isNotBlank).distinct()
+        val allowedActionSubjects = JSONArray(subjectNames)
+        val recentEntries = JSONArray(recentRecords.map { record ->
+            JSONObject()
+                .put("title", record.title.take(80))
+                .put("category", record.category.take(40))
+                .put("durationMinutes", record.durationMinutes)
+                .put("date", Instant.ofEpochMilli(record.startTime).atZone(zone).toLocalDate().toString())
+        })
+        val remainingTarget = (target - total).coerceAtLeast(0L)
+        val fallbackSubject = when (range) {
+            LearningRange.TODAY -> "今天最重要的任务"
+            LearningRange.WEEK -> "下周最重要的任务"
+            LearningRange.MONTH -> "下月最重要的任务"
+        }
+        val actionDurations = when {
+            remainingTarget == 0L -> listOf(25L)
+            remainingTarget <= 65L -> listOf(remainingTarget.coerceAtMost(50L))
+            else -> listOf(50L, 50L)
+        }
+        val actionBlocks = JSONArray(actionDurations.mapIndexed { index, duration ->
+            JSONObject()
+                .put("sequence", index + 1)
+                .put("subject", subjectNames.getOrNull(index) ?: subjectNames.firstOrNull() ?: fallbackSubject)
+                .put("durationMinutes", duration)
+        })
+        val coveredMinutes = actionDurations.sum()
+        val suggestedActionPlan = JSONObject()
+            .put("purpose", "next_step_not_full_schedule")
+            .put("blocks", actionBlocks)
+            .put("breakMinutesBetweenBlocks", if (actionDurations.size > 1) 10L else 0L)
+            .put("coveredMinutes", coveredMinutes)
+            .put("remainingAfterPlanMinutes", (remainingTarget - coveredMinutes).coerceAtLeast(0L))
+        val rangeLabel = when (range) {
+            LearningRange.TODAY -> "今日"
+            LearningRange.WEEK -> "本周"
+            LearningRange.MONTH -> "本月"
+        }
+        val topCategory = categoryTotals.maxByOrNull { (_, minutes) -> minutes }
+        val analysisStatements = JSONArray().apply {
+            put("${rangeLabel}已记录${total}分钟，目标${target}分钟，剩余${remainingTarget}分钟。")
+            put("${rangeLabel}共有${selected.size}条时间记录，活跃${activeDays}天，当前连续记录${currentStreakDays}天。")
+            if (topCategory != null && total > 0L) {
+                val (category, minutes) = topCategory
+                put("投入最多的分类是${category}，共${minutes}分钟，占比基点为${minutes * 10_000L / total}。")
+            } else {
+                put("${rangeLabel}暂无可分析的分类记录。")
+            }
+            when (trend.direction) {
+                "up" -> put("后半段日均比前半段增加${trend.deltaAverageMinutes}分钟。")
+                "down" -> put("后半段日均比前半段减少${-trend.deltaAverageMinutes}分钟。")
+                "flat" -> put("前后半段日均分钟相同。")
+                else -> if (range != LearningRange.TODAY) put("当前自然日数量不足，不能判断投入趋势。")
+            }
+        }
         return JSONObject()
             .put("range", range.name.lowercase())
+            .put("rangeLabel", rangeLabel)
             .put("startDate", startDate.toString())
             .put("endDate", today.toString())
             .put("recordCount", selected.size)
             .put("totalMinutes", total)
             .put("targetMinutes", target)
+            .put("remainingTargetMinutes", remainingTarget)
             .put("goalRateBasisPoints", goalRateBasisPoints)
+            .put("goalStatus", if (total >= target) "met" else "in_progress")
+            .put("activeDays", activeDays)
+            .put("currentStreakDays", currentStreakDays)
+            .put("longestSessionMinutes", selected.maxOfOrNull(TimeRecord::durationMinutes) ?: 0L)
+            .put("peakDate", peak?.first?.toString() ?: JSONObject.NULL)
+            .put("peakMinutes", peak?.second ?: 0L)
+            .put("trendDirection", trend.direction)
+            .put("trendDeltaAverageMinutes", trend.deltaAverageMinutes)
+            .put("earlierAverageMinutes", trend.earlierAverageMinutes)
+            .put("laterAverageMinutes", trend.laterAverageMinutes)
+            .put("allowedActionSubjects", allowedActionSubjects)
+            .put("recentEntries", recentEntries)
+            .put("suggestedActionPlan", suggestedActionPlan)
+            .put("analysisStatements", analysisStatements)
             .put("categoryMinutes", categories)
+            .put("categoryShareBasisPoints", categoryShares)
             .put("dailyMinutes", daily)
+    }
+
+    private data class TrendFacts(
+        val direction: String,
+        val deltaAverageMinutes: Long,
+        val earlierAverageMinutes: Long,
+        val laterAverageMinutes: Long,
+    )
+
+    private fun computeTrend(minutes: List<Long>): TrendFacts {
+        if (minutes.size < 2) return TrendFacts("insufficient_data", 0L, 0L, 0L)
+        val split = minutes.size / 2
+        val earlier = minutes.take(split)
+        val later = minutes.drop(split)
+        if (earlier.isEmpty() || later.isEmpty()) return TrendFacts("insufficient_data", 0L, 0L, 0L)
+        val earlierAverage = earlier.sum() / earlier.size
+        val laterAverage = later.sum() / later.size
+        val delta = laterAverage - earlierAverage
+        return TrendFacts(
+            direction = when {
+                delta > 0L -> "up"
+                delta < 0L -> "down"
+                else -> "flat"
+            },
+            deltaAverageMinutes = delta,
+            earlierAverageMinutes = earlierAverage,
+            laterAverageMinutes = laterAverage,
+        )
     }
 
     private fun scheduleFacts(courses: List<CourseSchedule>): JSONObject {
@@ -119,5 +255,35 @@ object CampusAiTaskFactory {
             else -> current = digits[char]?.toLong() ?: return null
         } }
         return total + current
+    }
+
+    private fun JSONObject.toPresentation(task: CampusAiTask): AiTaskPresentation? {
+        if (task !in setOf(
+                CampusAiTask.HOME_INSIGHT,
+                CampusAiTask.TODAY_SUMMARY,
+                CampusAiTask.WEEK_SUMMARY,
+                CampusAiTask.MONTH_SUMMARY,
+                CampusAiTask.STRUCTURED_ADVICE,
+            )
+        ) return null
+        val plan = optJSONObject("suggestedActionPlan") ?: return null
+        val blocks = plan.optJSONArray("blocks") ?: JSONArray()
+        return AiTaskPresentation(
+            headline = "${optString("rangeLabel", "当前")}目标还差 ${optLong("remainingTargetMinutes")} 分钟",
+            actionBlocks = buildList {
+                repeat(blocks.length()) { index ->
+                    blocks.optJSONObject(index)?.let { block ->
+                        add(
+                            AiActionBlock(
+                                subject = block.optString("subject", "下一项任务"),
+                                durationMinutes = block.optLong("durationMinutes"),
+                            ),
+                        )
+                    }
+                }
+            },
+            breakMinutes = plan.optLong("breakMinutesBetweenBlocks"),
+            remainingAfterPlanMinutes = plan.optLong("remainingAfterPlanMinutes"),
+        )
     }
 }

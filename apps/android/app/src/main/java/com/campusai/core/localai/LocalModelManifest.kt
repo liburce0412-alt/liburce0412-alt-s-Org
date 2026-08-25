@@ -30,9 +30,9 @@ data class LocalModelManifest(
     init {
         require(schemaVersion == 1)
         require(id.matches(Regex("[a-z0-9._-]+")))
-        require(repository == TRUSTED_REPOSITORY)
+        require(repository in TRUSTED_REPOSITORIES)
         require(revision.matches(Regex("[0-9a-f]{40}")))
-        require(sourceUrl == TRUSTED_SOURCE)
+        require(sourceUrl == "https://huggingface.co/$repository")
         require(files.isNotEmpty() && files.sumOf { it.size } == totalBytes)
         files.forEach { file ->
             require(file.path.matches(Regex("[A-Za-z0-9._-]+")))
@@ -44,8 +44,8 @@ data class LocalModelManifest(
     fun downloadUrl(file: LocalModelFile): String = Uri.Builder()
         .scheme("https")
         .authority("huggingface.co")
-        .appendPath("taobao-mnn")
-        .appendPath("Qwen3.5-2B-MNN")
+        .appendPath(repository.substringBefore('/'))
+        .appendPath(repository.substringAfter('/'))
         .appendPath("resolve")
         .appendPath(revision)
         .appendPath(file.path)
@@ -53,12 +53,21 @@ data class LocalModelManifest(
         .toString()
 
     companion object {
-        const val ASSET_PATH = "local_models/qwen3_5_2b_mnn.json"
-        const val TRUSTED_REPOSITORY = "taobao-mnn/Qwen3.5-2B-MNN"
-        const val TRUSTED_SOURCE = "https://huggingface.co/taobao-mnn/Qwen3.5-2B-MNN"
+        const val DEFAULT_MODEL_ID = "qwen3.5-4b-mnn"
+        private val ASSET_PATHS = mapOf(
+            DEFAULT_MODEL_ID to "local_models/qwen3_5_4b_mnn.json",
+            "qwen3.5-2b-mnn" to "local_models/qwen3_5_2b_mnn.json",
+        )
+        val TRUSTED_REPOSITORIES = setOf(
+            "taobao-mnn/Qwen3.5-4B-MNN",
+            "taobao-mnn/Qwen3.5-2B-MNN",
+        )
 
-        fun load(context: Context): LocalModelManifest = parse(
-            context.assets.open(ASSET_PATH).bufferedReader().use { it.readText() },
+        fun availableModelIds(): Set<String> = ASSET_PATHS.keys
+
+        fun load(context: Context, modelId: String = DEFAULT_MODEL_ID): LocalModelManifest = parse(
+            context.assets.open(ASSET_PATHS[modelId] ?: error("Unknown local model: $modelId"))
+                .bufferedReader().use { it.readText() },
         )
 
         fun parse(raw: String): LocalModelManifest {

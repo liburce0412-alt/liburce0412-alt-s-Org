@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AppFunctionAppMetadata xmlns:appfn="http://schemas.android.com/apk/androidx.appfunctions"
+    appfn:description="Caesar∞ manages its owner's private local schedule and time records, and can read approved tree-hollow updates. Query before writing. The exported write creates only a reversible local time record. Authentication, messages, orders, raw health data, tokens, database access and device protocols are never exposed."
+    appfn:displayDescription="@string/caesar_appfunctions_description" />

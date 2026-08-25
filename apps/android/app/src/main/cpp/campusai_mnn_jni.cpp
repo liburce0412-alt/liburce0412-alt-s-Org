@@ -1,9 +1,12 @@
 #include <jni.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "llm/llm.hpp"
 
@@ -19,6 +22,17 @@ struct Engine {
     ~Engine() { if (llm) Llm::destroy(llm); }
 };
 
+std::mutex enginesMutex;
+std::unordered_map<jlong, std::shared_ptr<Engine>> engines;
+std::atomic<jlong> nextEngineHandle{1};
+
+std::shared_ptr<Engine> findEngine(jlong handle) {
+    if (handle == 0) return {};
+    std::lock_guard<std::mutex> lock(enginesMutex);
+    const auto found = engines.find(handle);
+    return found == engines.end() ? std::shared_ptr<Engine>{} : found->second;
+}
+
 std::string toUtf8(JNIEnv* env, jstring value) {
     if (!value) return {};
     const char* chars = env->GetStringUTFChars(value, nullptr);
@@ -31,14 +45,29 @@ jstring fromUtf8(JNIEnv* env, const std::string& input) {
     std::vector<jchar> output;
     output.reserve(input.size());
     for (size_t index = 0; index < input.size();) {
-        uint32_t codepoint = 0xfffd;
         const unsigned char first = static_cast<unsigned char>(input[index]);
-        size_t count = 1;
-        if (first < 0x80) codepoint = first;
-        else if ((first & 0xe0) == 0xc0 && index + 1 < input.size()) { codepoint = first & 0x1f; count = 2; }
-        else if ((first & 0xf0) == 0xe0 && index + 2 < input.size()) { codepoint = first & 0x0f; count = 3; }
-        else if ((first & 0xf8) == 0xf0 && index + 3 < input.size()) { codepoint = first & 0x07; count = 4; }
-        for (size_t i = 1; i < count; ++i) codepoint = (codepoint << 6) | (static_cast<unsigned char>(input[index + i]) & 0x3f);
+        size_t count = first < 0x80 ? 1 :
+            (first & 0xe0) == 0xc0 ? 2 :
+            (first & 0xf0) == 0xe0 ? 3 :
+            (first & 0xf8) == 0xf0 ? 4 : 0;
+        bool valid = count > 0 && index + count <= input.size();
+        uint32_t codepoint = count == 1 ? first :
+            count == 2 ? first & 0x1f :
+            count == 3 ? first & 0x0f :
+            count == 4 ? first & 0x07 : 0xfffd;
+        for (size_t i = 1; valid && i < count; ++i) {
+            const unsigned char continuation = static_cast<unsigned char>(input[index + i]);
+            valid = (continuation & 0xc0) == 0x80;
+            if (valid) codepoint = (codepoint << 6) | (continuation & 0x3f);
+        }
+        const bool overlong = (count == 2 && codepoint < 0x80) ||
+            (count == 3 && codepoint < 0x800) ||
+            (count == 4 && codepoint < 0x10000);
+        if (!valid || overlong || codepoint > 0x10ffff || (codepoint >= 0xd800 && codepoint <= 0xdfff)) {
+            output.push_back(static_cast<jchar>(0xfffd));
+            ++index;
+            continue;
+        }
         if (codepoint <= 0xffff) output.push_back(static_cast<jchar>(codepoint));
         else {
             codepoint -= 0x10000;
@@ -50,30 +79,96 @@ jstring fromUtf8(JNIEnv* env, const std::string& input) {
     return env->NewString(output.data(), static_cast<jsize>(output.size()));
 }
 
+// MNN tokenizer pieces are byte strings, not guaranteed Unicode scalar
+// boundaries. Keep a valid but incomplete trailing sequence for the next
+// token instead of turning every fragment into U+FFFD.
+size_t completeUtf8PrefixLength(const std::string& input) {
+    size_t index = 0;
+    while (index < input.size()) {
+        const unsigned char first = static_cast<unsigned char>(input[index]);
+        const size_t count = first < 0x80 ? 1 :
+            (first & 0xe0) == 0xc0 ? 2 :
+            (first & 0xf0) == 0xe0 ? 3 :
+            (first & 0xf8) == 0xf0 ? 4 : 0;
+        if (count == 0) {
+            ++index;
+            continue;
+        }
+        if (index + count > input.size()) {
+            bool incomplete = true;
+            for (size_t i = index + 1; i < input.size(); ++i) {
+                if ((static_cast<unsigned char>(input[i]) & 0xc0) != 0x80) {
+                    incomplete = false;
+                    break;
+                }
+            }
+            if (incomplete) return index;
+            ++index;
+            continue;
+        }
+        bool validContinuation = true;
+        for (size_t i = 1; i < count; ++i) {
+            if ((static_cast<unsigned char>(input[index + i]) & 0xc0) != 0x80) {
+                validContinuation = false;
+                break;
+            }
+        }
+        index += validContinuation ? count : 1;
+    }
+    return input.size();
+}
+
 void throwState(JNIEnv* env, const char* message) {
     jclass type = env->FindClass("java/lang/IllegalStateException");
     if (type) env->ThrowNew(type, message);
+}
+
+// The pinned Qwen3.5 MNN export ends its generation prompt with an open
+// <think> block and does not consult jinja.context.enable_thinking.  MNN's
+// runtime config therefore cannot disable reasoning for this model revision.
+// Close only a trailing, still-empty think block before tokenization.  This
+// keeps earlier assistant history intact while making the next turn start in
+// final-answer mode.  Prompt content is never logged.
+std::string forceFinalAnswerMode(std::string prompt) {
+    const std::string marker = "<think>";
+    const auto open = prompt.rfind(marker);
+    if (open == std::string::npos) return prompt;
+    const auto tailStart = open + marker.size();
+    const bool emptyTail = std::all_of(
+        prompt.begin() + static_cast<std::ptrdiff_t>(tailStart),
+        prompt.end(),
+        [](unsigned char value) { return std::isspace(value) != 0; }
+    );
+    if (!emptyTail) return prompt;
+    prompt.erase(open);
+    prompt.append("<think>\n\n</think>\n\n");
+    return prompt;
 }
 }
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_campusai_core_localai_MnnNativeBridge_nativeCreate(JNIEnv* env, jobject, jstring configPath, jstring cachePath) {
-    auto engine = std::make_unique<Engine>();
+    auto engine = std::make_shared<Engine>();
     engine->llm = Llm::createLLM(toUtf8(env, configPath));
     if (!engine->llm) { throwState(env, "MNN could not create the model instance"); return 0; }
     const std::string cache = toUtf8(env, cachePath);
-    const std::string config = std::string("{\"backend_type\":\"cpu\",\"thread_num\":4,\"precision\":\"low\",\"memory\":\"low\",\"async\":false,\"reuse_kv\":false,\"use_mmap\":true,\"tmp_path\":\"") + cache + "\",\"max_all_tokens\":4096,\"max_new_tokens\":512,\"jinja\":{\"context\":{\"enable_thinking\":false}}}";
+    const std::string config = std::string("{\"backend_type\":\"cpu\",\"thread_num\":4,\"precision\":\"low\",\"memory\":\"low\",\"async\":false,\"reuse_kv\":false,\"use_mmap\":true,\"tmp_path\":\"") + cache + "\",\"max_all_tokens\":8192,\"max_new_tokens\":512,\"jinja\":{\"context\":{\"enable_thinking\":false}}}";
     if (!engine->llm->set_config(config) || !engine->llm->load()) {
         throwState(env, "MNN failed to load the verified model");
         return 0;
     }
-    return reinterpret_cast<jlong>(engine.release());
+    const jlong handle = nextEngineHandle.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> lock(enginesMutex);
+        engines.emplace(handle, std::move(engine));
+    }
+    return handle;
 }
 
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_com_campusai_core_localai_MnnNativeBridge_nativeGenerate(
     JNIEnv* env, jobject, jlong pointer, jobjectArray roles, jobjectArray contents, jint maxTokens, jobject listener) {
-    auto* engine = reinterpret_cast<Engine*>(pointer);
+    const auto engine = findEngine(pointer);
     if (!engine || !engine->llm) { throwState(env, "Local model is not loaded"); return nullptr; }
     const jsize count = env->GetArrayLength(roles);
     if (count != env->GetArrayLength(contents) || count < 1 || count > 32) { throwState(env, "Invalid local conversation"); return nullptr; }
@@ -86,9 +181,9 @@ Java_com_campusai_core_localai_MnnNativeBridge_nativeGenerate(
         std::string content = toUtf8(env, contentObject);
         env->DeleteLocalRef(roleObject);
         env->DeleteLocalRef(contentObject);
-        if (role != "system" && role != "user" && role != "assistant") { throwState(env, "Invalid local message role"); return nullptr; }
+        if (role != "system" && role != "user" && role != "assistant" && role != "tool") { throwState(env, "Invalid local message role"); return nullptr; }
         inputBytes += content.size();
-        if (inputBytes > 48000) { throwState(env, "Local context is too long; keep it within 4096 tokens"); return nullptr; }
+        if (inputBytes > 96000) { throwState(env, "Local context is too long; keep it within 8192 tokens"); return nullptr; }
         messages.emplace_back(std::move(role), std::move(content));
     }
     jclass listenerClass = env->GetObjectClass(listener);
@@ -99,10 +194,14 @@ Java_com_campusai_core_localai_MnnNativeBridge_nativeGenerate(
     engine->cancelled.store(false);
     engine->llm->reset();
     const auto started = std::chrono::steady_clock::now();
-    engine->llm->response(messages, nullptr, nullptr, 0);
+    const std::string renderedPrompt = forceFinalAnswerMode(engine->llm->apply_chat_template(messages));
+    const std::vector<int> inputIds = engine->llm->tokenizer_encode(renderedPrompt);
+    if (inputIds.empty()) { throwState(env, "MNN produced an empty local prompt"); return nullptr; }
+    engine->llm->response(inputIds, nullptr, nullptr, 0);
     auto context = engine->llm->getContext();
     const int limit = std::max(1, std::min(static_cast<int>(maxTokens), 512));
     int emitted = 0;
+    std::string pendingUtf8;
     while (!engine->cancelled.load() && !engine->llm->stoped() && emitted < limit) {
         engine->llm->generate(1);
         context = engine->llm->getContext();
@@ -110,12 +209,22 @@ Java_com_campusai_core_localai_MnnNativeBridge_nativeGenerate(
         if (engine->llm->is_stop(context->current_token)) break;
         const std::string token = engine->llm->tokenizer_decode(context->current_token);
         if (!token.empty()) {
-            jstring javaToken = fromUtf8(env, token);
-            const jboolean stop = env->CallBooleanMethod(listener, onToken, javaToken);
-            env->DeleteLocalRef(javaToken);
-            if (env->ExceptionCheck() || stop == JNI_TRUE) { engine->cancelled.store(true); break; }
+            pendingUtf8.append(token);
+            const size_t readyBytes = completeUtf8PrefixLength(pendingUtf8);
+            if (readyBytes > 0) {
+                jstring javaToken = fromUtf8(env, pendingUtf8.substr(0, readyBytes));
+                const jboolean stop = env->CallBooleanMethod(listener, onToken, javaToken);
+                env->DeleteLocalRef(javaToken);
+                pendingUtf8.erase(0, readyBytes);
+                if (env->ExceptionCheck() || stop == JNI_TRUE) { engine->cancelled.store(true); break; }
+            }
         }
         ++emitted;
+    }
+    if (!engine->cancelled.load() && !pendingUtf8.empty()) {
+        jstring javaToken = fromUtf8(env, pendingUtf8);
+        env->CallBooleanMethod(listener, onToken, javaToken);
+        env->DeleteLocalRef(javaToken);
     }
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
     const jlong values[6] = {
@@ -133,17 +242,22 @@ Java_com_campusai_core_localai_MnnNativeBridge_nativeGenerate(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_campusai_core_localai_MnnNativeBridge_nativeCancel(JNIEnv*, jobject, jlong pointer) {
-    auto* engine = reinterpret_cast<Engine*>(pointer);
+    const auto engine = findEngine(pointer);
     if (engine) engine->cancelled.store(true);
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_campusai_core_localai_MnnNativeBridge_nativeRelease(JNIEnv*, jobject, jlong pointer) {
-    auto* engine = reinterpret_cast<Engine*>(pointer);
-    if (!engine) return;
+    std::shared_ptr<Engine> engine;
+    {
+        std::lock_guard<std::mutex> lock(enginesMutex);
+        const auto found = engines.find(pointer);
+        if (found == engines.end()) return;
+        engine = std::move(found->second);
+        engines.erase(found);
+    }
     engine->cancelled.store(true);
     {
         std::lock_guard<std::mutex> lock(engine->mutex);
     }
-    delete engine;
 }

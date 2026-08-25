@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 108 108" role="img" aria-labelledby="title desc">
+  <title id="title">CampusAI optical C badge source</title>
+  <desc id="desc">Legacy optical C and five-node artwork retained for avatars and achievements; it is no longer the launcher icon.</desc>
+  <defs>
+    <radialGradient id="cyan" cx="0" cy="0" r="1" gradientTransform="translate(18 18) rotate(45) scale(62)"><stop stop-color="#16C5DC" stop-opacity=".72"/><stop offset="1" stop-color="#16C5DC" stop-opacity="0"/></radialGradient>
+    <radialGradient id="violet" cx="0" cy="0" r="1" gradientTransform="translate(84 24) rotate(45) scale(62)"><stop stop-color="#7562F5" stop-opacity=".65"/><stop offset="1" stop-color="#7562F5" stop-opacity="0"/></radialGradient>
+    <radialGradient id="warm" cx="0" cy="0" r="1" gradientTransform="translate(92 91) rotate(45) scale(64)"><stop stop-color="#FF8B43" stop-opacity=".65"/><stop offset="1" stop-color="#FF8B43" stop-opacity="0"/></radialGradient>
+    <radialGradient id="rose" cx="0" cy="0" r="1" gradientTransform="translate(22 91) rotate(45) scale(58)"><stop stop-color="#FF79B9" stop-opacity=".55"/><stop offset="1" stop-color="#FF79B9" stop-opacity="0"/></radialGradient>
+  </defs>
+  <path fill="#F8F9FD" d="M0 0h108v108H0z"/><path fill="url(#cyan)" d="M0 0h108v108H0z"/><path fill="url(#violet)" d="M0 0h108v108H0z"/><path fill="url(#warm)" d="M0 0h108v108H0z"/><path fill="url(#rose)" d="M0 0h108v108H0z"/>
+  <path d="M73 36a25 25 0 1 0 0 36" fill="none" stroke="#162033" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="73" cy="36" r="5" fill="#16C5DC"/><circle cx="43" cy="32" r="5" fill="#7562F5"/><circle cx="29" cy="53" r="5" fill="#FF79B9"/><circle cx="42" cy="77" r="5" fill="#FF8B43"/><circle cx="73" cy="72" r="5" fill="#5A7DFF"/>
+</svg>

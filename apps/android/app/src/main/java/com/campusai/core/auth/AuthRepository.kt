@@ -40,7 +40,8 @@ class AuthRepository(private val context: Context) {
     suspend fun signIn(email: String, password: String): Boolean {
         _state.value = _state.value.copy(busy = true, error = null)
         return SupabaseClient.signIn(email, password).fold(
-            onSuccess = { session ->
+            onSuccess = { rawSession ->
+                val session = normalizeSession(rawSession, email)
                 if (!persist(session)) {
                     SupabaseClient.clearSession()
                     _state.value = AuthState(error = "设备安全存储不可用，没有保存登录令牌。请检查系统锁屏与安全设置。")
@@ -58,7 +59,7 @@ class AuthRepository(private val context: Context) {
         _state.value = _state.value.copy(busy = true, error = null, notice = null)
         return SupabaseClient.signUp(email, password).fold(
             onSuccess = { result ->
-                val session = result.session
+                val session = result.session?.let { normalizeSession(it, result.email) }
                 if (session == null) {
                     _state.value = AuthState(
                         email = result.email,
@@ -85,7 +86,8 @@ class AuthRepository(private val context: Context) {
         val refreshToken = SecurePreferences.decrypt(context, refreshKey)
         if (refreshToken.isBlank()) return false
         return SupabaseClient.refresh(refreshToken).fold(
-            onSuccess = { session ->
+            onSuccess = { rawSession ->
+                val session = normalizeSession(rawSession)
                 val saved = persist(session)
                 if (saved) _state.value = AuthState(signedIn = true, email = session.email, userId = session.userId)
                 saved
@@ -113,6 +115,13 @@ class AuthRepository(private val context: Context) {
         if (!saved) listOf(accessKey, refreshKey, emailKey, userIdKey).forEach { SecurePreferences.encrypt(context, it, "") }
         return saved
     }
+
+    private fun normalizeSession(session: AuthSession, fallbackEmail: String = ""): AuthSession = session.copy(
+        email = session.email.ifBlank { fallbackEmail.ifBlank { _state.value.email } },
+        userId = session.userId
+            .ifBlank { jwtSubject(session.accessToken) }
+            .ifBlank { _state.value.userId },
+    )
 
     private fun jwtSubject(token: String): String = runCatching {
         val payload = token.split('.').getOrNull(1).orEmpty()

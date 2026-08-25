@@ -64,8 +64,8 @@ android {
     }
   }
   compileOptions {
-    sourceCompatibility = JavaVersion.VERSION_11
-    targetCompatibility = JavaVersion.VERSION_11
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
     isCoreLibraryDesugaringEnabled = true
   }
   buildFeatures {
@@ -73,6 +73,9 @@ android {
     buildConfig = true
   }
   sourceSets.getByName("androidTest").assets.directories.add("$projectDir/schemas")
+  // Robolectric reads Room migration schemas through the debug app's
+  // AssetManager; keep them out of release builds while making local tests real.
+  sourceSets.getByName("debug").assets.directories.add("$projectDir/schemas")
   externalNativeBuild {
     cmake {
       path = file("src/main/cpp/CMakeLists.txt")
@@ -84,6 +87,7 @@ android {
 
 ksp {
   arg("room.schemaLocation", "$projectDir/schemas")
+  arg("appfunctions:aggregateAppFunctions", "true")
 }
 
 
@@ -98,6 +102,7 @@ secrets {
 }
 
 dependencies {
+  implementation(project(":apps:android:band-contract"))
   implementation(platform(libs.androidx.compose.bom))
   implementation(libs.androidx.activity.compose)
   implementation(libs.androidx.compose.material.icons.core)
@@ -120,6 +125,10 @@ dependencies {
   implementation(libs.mlkit.text.recognition.chinese)
   implementation(libs.okhttp)
   implementation(libs.androidx.work.runtime.ktx)
+  implementation(libs.androidx.appfunctions)
+  implementation(libs.androidx.health.connect)
+  implementation(libs.androidx.exifinterface)
+  implementation(libs.koog.prompt.executor.model)
   coreLibraryDesugaring(libs.desugar.jdk.libs)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
@@ -130,6 +139,7 @@ dependencies {
   testImplementation(libs.roborazzi)
   testImplementation(libs.roborazzi.compose)
   testImplementation(libs.roborazzi.junit.rule)
+  testImplementation(libs.androidx.room.testing)
   androidTestImplementation(platform(libs.androidx.compose.bom))
   androidTestImplementation(libs.androidx.compose.ui.test.junit4)
   androidTestImplementation(libs.androidx.espresso.core)
@@ -139,4 +149,21 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
+  "ksp"(libs.androidx.appfunctions.compiler)
+}
+
+// connectedAndroidTest installs and then removes the target package. On a personal phone that
+// also deletes Caesar's private model files and download staging directory. Require the guarded
+// repository script to approve the device before Gradle is allowed to enter that lifecycle.
+gradle.taskGraph.whenReady {
+  val connectedAndroidTestScheduled = allTasks.any { task ->
+    task.project == project && task.name.startsWith("connected") && task.name.endsWith("AndroidTest")
+  }
+  val guardVerified = providers.gradleProperty("caesarConnectedTestGuard").orNull == "verified"
+  if (connectedAndroidTestScheduled && !guardVerified) {
+    throw GradleException(
+      "Direct connected Android tests are blocked because they can uninstall Caesar and erase " +
+        "private model data. Use scripts/run-android-device-tests.ps1 with an isolated emulator.",
+    )
+  }
 }

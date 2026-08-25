@@ -11,11 +11,13 @@ data class CommunityPost(
     val id: String,
     val authorId: String,
     val author: String,
+    val avatarUrl: String,
     val body: String,
     val topic: String,
     val mediaUrl: String,
     val anonymous: Boolean,
     val likes: Int,
+    val likedByMe: Boolean,
     val comments: Int,
     val createdAt: String,
 )
@@ -30,6 +32,13 @@ data class CommunityComment(
     val createdAt: String,
 )
 
+data class CampusAnnouncement(
+    val id: String,
+    val title: String,
+    val body: String,
+    val publishAt: String,
+)
+
 data class MarketplaceListing(
     val id: String,
     val sellerId: String,
@@ -40,6 +49,7 @@ data class MarketplaceListing(
     val location: String,
     val mediaUrl: String,
     val status: String,
+    val moderationStatus: String,
     val createdAt: String,
 )
 
@@ -86,15 +96,63 @@ fun allowedOrderTransitions(status: String, isBuyer: Boolean): List<String> = wh
 }
 
 class CampusRepository {
-    suspend fun loadPosts(): Result<List<CommunityPost>> = SupabaseClient.restGet(
-        table = "posts",
-        parameters = mapOf(
-            "select" to "id,author_id,body,topic,media_paths,is_anonymous,like_count,comment_count,created_at,author:profiles!posts_author_id_fkey(display_name)",
-            "deleted_at" to "is.null",
-            "order" to "created_at.desc",
-            "limit" to "50",
-        ),
-    ).map { rows -> List(rows.length()) { index -> parsePost(rows.getJSONObject(index)) } }
+    suspend fun loadAnnouncements(): Result<List<CampusAnnouncement>> = friendly(
+        SupabaseClient.restGet(
+            table = "announcements",
+            parameters = mapOf(
+                "select" to "id,title,body,publish_at,created_at",
+                "status" to "eq.published",
+                "order" to "publish_at.desc.nullslast,created_at.desc",
+                "limit" to "3",
+            ),
+        ).map { rows ->
+            List(rows.length()) { index ->
+                rows.getJSONObject(index).let { item ->
+                    CampusAnnouncement(
+                        id = item.nullableString("id"),
+                        title = item.nullableString("title"),
+                        body = item.nullableString("body"),
+                        publishAt = item.nullableString("publish_at").ifBlank { item.nullableString("created_at") },
+                    )
+                }
+            }
+        },
+    )
+
+    suspend fun loadPosts(userId: String = ""): Result<List<CommunityPost>> {
+        val postsResult = SupabaseClient.restGet(
+            table = "posts",
+            parameters = mapOf(
+                "select" to "id,author_id,body,topic,media_paths,is_anonymous,like_count,comment_count,created_at,author:profiles!posts_author_id_fkey(display_name,avatar_path)",
+                "deleted_at" to "is.null",
+                "order" to "created_at.desc",
+                "limit" to "50",
+            ),
+        )
+        if (postsResult.isFailure) return Result.failure(postsResult.exceptionOrNull()!!)
+        val likedPostIds = if (userId.isBlank()) {
+            emptySet()
+        } else {
+            SupabaseClient.restGet(
+                table = "post_likes",
+                parameters = mapOf(
+                    "select" to "post_id",
+                    "user_id" to "eq.$userId",
+                    "limit" to "1000",
+                ),
+            ).getOrNull()?.let { rows ->
+                buildSet {
+                    repeat(rows.length()) { index ->
+                        rows.optJSONObject(index)?.nullableString("post_id")?.let(::add)
+                    }
+                }
+            }.orEmpty()
+        }
+        val rows = postsResult.getOrThrow()
+        return Result.success(List(rows.length()) { index ->
+            parsePost(rows.getJSONObject(index), likedPostIds)
+        })
+    }
 
     suspend fun publishPost(userId: String, body: String, topic: String, anonymous: Boolean, image: UploadImage?): Result<CommunityPost> {
         val mediaPath = image?.let { uploadPublicImage("post-media", userId, it).getOrElse { error -> return Result.failure(error) } }
@@ -156,14 +214,37 @@ class CampusRepository {
         ).map { Unit },
     )
 
-    suspend fun loadListings(): Result<List<MarketplaceListing>> = SupabaseClient.restGet(
-        table = "listings",
-        parameters = mapOf(
-            "select" to "id,seller_id,title,description,price_cents,location,media_paths,status,created_at,seller:profiles!listings_seller_id_fkey(display_name)",
-            "order" to "created_at.desc",
-            "limit" to "50",
-        ),
-    ).map { rows -> List(rows.length()) { index -> parseListing(rows.getJSONObject(index)) } }
+    suspend fun loadListings(userId: String = ""): Result<List<MarketplaceListing>> {
+        val select = "id,seller_id,title,description,price_cents,location,media_paths,status,moderation_status,created_at,seller:profiles!listings_seller_id_fkey(display_name)"
+        val published = SupabaseClient.restGet(
+            table = "listings",
+            parameters = mapOf(
+                "select" to select,
+                "status" to "eq.active",
+                "moderation_status" to "eq.approved",
+                "order" to "created_at.desc",
+                "limit" to "50",
+            ),
+            callTimeoutSeconds = 20,
+        ).mapCatching { rows -> List(rows.length()) { index -> parseListing(rows.getJSONObject(index)) } }
+            .getOrElse { return Result.failure(it) }
+        if (userId.isBlank()) return Result.success(published)
+
+        // The public wall stays active+approved, while the owner also sees their own review queue
+        // and completed cards. This matches the composer promise without exposing pending cards to others.
+        val owned = SupabaseClient.restGet(
+            table = "listings",
+            parameters = mapOf(
+                "select" to select,
+                "seller_id" to "eq.$userId",
+                "order" to "created_at.desc",
+                "limit" to "50",
+            ),
+            callTimeoutSeconds = 20,
+        ).mapCatching { rows -> List(rows.length()) { index -> parseListing(rows.getJSONObject(index)) } }
+            .getOrElse { emptyList() }
+        return Result.success((owned + published).distinctBy(MarketplaceListing::id).sortedByDescending(MarketplaceListing::createdAt))
+    }
 
     suspend fun publishListing(
         userId: String,
@@ -216,7 +297,7 @@ class CampusRepository {
                         listingId = item.optString("listing_id"),
                         listingTitle = item.optString("listing_title"),
                         otherUserId = item.optString("other_user_id"),
-                        otherName = item.optString("other_name").ifBlank { "CampusAI 用户" },
+                        otherName = item.optString("other_name").ifBlank { "Caesar 用户" },
                         lastMessage = item.optString("last_message"),
                         lastMessageAt = item.optString("last_message_at"),
                         unreadCount = item.optInt("unread_count"),
@@ -276,21 +357,26 @@ class CampusRepository {
         ).map(::parseOrder),
     )
 
-    private fun parsePost(item: JSONObject): CommunityPost {
+    private fun parsePost(item: JSONObject, likedPostIds: Set<String> = emptySet()): CommunityPost {
         val media = item.optJSONArray("media_paths") ?: JSONArray()
-        val author = item.optJSONObject("author")?.optString("display_name").orEmpty()
+        val authorObject = item.optJSONObject("author")
+        val author = authorObject?.nullableString("display_name").orEmpty()
         val anonymous = item.optBoolean("is_anonymous")
+        val postId = item.nullableString("id")
+        val avatarPath = authorObject?.nullableString("avatar_path").orEmpty()
         return CommunityPost(
-            id = item.optString("id"),
-            authorId = item.optString("author_id"),
-            author = if (anonymous) "匿名同学" else author.ifBlank { "CampusAI 用户" },
-            body = item.optString("body"),
-            topic = item.optString("topic"),
+            id = postId,
+            authorId = item.nullableString("author_id"),
+            author = if (anonymous) "匿名访客" else author.ifBlank { "Caesar 用户" },
+            avatarUrl = if (anonymous || avatarPath.isBlank()) "" else SupabaseClient.publicMediaUrl("avatars", avatarPath),
+            body = item.nullableString("body"),
+            topic = item.nullableString("topic"),
             mediaUrl = media.optString(0).takeIf { it.isNotBlank() }?.let { SupabaseClient.publicMediaUrl("post-media", it) }.orEmpty(),
             anonymous = anonymous,
             likes = item.optInt("like_count"),
+            likedByMe = postId in likedPostIds,
             comments = item.optInt("comment_count"),
-            createdAt = item.optString("created_at"),
+            createdAt = item.nullableString("created_at"),
         )
     }
 
@@ -298,7 +384,7 @@ class CampusRepository {
         id = item.optString("id"),
         postId = item.optString("post_id"),
         authorId = item.optString("author_id"),
-        author = item.optJSONObject("author")?.optString("display_name").orEmpty().ifBlank { "CampusAI 用户" },
+        author = item.optJSONObject("author")?.optString("display_name").orEmpty().ifBlank { "Caesar 用户" },
         body = item.optString("body"),
         moderationStatus = item.optString("moderation_status"),
         createdAt = item.optString("created_at"),
@@ -309,13 +395,14 @@ class CampusRepository {
         return MarketplaceListing(
             id = item.optString("id"),
             sellerId = item.optString("seller_id"),
-            seller = item.optJSONObject("seller")?.optString("display_name").orEmpty().ifBlank { "CampusAI 用户" },
+            seller = item.optJSONObject("seller")?.optString("display_name").orEmpty().ifBlank { "Caesar 用户" },
             title = item.optString("title"),
             description = item.optString("description"),
             priceCents = item.optInt("price_cents"),
             location = item.optString("location"),
             mediaUrl = media.optString(0).takeIf { it.isNotBlank() }?.let { SupabaseClient.publicMediaUrl("listing-media", it) }.orEmpty(),
             status = item.optString("status"),
+            moderationStatus = item.optString("moderation_status"),
             createdAt = item.optString("created_at"),
         )
     }
@@ -333,7 +420,7 @@ class CampusRepository {
         return MarketplaceOrder(
             id = item.optString("id"),
             listingId = item.optString("listing_id"),
-            listingTitle = item.optString("listing_title").ifBlank { "校园交易" },
+            listingTitle = item.optString("listing_title").ifBlank { "心愿墙对话" },
             listingMediaUrl = media.optString(0).takeIf { it.isNotBlank() }?.let { SupabaseClient.publicMediaUrl("listing-media", it) }.orEmpty(),
             buyerId = item.optString("buyer_id"),
             buyerName = item.optString("buyer_name").ifBlank { "买家" },
@@ -377,3 +464,9 @@ class CampusRepository {
         return SupabaseClient.uploadObject(bucket, path, image.bytes, image.contentType).map { path }
     }
 }
+
+internal fun JSONObject.nullableString(name: String): String =
+    normalizeNullableString(isNull(name), optString(name, ""))
+
+internal fun normalizeNullableString(isNull: Boolean, value: String?): String =
+    if (isNull) "" else value.takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()

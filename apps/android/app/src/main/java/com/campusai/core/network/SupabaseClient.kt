@@ -30,6 +30,8 @@ object SupabaseClient {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(45, TimeUnit.SECONDS)
+        .callTimeout(60, TimeUnit.SECONDS)
         .build()
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
@@ -47,8 +49,12 @@ object SupabaseClient {
     fun installSession(accessToken: String) { userJwt = accessToken }
     fun clearSession() { userJwt = "" }
 
-    suspend fun restGet(table: String, parameters: Map<String, String>): Result<JSONArray> = withContext(Dispatchers.IO) {
-        authenticatedRequest {
+    suspend fun restGet(
+        table: String,
+        parameters: Map<String, String>,
+        callTimeoutSeconds: Long? = null,
+    ): Result<JSONArray> = withContext(Dispatchers.IO) {
+        authenticatedRequest(callTimeoutSeconds) {
             val url = "$supabaseUrl/rest/v1/$table".toHttpUrl().newBuilder().apply {
                 parameters.forEach { (name, value) -> addQueryParameter(name, value) }
             }.build()
@@ -64,6 +70,26 @@ object SupabaseClient {
                 .post(payload.toString().toRequestBody(jsonMediaType))
                 .build()
         }.mapCatching { raw -> JSONArray(raw).optJSONObject(0) ?: JSONObject() }
+    }
+
+    suspend fun restUpdate(
+        table: String,
+        filters: Map<String, String>,
+        payload: JSONObject,
+    ): Result<JSONObject> = withContext(Dispatchers.IO) {
+        authenticatedRequest {
+            val url = "$supabaseUrl/rest/v1/$table".toHttpUrl().newBuilder().apply {
+                filters.forEach { (name, value) -> addQueryParameter(name, value) }
+            }.build()
+            Request.Builder()
+                .url(url)
+                .header("Prefer", "return=representation")
+                .patch(payload.toString().toRequestBody(jsonMediaType))
+                .build()
+        }.mapCatching { raw ->
+            JSONArray(raw).optJSONObject(0)
+                ?: error("资料没有更新，请确认登录状态后重试。")
+        }
     }
 
     suspend fun rpc(name: String, payload: JSONObject): Result<JSONObject> = withContext(Dispatchers.IO) {
@@ -183,17 +209,24 @@ object SupabaseClient {
         }
     }
 
-    private fun authenticatedRequest(build: () -> Request): Result<String> {
+    private fun authenticatedRequest(
+        callTimeoutSeconds: Long? = null,
+        build: () -> Request,
+    ): Result<String> {
         if (!isConfigured()) return Result.failure(IllegalStateException("Supabase 尚未配置。"))
-        if (userJwt.isBlank()) return Result.failure(IllegalStateException("请先登录，再读取校园数据。"))
+        if (userJwt.isBlank()) return Result.failure(IllegalStateException("请先登录，再读取你的同步数据。"))
         return runCatching {
             val unsigned = build()
             val request = unsigned.newBuilder()
                 .header("apikey", supabaseAnonKey)
                 .header("Authorization", "Bearer $userJwt")
-                .header("Content-Type", "application/json")
+                .header("Content-Type", unsigned.body?.contentType()?.toString() ?: "application/json")
                 .build()
-            client.newCall(request).execute().use { response ->
+            val call = client.newCall(request)
+            callTimeoutSeconds?.takeIf { it > 0L }?.let { seconds ->
+                call.timeout().timeout(seconds, TimeUnit.SECONDS)
+            }
+            call.execute().use { response ->
                 val raw = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     val detail = runCatching {

@@ -22,10 +22,13 @@ fun decideAiRoute(
     personalKeyAvailable: Boolean = false,
 ): AiRouteDecision = when (provider) {
     AiProvider.AUTO -> when {
-        online -> cloudRoute(personalKeyAvailable)
-        mode == AiMode.DEEP -> AiRouteDecision.Block("deep_requires_network", "DEEP 需要联网使用 DeepSeek。可以切换到本地快速模式。")
         localReady -> AiRouteDecision.Use(AiRoute.LOCAL)
-        else -> AiRouteDecision.Block("offline_model_missing", "当前离线，且本地模型尚未下载。联网后下载模型，或恢复网络使用 DeepSeek。")
+        online && personalKeyAvailable -> AiRouteDecision.Block(
+            "local_model_not_ready",
+            "本地模型尚未就绪。你可以先下载模型，或只为本次明确使用 DeepSeek。",
+            canUseCloudOnce = true,
+        )
+        else -> AiRouteDecision.Block("offline_model_missing", "本地模型尚未下载。请先在“我的 → AI 运行方式”下载并校验。")
     }
     AiProvider.DEEPSEEK -> if (online) {
         cloudRoute(personalKeyAvailable)
@@ -33,7 +36,6 @@ fun decideAiRoute(
         AiRouteDecision.Block("deepseek_offline", "DeepSeek 云端需要网络连接。恢复网络后重试；不会自动切换到本地模型。")
     }
     AiProvider.LOCAL -> when {
-        mode == AiMode.DEEP -> AiRouteDecision.Block("local_fast_only", "本地模型只提供快速模式，不会伪装成深度推理。请切换到 FAST。")
         localReady -> AiRouteDecision.Use(AiRoute.LOCAL)
         else -> AiRouteDecision.Block("local_model_not_ready", "本地模型尚未就绪。请先在“我的 → AI 运行方式”下载并完成校验。", canUseCloudOnce = online)
     }
@@ -53,35 +55,43 @@ class AiEngineRouter(
     private val provider: () -> AiProvider,
     private val personalKeyAvailable: () -> Boolean,
     private val isOnline: () -> Boolean,
-    private val localState: () -> LocalModelState,
+    private val localState: (modelId: String) -> LocalModelState,
 ) : AiEngine {
-    private val active = AtomicReference<AiEngine?>(null)
+    private data class ActiveRoute(val engine: AiEngine)
+
+    private val active = AtomicReference<ActiveRoute?>(null)
 
     override fun stream(request: AiRequest): Flow<AiEvent> = flow {
-        val decision = decideAiRoute(
+        val selectedLocalState = localState(request.localModelId)
+        val decision = if (request.requiresLocal) {
+            if (selectedLocalState == LocalModelState.Ready) AiRouteDecision.Use(AiRoute.LOCAL)
+            else AiRouteDecision.Block("local_required", "本会话锁定的本地模型尚未就绪。请完成该模型下载与校验，或新建会话后选择其他档位。")
+        } else decideAiRoute(
             provider = provider(),
             mode = request.mode,
             online = isOnline(),
-            localReady = localState() == LocalModelState.Ready,
+            localReady = selectedLocalState == LocalModelState.Ready,
             personalKeyAvailable = personalKeyAvailable(),
         )
         val engine = engineFor(decision)
-        active.set(engine)
+        val route = ActiveRoute(engine)
+        active.set(route)
         try {
             engine.stream(request).collect { emit(it) }
         } finally {
-            active.compareAndSet(engine, null)
+            active.compareAndSet(route, null)
         }
     }
 
     fun streamCloudOnce(request: AiRequest): Flow<AiEvent> = flow {
         if (!isOnline()) throw AiRoutingException("deepseek_offline", "DeepSeek 云端需要网络连接。恢复网络后重试。")
         val engine = engineFor(cloudRoute(personalKeyAvailable()))
-        active.set(engine)
+        val route = ActiveRoute(engine)
+        active.set(route)
         try {
             engine.stream(request).collect { emit(it) }
         } finally {
-            active.compareAndSet(engine, null)
+            active.compareAndSet(route, null)
         }
     }
 
@@ -94,6 +104,6 @@ class AiEngineRouter(
     }
 
     override fun cancel() {
-        active.getAndSet(null)?.cancel()
+        active.getAndSet(null)?.engine?.cancel()
     }
 }

@@ -4,7 +4,7 @@
 
 ## 线上 Supabase 结论（2026-08-22）
 
-- 项目位于 `ap-northeast-2`，状态 `ACTIVE_HEALTHY`，Postgres 17.6；11 份版本化 migration 已应用，Edge Functions 仍为空。
+- 项目位于 `ap-northeast-2`，状态 `ACTIVE_HEALTHY`，Postgres 17.6；12 份版本化 migration 已应用，Edge Functions 仍为空。
 - `public` 现有 23 张 canonical 表、33 条 policy，全部业务表启用 RLS；旧 `legacy` schema 已移除，`pg_trgm` 已移动到 `extensions`。
 - Auth 保留 2 个用户并补建 2 个 profile；用户明确不要旧业务数据，旧头像文件已删除。Storage 当前仅有一个 `.emptyFolderPlaceholder` 元数据，不含用户图片。
 - 注册开关已开启、邮箱确认已关闭，因此邮箱＋密码注册可直接建立会话。泄露密码保护在当前 Free 方案不可用，仍由客户端 8 位最低长度与服务端基础规则兜底。[密码安全说明](https://supabase.com/docs/guides/auth/password-security#password-strength-and-leaked-password-protection)
@@ -48,7 +48,7 @@
 
 - `npm audit --omit=dev`：0 vulnerabilities。
 - Deno：`deno check supabase/functions/ai-chat/index.ts` 通过。
-- PostgreSQL：11 份 migration 均通过 PostgreSQL AST 解析并已应用线上；完整空白环境回放仍需 Docker 或开发分支。
+- PostgreSQL：12 份 migration 已应用线上；新增成就迁移已用回滚事务验证触发授予，完整空白环境回放仍需 Docker 或开发分支。
 - Android：24 项 JVM tests、debug APK 与 Lint 通过；Room 3→4 迁移已在 API 35 模拟器真实执行并保留旧行。
 - Web：TypeScript/Vite 构建和 9 个 Playwright 响应式/交互测试通过。
 - 密钥与危险 API：仓库模式扫描未发现硬编码 provider/service-role 密钥、命令执行、WebView JS 或不安全反序列化入口；CI 同时运行 Gitleaks。
@@ -57,7 +57,7 @@
 ## 发布前残余风险
 
 1. 线上 migration 已按用户放弃旧业务数据的决定完成；本机无 Docker，尚未在隔离 Postgres/Supabase 容器完整回放、验证 RLS 三角色矩阵和并发 RPC。
-2. 现有 2 个 profile 均为 `student`，在用户指定邮箱前不会擅自提升管理员，因此管理台暂时没有可登录的管理员账号。
+2. `lienqi0906@gmail.com` 已按用户指令提升为 `super_admin` 并记录审计；仍需用该账号完成管理台真实登录和写操作联调。
 3. 原正式 Android release keystore 缺失，尚不能证明覆盖升级签名一致。
 4. 管理台已部署到 Cloudflare，但写操作与 Android 评论、消息、订单、媒体和离线同步尚未完成真实三角色联调。
 5. Supabase 项目当前没有开发分支；创建分支需要额外费用确认。

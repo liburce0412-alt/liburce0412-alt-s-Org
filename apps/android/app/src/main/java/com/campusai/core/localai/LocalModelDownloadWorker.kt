@@ -30,8 +30,9 @@ import java.io.RandomAccessFile
 import java.util.concurrent.TimeUnit
 
 class LocalModelDownloadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
-    private val storage = LocalModelStorage(context)
-    private val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val modelId = inputData.getString(KEY_MODEL_ID) ?: LocalModelManifest.DEFAULT_MODEL_ID
+    private val storage = LocalModelStorage(context, LocalModelManifest.load(context, modelId))
+    private val preferences = context.getSharedPreferences(transferPreferencesName(modelId), Context.MODE_PRIVATE)
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
@@ -42,10 +43,15 @@ class LocalModelDownloadWorker(context: Context, params: WorkerParameters) : Cor
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         storage.compatibilityIssue()?.let { return@withContext failure("incompatible", it) }
+        if (storage.isReady()) {
+            return@withContext Result.success(
+                workDataOf(KEY_STAGE to STAGE_READY, KEY_DOWNLOADED to storage.manifest.totalBytes, KEY_TOTAL to storage.manifest.totalBytes),
+            )
+        }
         if (!storage.hasEnoughSpace()) return@withContext failure("insufficient_storage", "可用空间不足。请至少保留模型剩余大小之外的 512 MB 安全余量。")
         storage.root.mkdirs()
         storage.stagingDirectory.mkdirs()
-        preferences.edit().putBoolean(KEY_PAUSED, false).remove(KEY_ERROR_CODE).remove(KEY_ERROR_MESSAGE).apply()
+        preferences.edit().remove(KEY_ERROR_CODE).remove(KEY_ERROR_MESSAGE).apply()
         setForeground(foregroundInfo(storage.downloadedBytes()))
         try {
             for (expected in storage.manifest.files) {
@@ -169,8 +175,9 @@ class LocalModelDownloadWorker(context: Context, params: WorkerParameters) : Cor
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .build()
-        return if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        else ForegroundInfo(NOTIFICATION_ID, notification)
+        val notificationId = notificationId(modelId)
+        return if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        else ForegroundInfo(notificationId, notification)
     }
 
     companion object {
@@ -182,18 +189,47 @@ class LocalModelDownloadWorker(context: Context, params: WorkerParameters) : Cor
         const val KEY_TOTAL = "total"
         const val KEY_ERROR_CODE = "error_code"
         const val KEY_ERROR_MESSAGE = "error_message"
+        const val KEY_MODEL_ID = "model_id"
+        const val KEY_WORK_ID = "work_id"
         const val STAGE_DOWNLOADING = "downloading"
         const val STAGE_VERIFYING = "verifying"
         const val STAGE_READY = "ready"
         private const val CHANNEL = "local_model_download"
         private const val NOTIFICATION_ID = 43035
 
-        fun enqueue(context: Context, wifiOnly: Boolean) {
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_PAUSED, false).apply()
+        fun uniqueWorkName(modelId: String): String {
+            requireKnownModelId(modelId)
+            return if (modelId == LocalModelManifest.DEFAULT_MODEL_ID) UNIQUE_WORK else "$UNIQUE_WORK-$modelId"
+        }
+
+        fun transferPreferencesName(modelId: String): String {
+            requireKnownModelId(modelId)
+            return if (modelId == LocalModelManifest.DEFAULT_MODEL_ID) PREFS else "$PREFS-$modelId"
+        }
+
+        fun enqueue(context: Context, modelId: String, wifiOnly: Boolean) {
+            requireKnownModelId(modelId)
             val request = OneTimeWorkRequestBuilder<LocalModelDownloadWorker>()
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED).build())
+                .setInputData(workDataOf(KEY_MODEL_ID to modelId))
                 .build()
-            WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE_WORK, ExistingWorkPolicy.REPLACE, request)
+            context.getSharedPreferences(transferPreferencesName(modelId), Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_PAUSED, false)
+                .putString(KEY_WORK_ID, request.id.toString())
+                .apply()
+            WorkManager.getInstance(context).enqueueUniqueWork(uniqueWorkName(modelId), ExistingWorkPolicy.REPLACE, request)
+        }
+
+        fun enqueue(context: Context, wifiOnly: Boolean) = enqueue(context, LocalModelManifest.DEFAULT_MODEL_ID, wifiOnly)
+
+        private fun notificationId(modelId: String): Int {
+            requireKnownModelId(modelId)
+            return NOTIFICATION_ID + if (modelId == LocalModelManifest.DEFAULT_MODEL_ID) 0 else 1
+        }
+
+        private fun requireKnownModelId(modelId: String) {
+            require(modelId in LocalModelManifest.availableModelIds()) { "Unknown local model: $modelId" }
         }
     }
 }

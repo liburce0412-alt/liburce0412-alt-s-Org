@@ -1,10 +1,13 @@
 package com.campusai.app
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,6 +19,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -26,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -51,10 +57,18 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.campusai.core.designsystem.BrandMark
-import com.campusai.core.designsystem.GlassPanel
+import com.campusai.core.designsystem.PageMood
 import com.campusai.core.designsystem.SlideConfirm
+import com.campusai.core.designsystem.SpectraAction
 import com.campusai.core.designsystem.SpectraColors
-import com.campusai.core.designsystem.TelemetryChip
+import com.campusai.core.designsystem.SpectraIconAction
+import com.campusai.core.designsystem.SpectraPageScaffold
+import com.campusai.core.designsystem.SpectraStateKind
+import com.campusai.core.designsystem.SpectraStatePane
+import com.campusai.core.designsystem.SpectraStatus
+import com.campusai.core.designsystem.SpectraStatusTone
+import com.campusai.core.designsystem.SpectraSurface
+import com.campusai.core.designsystem.SpectraTheme
 import com.campusai.core.designsystem.Tomorrow
 import com.campusai.core.model.UiState
 import com.campusai.features.community.CampusMessage
@@ -79,22 +93,55 @@ fun MessageCenterScreen(
         return
     }
 
-    OverlayPage {
-        PageHeader("消息", "与校园交易对象保持清楚、可追溯的沟通", onBack)
-        state.operationError?.let { message -> item { InlineOperationError(message, viewModel::clearOperationError) } }
+    OverlayPage(PageMood.COMMERCE) {
+        PageHeader("消息", "围绕心愿卡的每次沟通，都清楚而可追溯", onBack)
+        state.operationError?.let { message -> item { InlineOperationError(message, PageMood.COMMERCE, viewModel::clearOperationError) } }
         when (val conversations = state.conversations) {
-            UiState.Loading -> items(3) { CommerceLoadingRow() }
-            UiState.Empty -> item { CommerceEmpty("还没有消息", "从商品详情联系卖家后，会话会出现在这里。") }
+            UiState.Loading -> item {
+                SpectraStatePane(
+                    kind = SpectraStateKind.LOADING,
+                    title = "正在读取会话",
+                    detail = "将同步最新消息和未读数。",
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            UiState.Empty -> item {
+                CommerceEmpty(
+                    title = "还没有消息",
+                    detail = "从心愿卡联系发布者后，会话会出现在这里。",
+                    actionLabel = "重新检查",
+                    onAction = viewModel::refreshConversations,
+                )
+            }
             is UiState.Error -> item { CommerceError(conversations.message, viewModel::refreshConversations) }
             is UiState.Data -> items(conversations.value, key = { it.id }) { summary -> ConversationRow(summary) { viewModel.openMessageThread(summary.id) } }
-            is UiState.Offline -> items(conversations.value, key = { it.id }) { summary -> ConversationRow(summary) { viewModel.openMessageThread(summary.id) } }
+            is UiState.Offline -> {
+                item {
+                    SpectraStatePane(
+                        kind = SpectraStateKind.OFFLINE,
+                        title = "显示上次同步的会话",
+                        detail = "未读数和最新消息可能已变化。",
+                        modifier = Modifier.fillMaxWidth(),
+                        actionLabel = "重新读取",
+                        onAction = viewModel::refreshConversations,
+                    )
+                }
+                items(conversations.value, key = { it.id }) { summary -> ConversationRow(summary) { viewModel.openMessageThread(summary.id) } }
+            }
         }
     }
 }
 
 @Composable
 private fun ConversationRow(summary: ConversationSummary, onClick: () -> Unit) {
-    GlassPanel(Modifier.fillMaxWidth(), radius = 16, onClick = onClick) {
+    SpectraSurface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = 48.dp)
+            .clickable(role = Role.Button, onClick = onClick),
+        mood = PageMood.COMMERCE,
+        contentPadding = PaddingValues(0.dp),
+    ) {
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.size(46.dp).background(Brush.linearGradient(listOf(SpectraColors.Warm, SpectraColors.Rose, SpectraColors.Violet)), CircleShape),
@@ -130,39 +177,86 @@ private fun MessageThreadScreen(
     var draft by rememberSaveable(conversationId) { mutableStateOf("") }
     val messages = messageValues(state.messages)
     val listState = rememberLazyListState()
+    val layout = SpectraTheme.layout
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
     }
 
-    Column(
-        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background.copy(.94f)).navigationBarsPadding().imePadding(),
-    ) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = viewModel::closeMessageThread) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回消息列表") }
+    SpectraPageScaffold(mood = PageMood.COMMERCE) {
+        Column(
+            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding(),
+        ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = layout.pageHorizontalPadding, vertical = layout.compactGap),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            SpectraIconAction(
+                icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                label = "返回消息列表",
+                onClick = viewModel::closeMessageThread,
+            )
             Column(Modifier.weight(1f)) {
-                Text(summary?.otherName ?: "校园会话", style = MaterialTheme.typography.titleLarge)
+                Text(summary?.otherName ?: "心愿会话", style = MaterialTheme.typography.titleLarge)
                 if (!summary?.listingTitle.isNullOrBlank()) Text(summary?.listingTitle.orEmpty(), style = MaterialTheme.typography.bodySmall, color = SpectraColors.Focus)
             }
-            IconButton(onClick = { viewModel.openMessageThread(conversationId) }) { Icon(Icons.Rounded.Refresh, "刷新消息") }
+            SpectraIconAction(
+                icon = Icons.Rounded.Refresh,
+                label = "刷新消息",
+                onClick = { viewModel.openMessageThread(conversationId) },
+            )
         }
-        state.operationError?.let { Box(Modifier.padding(horizontal = 20.dp)) { InlineOperationError(it, viewModel::clearOperationError) } }
+        state.operationError?.let { Box(Modifier.padding(horizontal = layout.pageHorizontalPadding)) { InlineOperationError(it, PageMood.COMMERCE, viewModel::clearOperationError) } }
         when (val remote = state.messages) {
-            UiState.Loading -> Box(Modifier.weight(1f).padding(20.dp)) { CommerceLoadingRow() }
-            UiState.Empty -> Box(Modifier.weight(1f).padding(20.dp), contentAlignment = Alignment.Center) { CommerceEmpty("还没有消息", "发一句清楚的开场白吧。") }
-            is UiState.Error -> Box(Modifier.weight(1f).padding(20.dp)) { CommerceError(remote.message) { viewModel.openMessageThread(conversationId) } }
+            UiState.Loading -> Box(Modifier.weight(1f).padding(horizontal = layout.pageHorizontalPadding, vertical = layout.pageTopSpacing)) {
+                SpectraStatePane(
+                    kind = SpectraStateKind.LOADING,
+                    title = "正在读取消息",
+                    detail = "草稿仍保留在本机。",
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            UiState.Empty -> Box(
+                Modifier.weight(1f).padding(horizontal = layout.pageHorizontalPadding, vertical = layout.pageTopSpacing),
+                contentAlignment = Alignment.Center,
+            ) {
+                CommerceEmpty(
+                    title = "还没有消息",
+                    detail = "这段会话尚无内容；你可以在下方发一句清楚的开场白。",
+                    actionLabel = "重新检查",
+                    onAction = { viewModel.openMessageThread(conversationId) },
+                )
+            }
+            is UiState.Error -> Box(Modifier.weight(1f).padding(horizontal = layout.pageHorizontalPadding, vertical = layout.pageTopSpacing)) { CommerceError(remote.message) { viewModel.openMessageThread(conversationId) } }
             is UiState.Data, is UiState.Offline -> LazyColumn(
                 state = listState,
                 modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(horizontal = layout.pageHorizontalPadding, vertical = layout.compactGap),
+                verticalArrangement = Arrangement.spacedBy(layout.compactGap),
             ) {
+                if (remote is UiState.Offline) {
+                    item {
+                        SpectraStatePane(
+                            kind = SpectraStateKind.OFFLINE,
+                            title = "显示上次同步的消息",
+                            detail = "恢复网络后再发送新消息。",
+                            modifier = Modifier.fillMaxWidth(),
+                            actionLabel = "重新读取",
+                            onAction = { viewModel.openMessageThread(conversationId) },
+                        )
+                    }
+                }
                 items(messages, key = { it.id }) { message -> MessageBubble(message, message.senderId == userId) }
             }
         }
         Row(
-            Modifier.fillMaxWidth().background(Color.White.copy(.12f)).padding(horizontal = 14.dp, vertical = 10.dp),
+            Modifier
+                .fillMaxWidth()
+                .background(Color.White.copy(.12f))
+                .padding(horizontal = layout.pageHorizontalPadding, vertical = layout.compactGap),
             verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(layout.compactGap),
         ) {
             OutlinedTextField(
                 value = draft,
@@ -175,8 +269,9 @@ private fun MessageThreadScreen(
             IconButton(
                 onClick = { viewModel.sendMessage(conversationId, draft) { draft = "" } },
                 enabled = draft.isNotBlank() && !state.operationBusy,
-                modifier = Modifier.size(52.dp).background(SpectraColors.Ink, CircleShape),
-            ) { Icon(Icons.AutoMirrored.Rounded.Send, "发送", tint = Color.White) }
+                modifier = Modifier.size(52.dp).background(MaterialTheme.colorScheme.primary, CircleShape),
+            ) { Icon(Icons.AutoMirrored.Rounded.Send, "发送", tint = MaterialTheme.colorScheme.onPrimary) }
+        }
         }
     }
 }
@@ -184,7 +279,12 @@ private fun MessageThreadScreen(
 @Composable
 private fun MessageBubble(message: CampusMessage, own: Boolean) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (own) Arrangement.End else Arrangement.Start) {
-        GlassPanel(Modifier.widthIn(max = 310.dp), radius = 16) {
+        SpectraSurface(
+            modifier = Modifier.widthIn(max = 310.dp),
+            mood = PageMood.COMMERCE,
+            shadowed = false,
+            contentPadding = PaddingValues(0.dp),
+        ) {
             Column(
                 Modifier
                     .background(
@@ -211,12 +311,26 @@ fun OrdersScreen(
 ) {
     var pending by remember { mutableStateOf<Pair<MarketplaceOrder, OrderAction>?>(null) }
     LaunchedEffect(Unit) { viewModel.refreshOrders() }
-    OverlayPage {
+    OverlayPage(PageMood.COMMERCE) {
         PageHeader("订单", "交易状态由双方确认，关键变化会留下审计记录", onBack)
-        state.operationError?.let { message -> item { InlineOperationError(message, viewModel::clearOperationError) } }
+        state.operationError?.let { message -> item { InlineOperationError(message, PageMood.COMMERCE, viewModel::clearOperationError) } }
         when (val orders = state.orders) {
-            UiState.Loading -> items(3) { CommerceLoadingRow() }
-            UiState.Empty -> item { CommerceEmpty("还没有订单", "确认购买商品后，订单进度会出现在这里。") }
+            UiState.Loading -> item {
+                SpectraStatePane(
+                    kind = SpectraStateKind.LOADING,
+                    title = "正在读取订单",
+                    detail = "交易状态和版本号会一起更新。",
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            UiState.Empty -> item {
+                CommerceEmpty(
+                    title = "还没有订单",
+                    detail = "确认购买商品后，订单进度会出现在这里。",
+                    actionLabel = "重新检查",
+                    onAction = viewModel::refreshOrders,
+                )
+            }
             is UiState.Error -> item { CommerceError(orders.message, viewModel::refreshOrders) }
             is UiState.Data -> items(orders.value, key = { it.id }) { order ->
                 OrderCard(
@@ -229,8 +343,20 @@ fun OrdersScreen(
                     onAction = { pending = order to it },
                 )
             }
-            is UiState.Offline -> items(orders.value, key = { it.id }) { order ->
-                OrderCard(order, userId, onContact = {}, onAction = {})
+            is UiState.Offline -> {
+                item {
+                    SpectraStatePane(
+                        kind = SpectraStateKind.OFFLINE,
+                        title = "显示上次同步的订单",
+                        detail = "状态可能已变化；离线时不能推进订单。",
+                        modifier = Modifier.fillMaxWidth(),
+                        actionLabel = "重新读取",
+                        onAction = viewModel::refreshOrders,
+                    )
+                }
+                items(orders.value, key = { it.id }) { order ->
+                    OrderCard(order, userId, onContact = {}, onAction = {}, actionsEnabled = false)
+                }
             }
         }
     }
@@ -238,19 +364,26 @@ fun OrdersScreen(
     pending?.let { (order, action) ->
         Dialog(onDismissRequest = { if (!state.operationBusy) pending = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
             Box(Modifier.fillMaxSize().background(Color.Black.copy(.24f)).padding(20.dp), contentAlignment = Alignment.BottomCenter) {
-                GlassPanel(Modifier.fillMaxWidth(), radius = 24, emphasized = true) {
-                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(action.label, style = MaterialTheme.typography.titleLarge)
-                        Text(action.detail, color = MaterialTheme.colorScheme.onSurface.copy(.64f))
-                        SlideConfirm(
-                            text = if (state.operationBusy) "正在确认…" else "滑动确认",
-                            enabled = !state.operationBusy,
-                            onConfirm = {
-                                viewModel.transitionOrder(order.id, order.version, action.nextStatus) { pending = null }
-                            },
-                        )
-                        TelemetryChip("暂不操作", false, { pending = null }, Modifier.fillMaxWidth())
-                    }
+                SpectraSurface(
+                    modifier = Modifier.fillMaxWidth(),
+                    mood = PageMood.COMMERCE,
+                    emphasized = true,
+                ) {
+                    Text(action.label, style = MaterialTheme.typography.titleLarge)
+                    Text(action.detail, color = MaterialTheme.colorScheme.onSurface.copy(.64f))
+                    SlideConfirm(
+                        text = if (state.operationBusy) "正在确认…" else "滑动确认",
+                        enabled = !state.operationBusy,
+                        onConfirm = {
+                            viewModel.transitionOrder(order.id, order.version, action.nextStatus) { pending = null }
+                        },
+                    )
+                    SpectraAction(
+                        text = "暂不操作",
+                        onClick = { pending = null },
+                        modifier = Modifier.fillMaxWidth(),
+                        mood = PageMood.COMMERCE,
+                    )
                 }
             }
         }
@@ -263,16 +396,16 @@ private fun OrderCard(
     userId: String,
     onContact: () -> Unit,
     onAction: (OrderAction) -> Unit,
+    actionsEnabled: Boolean = true,
 ) {
     val isBuyer = userId == order.buyerId
     val counterpart = if (isBuyer) order.sellerName else order.buyerName
     val actions = orderActions(order, isBuyer)
-    GlassPanel(Modifier.fillMaxWidth(), radius = 16) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    SpectraSurface(Modifier.fillMaxWidth(), mood = PageMood.COMMERCE) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(72.dp).clip(RoundedCornerShape(12.dp)).background(Brush.linearGradient(listOf(SpectraColors.Cyan.copy(.5f), SpectraColors.Violet.copy(.5f)))), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(72.dp).clip(RoundedCornerShape(12.dp)).background(Brush.linearGradient(listOf(SpectraColors.Warm.copy(.24f), SpectraColors.Rose.copy(.12f)))), contentAlignment = Alignment.Center) {
                     if (order.listingMediaUrl.isNotBlank()) AsyncImage(order.listingMediaUrl, "商品图片", Modifier.fillMaxSize().aspectRatio(1f))
-                    else BrandMark(Modifier.size(42.dp), Color.White)
+                    else BrandMark(Modifier.size(42.dp))
                 }
                 Spacer(Modifier.size(12.dp))
                 Column(Modifier.weight(1f)) {
@@ -280,19 +413,49 @@ private fun OrderCard(
                     Text("¥${"%.2f".format(order.priceCents / 100.0)}", fontFamily = Tomorrow, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleLarge)
                     Text("${if (isBuyer) "卖家" else "买家"} · $counterpart", color = MaterialTheme.colorScheme.onSurface.copy(.58f))
                 }
-                TelemetryChip(orderStatusText(order.status), order.status !in listOf("cancelled", "disputed"), {})
+                SpectraStatus(
+                    text = orderStatusText(order.status),
+                    tone = when (order.status) {
+                        "completed" -> SpectraStatusTone.SUCCESS
+                        "cancelled", "disputed" -> SpectraStatusTone.WARNING
+                        else -> SpectraStatusTone.INFO
+                    },
+                )
             }
             OrderProgress(order.status)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TelemetryChip("联系对方", false, onContact, Modifier.weight(1f))
-                actions.firstOrNull()?.let { action -> TelemetryChip(action.label, true, { onAction(action) }, Modifier.weight(1f)) }
+                SpectraAction(
+                    text = "联系对方",
+                    onClick = onContact,
+                    modifier = Modifier.weight(1f),
+                    enabled = actionsEnabled,
+                    mood = PageMood.COMMERCE,
+                    icon = Icons.AutoMirrored.Rounded.Chat,
+                )
+                actions.firstOrNull()?.let { action ->
+                    SpectraAction(
+                        text = action.label,
+                        onClick = { onAction(action) },
+                        modifier = Modifier.weight(1f),
+                        emphasized = true,
+                        enabled = actionsEnabled,
+                        mood = PageMood.COMMERCE,
+                    )
+                }
             }
             if (actions.size > 1) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    actions.drop(1).forEach { action -> TelemetryChip(action.label, false, { onAction(action) }, Modifier.weight(1f)) }
+                    actions.drop(1).forEach { action ->
+                        SpectraAction(
+                            text = action.label,
+                            onClick = { onAction(action) },
+                            modifier = Modifier.weight(1f),
+                            enabled = actionsEnabled,
+                            mood = PageMood.COMMERCE,
+                        )
+                    }
                 }
             }
-        }
     }
 }
 
@@ -300,11 +463,24 @@ private fun OrderCard(
 private fun OrderProgress(status: String) {
     val steps = listOf("pending_payment", "paid", "meeting", "completed")
     val activeIndex = steps.indexOf(status).coerceAtLeast(0)
+    val motion = SpectraTheme.tokens.motion
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         steps.forEachIndexed { index, step ->
             val active = status !in listOf("cancelled", "disputed") && index <= activeIndex
-            Box(Modifier.size(16.dp).background(if (active) SpectraColors.Focus else SpectraColors.Silver, CircleShape))
-            if (index < steps.lastIndex) Spacer(Modifier.weight(1f).height(3.dp).background(if (active && index < activeIndex) SpectraColors.Violet else SpectraColors.Silver.copy(.7f), CircleShape))
+            val dotColor by animateColorAsState(
+                targetValue = if (active) SpectraColors.Warm else SpectraColors.Silver,
+                animationSpec = tween(motion.resolve(motion.shortMillis)),
+                label = "order-step-$step",
+            )
+            Box(Modifier.size(16.dp).background(dotColor, CircleShape))
+            if (index < steps.lastIndex) {
+                val railColor by animateColorAsState(
+                    targetValue = if (active && index < activeIndex) SpectraColors.Warm else SpectraColors.Silver.copy(.7f),
+                    animationSpec = tween(motion.resolve(motion.shortMillis)),
+                    label = "order-rail-$step",
+                )
+                Spacer(Modifier.weight(1f).height(3.dp).background(railColor, CircleShape))
+            }
         }
     }
 }
@@ -323,63 +499,93 @@ private fun orderActions(order: MarketplaceOrder, isBuyer: Boolean): List<OrderA
     }
 
 @Composable
-private fun OverlayPage(content: androidx.compose.foundation.lazy.LazyListScope.() -> Unit) {
-    LazyColumn(
-        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background.copy(.94f)),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-        content = content,
-    )
+private fun OverlayPage(
+    mood: PageMood,
+    content: androidx.compose.foundation.lazy.LazyListScope.() -> Unit,
+) {
+    val layout = SpectraTheme.layout
+    SpectraPageScaffold(mood = mood) {
+        LazyColumn(
+            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
+            contentPadding = PaddingValues(
+                start = layout.pageHorizontalPadding,
+                end = layout.pageHorizontalPadding,
+                top = layout.pageTopSpacing,
+                bottom = layout.pageTopSpacing + layout.compactGap,
+            ),
+            verticalArrangement = Arrangement.spacedBy(layout.sectionGap),
+            content = content,
+        )
+    }
 }
 
 private fun androidx.compose.foundation.lazy.LazyListScope.PageHeader(title: String, subtitle: String, onBack: () -> Unit) {
     item {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") }
+            SpectraIconAction(
+                icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                label = "返回",
+                onClick = onBack,
+            )
             Column(Modifier.weight(1f)) { Text(title, style = MaterialTheme.typography.headlineLarge); Text(subtitle, color = MaterialTheme.colorScheme.onSurface.copy(.58f)) }
         }
     }
 }
 
 @Composable
-private fun CommerceLoadingRow() {
-    GlassPanel(Modifier.fillMaxWidth().height(100.dp), radius = 16) {
-        Row(Modifier.fillMaxSize().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Spacer(Modifier.size(48.dp).background(SpectraColors.Silver.copy(.45f), CircleShape)); Spacer(Modifier.size(12.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                Spacer(Modifier.fillMaxWidth(.5f).height(14.dp).background(SpectraColors.Silver.copy(.5f), CircleShape))
-                Spacer(Modifier.fillMaxWidth(.78f).height(11.dp).background(SpectraColors.Silver.copy(.32f), CircleShape))
-            }
-        }
-    }
-}
-
-@Composable
-private fun CommerceEmpty(title: String, detail: String) {
-    GlassPanel(Modifier.fillMaxWidth(), radius = 24, emphasized = true) {
-        Column(Modifier.fillMaxWidth().padding(26.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Icon(Icons.AutoMirrored.Rounded.Chat, null, tint = SpectraColors.Focus, modifier = Modifier.size(42.dp))
-            Text(title, style = MaterialTheme.typography.titleLarge)
-            Text(detail, color = MaterialTheme.colorScheme.onSurface.copy(.6f))
-        }
+private fun CommerceEmpty(
+    title: String,
+    detail: String,
+    actionLabel: String,
+    onAction: () -> Unit,
+) {
+    SpectraSurface(
+        modifier = Modifier.fillMaxWidth(),
+        mood = PageMood.COMMERCE,
+        emphasized = true,
+    ) {
+        SpectraStatus("暂无内容", tone = SpectraStatusTone.NEUTRAL)
+        Text(title, style = MaterialTheme.typography.titleLarge)
+        Text(detail, color = MaterialTheme.colorScheme.onSurface.copy(.6f))
+        SpectraAction(
+            text = actionLabel,
+            onClick = onAction,
+            modifier = Modifier.fillMaxWidth(),
+            emphasized = true,
+            mood = PageMood.COMMERCE,
+        )
     }
 }
 
 @Composable
 private fun CommerceError(message: String, onRetry: () -> Unit) {
-    GlassPanel(Modifier.fillMaxWidth(), radius = 16) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(message, color = MaterialTheme.colorScheme.error)
-            TelemetryChip("重新读取", true, onRetry)
-        }
+    SpectraSurface(Modifier.fillMaxWidth(), mood = PageMood.COMMERCE) {
+        SpectraStatus("需要处理", tone = SpectraStatusTone.ERROR)
+        Text(message, color = MaterialTheme.colorScheme.error)
+        SpectraAction(
+            text = "重新读取",
+            onClick = onRetry,
+            mood = PageMood.COMMERCE,
+        )
     }
 }
 
 @Composable
-private fun InlineOperationError(message: String, onDismiss: () -> Unit) {
-    Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.error.copy(.1f), RoundedCornerShape(12.dp)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
-        IconButton(onClick = onDismiss) { Icon(Icons.Rounded.Refresh, "关闭错误") }
+private fun InlineOperationError(message: String, mood: PageMood, onDismiss: () -> Unit) {
+    SpectraSurface(
+        modifier = Modifier.fillMaxWidth(),
+        mood = mood,
+        shadowed = false,
+        contentPadding = PaddingValues(12.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+            SpectraIconAction(
+                icon = Icons.Rounded.Close,
+                label = "关闭错误",
+                onClick = onDismiss,
+            )
+        }
     }
 }
 

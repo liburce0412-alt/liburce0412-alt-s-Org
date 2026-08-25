@@ -29,6 +29,10 @@ secretsGradlePlugin = "2.0.1"
 mlkitTextRecognitionChinese = "16.0.1"
 workRuntimeKtx = "2.10.1"
 desugarJdkLibs = "2.1.5"
+appfunctions = "1.0.0-alpha10"
+healthConnect = "1.2.0-alpha05"
+exifInterface = "1.4.2"
+koog = "1.0.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -69,6 +73,11 @@ roborazzi-junit-rule = { group = "io.github.takahirom.roborazzi", name = "robora
 mlkit-text-recognition-chinese = { group = "com.google.mlkit", name = "text-recognition-chinese", version.ref = "mlkitTextRecognitionChinese" }
 androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "workRuntimeKtx" }
 desugar-jdk-libs = { group = "com.android.tools", name = "desugar_jdk_libs", version.ref = "desugarJdkLibs" }
+androidx-appfunctions = { group = "androidx.appfunctions", name = "appfunctions", version.ref = "appfunctions" }
+androidx-appfunctions-compiler = { group = "androidx.appfunctions", name = "appfunctions-compiler", version.ref = "appfunctions" }
+androidx-health-connect = { group = "androidx.health.connect", name = "connect-client", version.ref = "healthConnect" }
+androidx-exifinterface = { group = "androidx.exifinterface", name = "exifinterface", version.ref = "exifInterface" }
+koog-prompt-executor-model = { group = "ai.koog", name = "prompt-executor-model", version.ref = "koog" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

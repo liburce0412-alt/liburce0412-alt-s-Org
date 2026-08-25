@@ -13,7 +13,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import com.campusai.core.model.CourseSchedule
 import com.campusai.core.model.AiMode
+import com.campusai.core.model.AiProvider
 import com.campusai.core.model.AiReport
+import com.campusai.core.model.DailyGreeting
 import java.util.UUID
 
 // ==========================================
@@ -179,15 +181,98 @@ data class CourseScheduleEntity(
 @Entity(tableName = "ai_reports")
 data class AiReportEntity(
     @PrimaryKey val id: String,
+    val provider: String,
     val mode: String,
+    val model: String,
     val title: String,
     val summary: String,
     val messagesJson: String,
     val createdAt: Long,
+    val updatedAt: Long,
 ) {
-    fun toDomain() = AiReport(id, AiMode.valueOf(mode), title, summary, messagesJson, createdAt)
-    companion object { fun fromDomain(value: AiReport) = AiReportEntity(value.id, value.mode.name, value.title, value.summary, value.messagesJson, value.createdAt) }
+    fun toDomain() = AiReport(
+        id = id,
+        provider = provider.toAiProvider(),
+        mode = mode.toAiMode(),
+        model = model,
+        title = title,
+        summary = summary,
+        messagesJson = messagesJson,
+        createdAt = createdAt,
+        updatedAt = updatedAt,
+    )
+    companion object {
+        fun fromDomain(value: AiReport) = AiReportEntity(
+            value.id,
+            value.provider.name,
+            value.mode.name,
+            value.model,
+            value.title,
+            value.summary,
+            value.messagesJson,
+            value.createdAt,
+            value.updatedAt,
+        )
+    }
 }
+
+@Entity(tableName = "daily_greetings")
+data class DailyGreetingEntity(
+    @PrimaryKey val id: String,
+    val localDate: String,
+    val text: String,
+    val provider: String,
+    val generatedAt: Long,
+) {
+    fun toDomain() = DailyGreeting(localDate, text, provider.toAiProvider(), generatedAt)
+}
+
+@Entity(tableName = "agent_memories", indices = [Index(value = ["confirmedAt", "expiresAt"])])
+data class AgentMemoryEntity(
+    @PrimaryKey val id: String,
+    val type: String,
+    val content: String,
+    val source: String,
+    val confidence: Double,
+    val createdAt: Long,
+    val confirmedAt: Long?,
+    val expiresAt: Long?,
+)
+
+@Entity(tableName = "agent_traces", indices = [Index(value = ["sessionId", "createdAt"])])
+data class AgentTraceEntity(
+    @PrimaryKey val id: String,
+    val sessionId: String,
+    val kind: String,
+    val name: String,
+    val durationMs: Long,
+    val success: Boolean,
+    val errorCode: String?,
+    val createdAt: Long,
+)
+
+@Entity(tableName = "agent_actions")
+data class AgentActionEntity(
+    @PrimaryKey val idempotencyKey: String,
+    val toolName: String,
+    val argumentsHash: String,
+    val status: String,
+    val resultJson: String?,
+    val createdAt: Long,
+    val updatedAt: Long,
+)
+
+@Entity(tableName = "health_summary_cache")
+data class HealthSummaryCacheEntity(
+    @PrimaryKey val windowKey: String,
+    val summaryJson: String,
+    val source: String,
+    val observedAt: Long,
+    val lastSyncAt: Long?,
+)
+
+private fun String.toAiMode() = runCatching { AiMode.valueOf(this) }.getOrDefault(AiMode.FAST)
+private fun String.toAiProvider() = runCatching { AiProvider.valueOf(this) }.getOrDefault(AiProvider.AUTO)
 
 // ==========================================
 // Room DAOs
@@ -305,11 +390,86 @@ interface CampusDao {
     @Query("DELETE FROM course_schedules WHERE deletedAt IS NOT NULL AND deletedAt < :before AND syncState = 'synced'")
     suspend fun purgeOldCourseTombstones(before: Long)
 
-    @Query("SELECT * FROM ai_reports ORDER BY createdAt DESC")
+    @Query("SELECT * FROM ai_reports ORDER BY updatedAt DESC")
     fun getAiReportsFlow(): Flow<List<AiReportEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAiReport(entity: AiReportEntity)
+
+    @Query("DELETE FROM ai_reports WHERE id = :id")
+    suspend fun deleteAiReport(id: String)
+
+    @Query("SELECT * FROM daily_greetings WHERE id = :id LIMIT 1")
+    suspend fun getDailyGreeting(id: String): DailyGreetingEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDailyGreeting(entity: DailyGreetingEntity)
+
+    @Query("SELECT * FROM agent_memories WHERE confirmedAt IS NOT NULL AND (expiresAt IS NULL OR expiresAt > :now) ORDER BY confirmedAt DESC LIMIT :limit")
+    suspend fun getConfirmedAgentMemories(now: Long, limit: Int = 24): List<AgentMemoryEntity>
+
+    @Query("SELECT * FROM agent_memories ORDER BY createdAt DESC")
+    fun getAgentMemoriesFlow(): Flow<List<AgentMemoryEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAgentMemory(entity: AgentMemoryEntity)
+
+    @Query("UPDATE agent_memories SET confirmedAt = :confirmedAt WHERE id = :id AND confirmedAt IS NULL")
+    suspend fun confirmAgentMemory(id: String, confirmedAt: Long = System.currentTimeMillis()): Int
+
+    @Query("UPDATE agent_memories SET content = :content WHERE id = :id")
+    suspend fun updateAgentMemoryContent(id: String, content: String): Int
+
+    @Query("DELETE FROM agent_memories WHERE id = :id")
+    suspend fun deleteAgentMemory(id: String)
+
+    @Query("DELETE FROM agent_memories")
+    suspend fun deleteAllAgentMemories()
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAgentTrace(entity: AgentTraceEntity)
+
+    @Query("SELECT * FROM agent_traces ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun getAgentTraces(limit: Int = 200): List<AgentTraceEntity>
+
+    @Query("DELETE FROM agent_traces")
+    suspend fun deleteAllAgentTraces()
+
+    @Query("SELECT * FROM agent_actions WHERE idempotencyKey = :key LIMIT 1")
+    suspend fun getAgentAction(key: String): AgentActionEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAgentAction(entity: AgentActionEntity)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAgentActionIfAbsent(entity: AgentActionEntity): Long
+
+    @Query("""
+        UPDATE agent_actions
+        SET toolName = :toolName, argumentsHash = :argumentsHash, status = 'running', resultJson = NULL, updatedAt = :updatedAt
+        WHERE idempotencyKey = :key AND status = 'failed'
+    """)
+    suspend fun restartFailedAgentAction(key: String, toolName: String, argumentsHash: String, updatedAt: Long): Int
+
+    @Query("""
+        UPDATE agent_actions
+        SET status = 'completed', resultJson = :resultJson, updatedAt = :updatedAt
+        WHERE idempotencyKey = :key AND status = 'running'
+    """)
+    suspend fun completeRunningAgentAction(key: String, resultJson: String, updatedAt: Long): Int
+
+    @Query("""
+        UPDATE agent_actions
+        SET status = 'failed', resultJson = NULL, updatedAt = :updatedAt
+        WHERE idempotencyKey = :key AND status = 'running'
+    """)
+    suspend fun failRunningAgentAction(key: String, updatedAt: Long): Int
+
+    @Query("SELECT * FROM health_summary_cache WHERE windowKey = :windowKey LIMIT 1")
+    suspend fun getHealthSummaryCache(windowKey: String): HealthSummaryCacheEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertHealthSummaryCache(entity: HealthSummaryCacheEntity)
 }
 
 // ==========================================
@@ -324,9 +484,14 @@ interface CampusDao {
         ChatMessageEntity::class,
         UserMessageEntity::class,
         CourseScheduleEntity::class,
-        AiReportEntity::class
+        AiReportEntity::class,
+        DailyGreetingEntity::class,
+        AgentMemoryEntity::class,
+        AgentTraceEntity::class,
+        AgentActionEntity::class,
+        HealthSummaryCacheEntity::class,
     ],
-    version = 4,
+    version = 6,
     exportSchema = true
 )
 abstract class CampusDatabase : RoomDatabase() {
@@ -408,6 +573,61 @@ abstract class CampusDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `ai_reports` ADD COLUMN `provider` TEXT NOT NULL DEFAULT 'AUTO'")
+                db.execSQL("ALTER TABLE `ai_reports` ADD COLUMN `model` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `ai_reports` ADD COLUMN `updatedAt` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE `ai_reports` SET `updatedAt` = `createdAt` WHERE `updatedAt` = 0")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `daily_greetings` (
+                      `id` TEXT NOT NULL,
+                      `localDate` TEXT NOT NULL,
+                      `text` TEXT NOT NULL,
+                      `provider` TEXT NOT NULL,
+                      `generatedAt` INTEGER NOT NULL,
+                      PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `agent_memories` (
+                      `id` TEXT NOT NULL, `type` TEXT NOT NULL, `content` TEXT NOT NULL,
+                      `source` TEXT NOT NULL, `confidence` REAL NOT NULL, `createdAt` INTEGER NOT NULL,
+                      `confirmedAt` INTEGER, `expiresAt` INTEGER, PRIMARY KEY(`id`)
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_agent_memories_confirmedAt_expiresAt` ON `agent_memories` (`confirmedAt`, `expiresAt`)")
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `agent_traces` (
+                      `id` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `kind` TEXT NOT NULL,
+                      `name` TEXT NOT NULL, `durationMs` INTEGER NOT NULL, `success` INTEGER NOT NULL,
+                      `errorCode` TEXT, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`)
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_agent_traces_sessionId_createdAt` ON `agent_traces` (`sessionId`, `createdAt`)")
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `agent_actions` (
+                      `idempotencyKey` TEXT NOT NULL, `toolName` TEXT NOT NULL, `argumentsHash` TEXT NOT NULL,
+                      `status` TEXT NOT NULL, `resultJson` TEXT, `createdAt` INTEGER NOT NULL,
+                      `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`idempotencyKey`)
+                    )
+                """.trimIndent())
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `health_summary_cache` (
+                      `windowKey` TEXT NOT NULL, `summaryJson` TEXT NOT NULL, `source` TEXT NOT NULL,
+                      `observedAt` INTEGER NOT NULL, `lastSyncAt` INTEGER, PRIMARY KEY(`windowKey`)
+                    )
+                """.trimIndent())
+            }
+        }
+
         @Volatile
         private var INSTANCE: CampusDatabase? = null
 
@@ -418,7 +638,7 @@ abstract class CampusDatabase : RoomDatabase() {
                     CampusDatabase::class.java,
                     "campus_database"
                 )
-                .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build()
                 INSTANCE = instance
                 instance

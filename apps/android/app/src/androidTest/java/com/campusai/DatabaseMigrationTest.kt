@@ -44,4 +44,41 @@ class DatabaseMigrationTest {
             }
         }
     }
+
+    @Test
+    fun migrationFourToFivePreservesHistoryAndAddsStableConversationMetadata() {
+        helper.createDatabase(databaseName, 4).apply {
+            execSQL("INSERT INTO ai_reports(id,mode,title,summary,messagesJson,createdAt) VALUES('session-1','FAST','旧会话','旧摘要','[]',1234)")
+            close()
+        }
+
+        helper.runMigrationsAndValidate(databaseName, 5, true, CampusDatabase.MIGRATION_4_5).use { database ->
+            database.query("SELECT id,provider,model,createdAt,updatedAt FROM ai_reports WHERE id='session-1'").use { cursor ->
+                cursor.moveToFirst()
+                assertEquals("session-1", cursor.getString(0))
+                assertEquals("AUTO", cursor.getString(1))
+                assertEquals("", cursor.getString(2))
+                assertEquals(1234L, cursor.getLong(3))
+                assertEquals(1234L, cursor.getLong(4))
+            }
+            database.query("SELECT COUNT(*) FROM daily_greetings").use { cursor ->
+                cursor.moveToFirst()
+                assertEquals(0, cursor.getInt(0))
+            }
+        }
+    }
+
+    @Test
+    fun migrationFiveToSixAddsAgentGovernanceTablesWithoutLosingHistory() {
+        helper.createDatabase(databaseName, 5).apply {
+            execSQL("INSERT INTO ai_reports(id,provider,mode,model,title,summary,messagesJson,createdAt,updatedAt) VALUES('session-6','LOCAL','FAST','Qwen','会话','摘要','[]',100,200)")
+            close()
+        }
+        helper.runMigrationsAndValidate(databaseName, 6, true, CampusDatabase.MIGRATION_5_6).use { database ->
+            database.query("SELECT COUNT(*) FROM ai_reports WHERE id='session-6'").use { cursor -> cursor.moveToFirst(); assertEquals(1, cursor.getInt(0)) }
+            listOf("agent_memories", "agent_traces", "agent_actions", "health_summary_cache").forEach { table ->
+                database.query("SELECT COUNT(*) FROM $table").use { cursor -> cursor.moveToFirst(); assertEquals(0, cursor.getInt(0)) }
+            }
+        }
+    }
 }

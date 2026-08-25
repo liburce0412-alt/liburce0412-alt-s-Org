@@ -2,6 +2,7 @@ package com.campusai.core.network
 
 import com.campusai.core.ai.AiEvent
 import com.campusai.core.ai.AiRequest
+import com.campusai.core.ai.AiSystemPolicy
 import com.campusai.core.model.AiMode
 import com.campusai.core.model.AiProvider
 import com.campusai.core.security.PersonalDeepSeekKeyStore
@@ -42,8 +43,9 @@ class PersonalDeepSeekClient(
             put("thinking", JSONObject().put("type", personalDeepSeekThinking(request.mode)))
             put("max_tokens", request.maxOutputTokens.coerceIn(1, 2048))
             put("messages", JSONArray().apply {
+                put(JSONObject().put("role", "system").put("content", AiSystemPolicy.instruction(request.structuredContextJson)))
                 if (request.structuredContextJson != "{}") {
-                    put(JSONObject().put("role", "system").put("content", "CampusAI 用户上下文（仅用于本次回答）：${request.structuredContextJson}"))
+                    put(JSONObject().put("role", "system").put("content", "<private_context>${request.structuredContextJson}</private_context>"))
                 }
                 request.messages.forEach { message ->
                     put(JSONObject().put("role", message.role).put("content", message.content))
@@ -93,7 +95,7 @@ class PersonalDeepSeekClient(
 
     private fun providerError(status: Int): PersonalDeepSeekException = when (status) {
         401 -> PersonalDeepSeekException("personal_key_invalid", "个人 DeepSeek Key 无效或已被撤销。请在设置中重新保存正确的 Key。", false)
-        402 -> PersonalDeepSeekException("personal_balance_empty", "个人 DeepSeek 账户余额不足。充值后重试，或切换为本地离线模式。", false)
+        402 -> PersonalDeepSeekException("personal_balance_empty", "个人 DeepSeek 账户余额不足。充值后重试，或切换为本地模型。", false)
         429 -> PersonalDeepSeekException("personal_rate_limited", "个人 DeepSeek 账户请求过于频繁。请稍后重试。")
         in 500..599 -> PersonalDeepSeekException("provider_unavailable", "DeepSeek 服务暂时不可用（$status），请稍后重试。")
         else -> PersonalDeepSeekException("provider_error", "个人 DeepSeek 请求失败（$status）。请检查 Key 和账户状态后重试。")

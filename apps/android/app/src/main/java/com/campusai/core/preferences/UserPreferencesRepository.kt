@@ -10,6 +10,7 @@ import com.campusai.core.model.MotionMode
 import com.campusai.core.model.RenderQuality
 import com.campusai.core.model.SpectraEnvironment
 import com.campusai.core.model.ThemeMode
+import com.campusai.core.designsystem.SpectraVisualStyle
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -23,6 +24,8 @@ data class UserPreferences(
     val soundEnabled: Boolean = true,
     val aiProvider: AiProvider = AiProvider.AUTO,
     val localModelWifiOnly: Boolean = true,
+    /** Selects the complete Caesar visual system, not only the renderer background. */
+    val visualStyle: SpectraVisualStyle = SpectraVisualStyle.CLASSIC,
 )
 
 class UserPreferencesRepository(private val context: Context) {
@@ -34,6 +37,7 @@ class UserPreferencesRepository(private val context: Context) {
         val sound = booleanPreferencesKey("sound_enabled")
         val aiProvider = stringPreferencesKey("ai_provider")
         val localModelWifiOnly = booleanPreferencesKey("local_model_wifi_only")
+        val visualStyle = stringPreferencesKey("spectra_visual_style")
     }
 
     val preferences: Flow<UserPreferences> = context.campusPreferences.data.map { values ->
@@ -45,6 +49,7 @@ class UserPreferencesRepository(private val context: Context) {
             soundEnabled = values[Keys.sound] ?: true,
             aiProvider = values[Keys.aiProvider].toEnumOr(AiProvider.AUTO),
             localModelWifiOnly = values[Keys.localModelWifiOnly] ?: true,
+            visualStyle = values[Keys.visualStyle].toEnumOr(SpectraVisualStyle.CLASSIC),
         )
     }
 
@@ -55,6 +60,7 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun setSound(value: Boolean) = context.campusPreferences.edit { it[Keys.sound] = value }
     suspend fun setAiProvider(value: AiProvider) = context.campusPreferences.edit { it[Keys.aiProvider] = value.name }
     suspend fun setLocalModelWifiOnly(value: Boolean) = context.campusPreferences.edit { it[Keys.localModelWifiOnly] = value }
+    suspend fun setVisualStyle(value: SpectraVisualStyle) = context.campusPreferences.edit { it[Keys.visualStyle] = value.name }
 }
 
 private inline fun <reified T : Enum<T>> String?.toEnumOr(fallback: T): T =
