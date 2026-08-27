@@ -2,14 +2,10 @@ package com.campusai.core.agent
 
 import com.campusai.core.database.CampusDao
 import com.campusai.core.database.TimeRecordEntity
-import com.campusai.core.health.BandLiveGateway
 import com.campusai.core.health.HealthAvailability
 import com.campusai.core.health.HealthGateway
 import com.campusai.core.health.HealthPeriods
 import com.campusai.core.health.HealthSnapshot
-import com.campusai.core.health.HealthSyncCoordinator
-import com.campusai.core.health.HealthSyncReason
-import com.campusai.core.health.HealthSyncStage
 import com.campusai.core.profile.ProfileRepository
 import com.campusai.features.community.CampusRepository
 import kotlinx.coroutines.flow.first
@@ -22,8 +18,6 @@ class CaesarAppTools(
     private val campus: CampusRepository,
     private val profile: ProfileRepository,
     private val health: HealthGateway,
-    private val band: BandLiveGateway,
-    private val healthSync: HealthSyncCoordinator,
     private val idempotency: CaesarIdempotencyStore,
     private val memory: CaesarMemoryStore,
 ) {
@@ -75,7 +69,7 @@ class CaesarAppTools(
             external("message.send", "向已有会话发送消息", listOf(text("conversationId", "会话 ID", 80), text("body", "消息正文", 4_000)), setOf("发消息", "回复消息")) { args, ctx -> requireLogin(ctx) ?: persisted("message.send", args, ctx) { campus.sendMessage(args.getString("conversationId"), args.getString("body")).fold({ success(JSONObject().put("messageId", it.id).put("sent", true)) }, ::remoteFailure) } },
 
             read("profile.get", "读取当前个人资料", emptyList(), setOf("个人资料", "昵称", "简介")) { _, _ -> profile.state.value.profile.let { success(JSONObject().put("id", it.id).put("displayName", it.displayName).put("bio", it.bio).put("role", it.role).put("level", it.level).put("streakDays", it.streakDays)) } },
-            external("profile.update", "更新昵称和简介", listOf(text("displayName", "昵称", 32), optional("bio", "string", "简介", 160)), setOf("修改昵称", "修改简介", "更新资料")) { args, ctx -> requireLogin(ctx) ?: persisted("profile.update", args, ctx) { if (profile.updateText(ctx.ownerUserId, args.getString("displayName"), args.optString("bio"))) success(JSONObject().put("updated", true)) else CaesarToolResult.Denied("profile_update_failed", profile.state.value.error ?: "资料更新失败") } },
+            external("profile.update", "更新昵称和简介", listOf(text("displayName", "昵称", 32), optional("bio", "string", "简介", 160)), setOf("修改昵称", "修改简介", "更新资料")) { args, ctx -> requireLogin(ctx) ?: persisted("profile.update", args, ctx) { if (profile.updateText(ctx.ownerUserId, args.getString("displayName"), args.optString("bio"))) success(JSONObject().put("updated", true)) else CaesarToolResult.Denied("profile_update_failed", "资料更新失败，请稍后重试。") } },
 
             read("memory.list", "读取用户已确认的长期记忆", emptyList(), setOf("记忆", "记得", "偏好", "目标")) { _, _ ->
                 success(JSONArray(memory.context().map { JSONObject().put("id", it.id).put("type", it.type).put("content", it.content).put("source", it.source).put("confidence", it.confidence).put("expiresAt", it.expiresAt ?: JSONObject.NULL) }))
@@ -97,57 +91,47 @@ class CaesarAppTools(
             read("health.get_sources", "获取健康数据源和权限状态", emptyList(), setOf("健康数据源", "权限")) { _, _ ->
                 val availability = health.availability()
                 val granted = health.grantedPermissions()
-                success(JSONObject().put("availability", availability.javaClass.simpleName).put("grantedPermissions", JSONArray(granted)).put("missingPermissions", JSONArray(health.readPermissions - granted)))
+                val snapshot = health.snapshot(HealthPeriods.parse("today")).getOrNull()
+                success(
+                    JSONObject()
+                        .put("availability", availability.javaClass.simpleName)
+                        .put("grantedPermissions", JSONArray(granted))
+                        .put("missingPermissions", JSONArray(health.readPermissions - granted))
+                        .put("originPackages", JSONArray(snapshot?.originPackages.orEmpty().toList()))
+                        .put("observedAt", snapshot?.observedAt ?: JSONObject.NULL)
+                        .put("lastSyncAt", snapshot?.lastSyncAt ?: JSONObject.NULL),
+                )
             },
-            write("health.start_live_session", "启动用户可见的手环实时会话", reversible = true, params = emptyList(), keywords = setOf("实时心率", "开始监测")) { _, _ -> band.startSession().fold({ success(JSONObject().put("started", true)) }, { CaesarToolResult.Unavailable("band_bridge_unavailable", it.message ?: "CaesarBandBridge 不可用") }) },
-            write("health.stop_live_session", "停止手环实时会话", reversible = true, params = emptyList(), keywords = setOf("停止监测", "停止实时心率")) { _, _ -> band.stopSession().fold({ success(JSONObject().put("stopped", true)) }, { CaesarToolResult.Unavailable("band_bridge_unavailable", it.message ?: "CaesarBandBridge 不可用") }) },
         ),
     )
 
     private fun healthRead(name: String, description: String, keywords: Set<String>) = read(name, description, listOf(optional("period", "string", "today/week/month/yesterday")), keywords) { args, _ ->
-        when (val available = health.availability()) {
-            HealthAvailability.Available, is HealthAvailability.MissingPermissions -> {
-                if (health.grantedPermissions().isEmpty()) CaesarToolResult.Unavailable("health_permission_required", "需要 Health Connect 读取权限")
-                else {
-                    val period = HealthPeriods.parse(args.optString("period", "today"))
-                    val synced = healthSync.synchronize(period, HealthSyncReason.AGENT)
-                    val snapshot = synced.health
-                    if (snapshot == null) {
-                        CaesarToolResult.Unavailable(
-                            "health_read_failed",
-                            synced.healthError ?: synced.bandError ?: "健康数据读取失败",
-                        )
-                    } else {
-                        val data = snapshot.toJson()
-                        data.put("sync", JSONObject()
-                            .put("stage", synced.stage.name.lowercase())
-                            .put("message", synced.message)
-                            .put("completed", synced.stage == HealthSyncStage.COMPLETE))
-                        if (name == "health.get_snapshot") band.snapshot().getOrNull()?.let { live ->
-                            data.put("live", JSONObject()
-                                .put("source", live.source)
-                                .put("observedAt", live.observedAt)
-                                .put("connected", live.connected ?: JSONObject.NULL)
-                                .put("batteryPercent", live.batteryPercent ?: JSONObject.NULL)
-                                .put("wearing", live.wearing ?: JSONObject.NULL)
-                                .put("heartRateBpm", live.heartRateBpm ?: JSONObject.NULL)
-                                .put("stepDelta", live.stepDelta ?: JSONObject.NULL)
-                                .put("fresh", live.isFresh()))
-                        }
-                        success(data)
-                    }
+        val period = HealthPeriods.parse(args.optString("period", "today"))
+        health.snapshot(period).fold(
+            onSuccess = { snapshot -> success(snapshot.toJson()) },
+            onFailure = {
+                val message = when (health.availability()) {
+                    is HealthAvailability.MissingPermissions ->
+                        "本地健康缓存为空；请手动刷新 Mi Fitness，或授予 Health Connect 读取权限。"
+                    HealthAvailability.NeedsProvider ->
+                        "本地健康缓存为空，且 Health Connect 需要安装或更新。"
+                    HealthAvailability.Unsupported ->
+                        "本地健康缓存为空；Mi Fitness 模式请手动刷新，其他模式请检查 Health Connect。"
+                    HealthAvailability.Available ->
+                        "本地健康缓存中没有这个时间范围的数据。"
                 }
-            }
-            HealthAvailability.NeedsProvider -> CaesarToolResult.Unavailable("health_provider_required", "需要安装或更新 Health Connect")
-            HealthAvailability.Unsupported -> CaesarToolResult.Unavailable("health_unsupported", "当前系统不支持 Health Connect")
-        }
+                CaesarToolResult.Unavailable("health_cache_empty", message)
+            },
+        )
     }
 
     private suspend fun persisted(name: String, args: JSONObject, context: ToolExecutionContext, action: suspend () -> CaesarToolResult): CaesarToolResult {
         val canonicalArguments = CaesarIntentEvidence.canonicalArguments(args)
         idempotency.completed(context.idempotencyKey)?.let { return CaesarToolResult.Success(it) }
         if (!idempotency.begin(context.idempotencyKey, name, canonicalArguments)) return CaesarToolResult.RetryableError("duplicate_in_progress", "相同操作正在执行，不会重复提交。")
-        val result = runCatching { action() }.getOrElse { CaesarToolResult.RetryableError("tool_exception", it.message ?: "工具执行失败") }
+        val result = runCatching { action() }.getOrElse {
+            CaesarToolResult.RetryableError("tool_exception", "工具执行失败，请稍后重试。")
+        }
         if (result is CaesarToolResult.Success) idempotency.complete(context.idempotencyKey, name, canonicalArguments, result.contentJson)
         else idempotency.fail(context.idempotencyKey, name, canonicalArguments)
         return result
@@ -163,7 +147,8 @@ class CaesarAppTools(
     private fun activeUser(context: ToolExecutionContext) = context.ownerUserId.ifBlank { "local_user" }
     private fun requireLogin(context: ToolExecutionContext): CaesarToolResult.Denied? = if (context.ownerUserId.isBlank()) CaesarToolResult.Denied("login_required", "这项操作需要先在原生页面登录。") else null
     private fun success(value: Any) = CaesarToolResult.Success(JSONObject().put("ok", true).put("data", value).toString())
-    private fun remoteFailure(error: Throwable) = CaesarToolResult.RetryableError("remote_error", error.message ?: "远程服务暂时不可用")
+    private fun remoteFailure(@Suppress("UNUSED_PARAMETER") error: Throwable) =
+        CaesarToolResult.RetryableError("remote_error", "远程服务暂时不可用。")
 
     private fun HealthSnapshot.toJson() = JSONObject()
         .put("originPackages", JSONArray(originPackages.toList()))

@@ -22,7 +22,7 @@ class HealthPermissionActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val gateway = HealthGatewayFactory.create(applicationContext)
+        val gateway = HealthGatewayFactory.createHealthConnectOnly(applicationContext)
         val availability = gateway.availability()
         if (
             gateway.readPermissions.isEmpty() ||

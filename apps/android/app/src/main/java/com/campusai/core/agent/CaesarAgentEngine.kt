@@ -35,13 +35,14 @@ class CaesarAgentEngine(
         val sessionId = request.sessionId.ifBlank { UUID.randomUUID().toString() }
         val prompt = request.userPrompt.ifBlank { request.messages.lastOrNull { it.role == "user" }?.content.orEmpty() }
         val projected = tools.project(prompt)
+        val projectedToolNames = projected.mapTo(linkedSetOf()) { it.name }
         val current = request.copy(
             sessionId = sessionId,
             userPrompt = prompt,
             caesarToolsJson = tools.promptSchema(projected),
         )
         pendingConfirmation.set(null)
-        runLoop(request.copy(sessionId = sessionId), current, CaesarDagState()).collect { emit(it) }
+        runLoop(request.copy(sessionId = sessionId), current, CaesarDagState(), projectedToolNames).collect { emit(it) }
     }
 
     fun confirm(actionId: String): Flow<AiEvent> = flow {
@@ -51,13 +52,19 @@ class CaesarAgentEngine(
             return@flow
         }
         emit(AiEvent.ToolStarted(pending.call.name))
-        val executed = execute(pending.request, pending.call, pending.arguments, confirmationGranted = true)
+        val executed = execute(
+            pending.request,
+            pending.call,
+            pending.arguments,
+            pending.projectedToolNames,
+            confirmationGranted = true,
+        )
         emit(AiEvent.ToolFinished(pending.call.name, executed.result is CaesarToolResult.Success))
         when (val result = executed.result) {
             is CaesarToolResult.Success -> {
                 result.surface?.let { emit(AiEvent.Surface(it.toJson())) }
                 val next = pending.current.withToolResult(pending.call, result.contentJson)
-                runLoop(pending.request, next, pending.dag).collect { emit(it) }
+                runLoop(pending.request, next, pending.dag, pending.projectedToolNames).collect { emit(it) }
             }
             is CaesarToolResult.Denied -> emit(AiEvent.Error(result.code, result.message))
             is CaesarToolResult.Unavailable -> emit(AiEvent.Error(result.code, result.message))
@@ -66,7 +73,12 @@ class CaesarAgentEngine(
         }
     }
 
-    private fun runLoop(request: AiRequest, initial: AiRequest, dag: CaesarDagState): Flow<AiEvent> = flow {
+    private fun runLoop(
+        request: AiRequest,
+        initial: AiRequest,
+        dag: CaesarDagState,
+        projectedToolNames: Set<String>,
+    ): Flow<AiEvent> = flow {
         var current = initial
         var outputFormatRetryAvailable = true
         generation@ while (dag.toolCalls < CaesarDagState.MAX_TOOL_CALLS) {
@@ -103,9 +115,13 @@ class CaesarAgentEngine(
             }
             activeCall.set(call.name)
             emit(AiEvent.ToolStarted(call.name))
-            val arguments = runCatching { JSONObject(call.argumentsJson) }.getOrElse {
-                emit(AiEvent.Error("invalid_tool_call", "模型生成了无法解析的工具参数。"))
-                return@flow
+            val arguments = if (call.name in projectedToolNames) {
+                runCatching { JSONObject(call.argumentsJson) }.getOrElse {
+                    emit(AiEvent.Error("invalid_tool_call", "模型生成了无法解析的工具参数。"))
+                    return@flow
+                }
+            } else {
+                JSONObject()
             }
             val canonicalArguments = CaesarIntentEvidence.canonicalArguments(arguments)
             val node = runCatching { dag.begin(call.name, canonicalArguments) }.getOrElse { error ->
@@ -113,7 +129,7 @@ class CaesarAgentEngine(
                 return@flow
             }
             val idempotencyKey = CaesarIntentEvidence.idempotencyKey(request.sessionId, call.name, canonicalArguments)
-            val executed = execute(request, call, arguments, confirmationGranted = false)
+            val executed = execute(request, call, arguments, projectedToolNames, confirmationGranted = false)
             val result = executed.result
             val elapsedMs = executed.elapsedMs
             val success = result is CaesarToolResult.Success
@@ -125,7 +141,9 @@ class CaesarAgentEngine(
             activeCall.set(null)
             when (result) {
                 is CaesarToolResult.NeedsConfirmation -> {
-                    pendingConfirmation.set(PendingConfirmation(request, current, call, arguments, dag, idempotencyKey))
+                    pendingConfirmation.set(
+                        PendingConfirmation(request, current, call, arguments, dag, idempotencyKey, projectedToolNames),
+                    )
                     val surface = CaesarSurface(
                         id = "confirmation-$idempotencyKey",
                         title = result.title,
@@ -161,6 +179,7 @@ class CaesarAgentEngine(
         request: AiRequest,
         call: AiEvent.ToolCallRequested,
         arguments: JSONObject,
+        projectedToolNames: Set<String>,
         confirmationGranted: Boolean,
     ): ExecutedTool {
         val started = System.nanoTime()
@@ -179,8 +198,11 @@ class CaesarAgentEngine(
             idempotencyKey = idempotencyKey,
             confirmationGranted = confirmationGranted,
         )
-        var result = tools.execute(call.name, arguments, context)
-        if (result is CaesarToolResult.RetryableError && result.code != "duplicate_in_progress") result = tools.execute(call.name, arguments, context)
+        var result = if (call.name in projectedToolNames) {
+            tools.execute(call.name, arguments, context)
+        } else {
+            CaesarToolResult.Denied("tool_not_projected", "本轮未授权执行这个工具。")
+        }
         val elapsedMs = (System.nanoTime() - started) / 1_000_000L
         traceSink.record(CaesarTraceEvent(request.sessionId, "tool", call.name, elapsedMs, result is CaesarToolResult.Success, result.errorCode()))
         return ExecutedTool(result, elapsedMs)
@@ -231,6 +253,7 @@ class CaesarAgentEngine(
         val arguments: JSONObject,
         val dag: CaesarDagState,
         val idempotencyKey: String,
+        val projectedToolNames: Set<String>,
     )
     private data class ExecutedTool(val result: CaesarToolResult, val elapsedMs: Long)
 

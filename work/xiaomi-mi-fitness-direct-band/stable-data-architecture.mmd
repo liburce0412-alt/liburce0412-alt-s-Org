@@ -1,0 +1,17 @@
+flowchart LR
+  band["Xiaomi Smart Band 9"] -->|"唯一 RFCOMM/SPP 会话"| owner["Mi Fitness + MiWearCore"]
+
+  competitor["Gadgetbridge / CampusAI 直连"] -. "并发争抢：不可保证" .-> band
+
+  owner --> local_db["Mi Fitness 数据库"]
+  local_db --> region{"Mi Fitness 判断为 Inland?"}
+
+  region -- "否" --> hc["Health Connect"]
+  hc --> app["CampusAI 数据网关"]
+
+  region -- "是" --> cloud["Xiaomi Health 私有云"]
+  cloud -->|"周期拉取；非实时"| app
+
+  local_db -. "导出 Provider：特权门禁" .-> blocked["普通第三方不可读"]
+  app --> cache[("Room 本地缓存")]
+  cache --> ui["UI / Agent"]

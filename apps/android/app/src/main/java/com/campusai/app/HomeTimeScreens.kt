@@ -121,7 +121,9 @@ import com.campusai.core.health.HealthAvailability
 import com.campusai.core.health.HealthFreshness
 import com.campusai.core.health.HealthPermissionActivity
 import com.campusai.core.health.healthExportGap
+import com.campusai.core.health.mifitness.MiFitnessSummaryHealthGateway
 import com.campusai.features.ai.CaesarHealthUiState
+import com.campusai.features.ai.MiFitnessUiStatus
 import com.campusai.features.community.CampusAnnouncement
 import com.campusai.features.time.TimeViewModel
 import com.campusai.features.schedule.CourseDraft
@@ -148,6 +150,7 @@ fun HomeScreen(
     onOpenAi: () -> Unit,
     healthState: CaesarHealthUiState,
     onRefreshHealth: () -> Unit,
+    onSyncMiFitnessSteps: () -> Unit,
     onStartBand: () -> Unit,
     onStopBand: () -> Unit,
     onSyncBandHistory: () -> Unit,
@@ -256,6 +259,7 @@ fun HomeScreen(
             Band9StatusCard(
                 state = healthState,
                 onRefresh = onRefreshHealth,
+                onCloudRefresh = onSyncMiFitnessSteps,
                 onPermissions = {
                     healthPermissionLauncher.launch(Intent(context, HealthPermissionActivity::class.java))
                 },
@@ -385,6 +389,7 @@ fun HomeScreen(
 private fun Band9StatusCard(
     state: CaesarHealthUiState,
     onRefresh: () -> Unit,
+    onCloudRefresh: () -> Unit,
     onPermissions: () -> Unit,
     onStartBand: () -> Unit,
     onStopBand: () -> Unit,
@@ -392,7 +397,17 @@ private fun Band9StatusCard(
     onDiagnostics: () -> Unit,
 ) {
     var showDetails by rememberSaveable { mutableStateOf(false) }
-    val band = state.band
+    val cloudConfigured = state.miFitnessConfigured
+    val cloudSnapshot = state.snapshot?.takeIf {
+        MiFitnessSummaryHealthGateway.SOURCE_ID in it.originPackages
+    }
+    val displayState = if (cloudConfigured) state.copy(snapshot = cloudSnapshot, band = null) else state
+    val band = displayState.band
+    val cloudFailure = state.miFitnessStatus in setOf(
+        MiFitnessUiStatus.AUTH_ERROR,
+        MiFitnessUiStatus.NETWORK_ERROR,
+        MiFitnessUiStatus.STORAGE_ERROR,
+    )
     val listening = band?.bridgeState == BandLiveState.LISTENING
     val bandFresh = band?.isFresh() == true
     val liveCapabilityMask = BandBridgeContract.Capability.REALTIME_HEART_RATE or
@@ -406,7 +421,7 @@ private fun Band9StatusCard(
         (it.heartRateBpm != null && it.capabilityBits.and(BandBridgeContract.Capability.REALTIME_HEART_RATE) != 0L) ||
             (it.stepDelta != null && it.capabilityBits.and(BandBridgeContract.Capability.REALTIME_STEPS) != 0L)
     } == true
-    val snapshot = state.snapshot
+    val snapshot = displayState.snapshot
     val hasVerifiedHistoryData = snapshot?.metrics?.let { metrics ->
         listOf(
             metrics.steps,
@@ -421,7 +436,15 @@ private fun Band9StatusCard(
             metrics.workoutCount,
         ).any { it != null }
     } == true
-    val statusText = when (band?.bridgeState) {
+    val statusText = if (cloudConfigured) {
+        when {
+            state.miFitnessSyncing -> "正在读取云端步数"
+            cloudFailure && hasVerifiedHistoryData -> "缓存可用 · 本次刷新失败"
+            cloudFailure -> "云端刷新失败"
+            hasVerifiedHistoryData -> "云端步数已缓存"
+            else -> "等待手动刷新"
+        }
+    } else when (band?.bridgeState) {
         BandLiveState.LISTENING -> when {
             hasFreshLiveHealthMetric -> "实时数据已读取"
             hasRealtimeCapability -> "实时数据已过期"
@@ -436,27 +459,33 @@ private fun Band9StatusCard(
         }
     }
     val statusTone = when {
+        cloudConfigured && state.miFitnessSyncing -> SpectraStatusTone.INFO
+        cloudConfigured && cloudFailure -> SpectraStatusTone.ERROR
+        cloudConfigured && hasVerifiedHistoryData -> SpectraStatusTone.SUCCESS
+        cloudConfigured -> SpectraStatusTone.STALE
         hasFreshLiveHealthMetric -> SpectraStatusTone.SUCCESS
         band?.bridgeState == BandLiveState.ERROR -> SpectraStatusTone.ERROR
         state.availability is HealthAvailability.MissingPermissions -> SpectraStatusTone.WARNING
         hasVerifiedHistoryData || listening || band?.bridgeState == BandLiveState.IDLE -> SpectraStatusTone.INFO
         else -> SpectraStatusTone.STALE
     }
-    val summaryMetrics = bandSummaryMetrics(state)
-    val historicalMetrics = historicalHealthMetrics(state)
-    val liveMetrics = liveHealthMetrics(state)
+    val summaryMetrics = bandSummaryMetrics(displayState)
+    val historicalMetrics = historicalHealthMetrics(displayState)
+    val liveMetrics = liveHealthMetrics(displayState)
     val zeroFilledDailyMetrics = buildList {
-        if (displayedDailySteps(state) == 0L && snapshot?.metrics?.steps == null) add("步数")
-        if (displayedDailySleepMinutes(state) == 0L && snapshot?.metrics?.sleepMinutes == null) add("睡眠")
+        if (displayedDailySteps(displayState) == 0L && snapshot?.metrics?.steps == null) add("步数")
+        if (displayedDailySleepMinutes(displayState) == 0L && snapshot?.metrics?.sleepMinutes == null) add("睡眠")
     }
-    val sourceRows = healthSourceRows(state)
+    val sourceRows = healthSourceRows(displayState)
     val exportGap = healthExportGap(snapshot)
     val sourceNames = buildList {
         snapshot?.originPackages?.sorted()?.map(::healthSourceName)?.let(::addAll)
         if (hasFreshLiveHealthMetric) band?.source?.takeIf(String::isNotBlank)?.let { add(healthSourceName(it)) }
     }.distinct()
     val summaryStatus = when {
-        state.loading -> "更新中"
+        state.loading || state.miFitnessSyncing -> "更新中"
+        cloudConfigured && cloudFailure -> "刷新失败"
+        cloudConfigured && summaryMetrics.isEmpty() -> "待刷新"
         summaryMetrics.isEmpty() && state.availability is HealthAvailability.MissingPermissions -> "待授权"
         summaryMetrics.isEmpty() -> "暂无数据"
         hasFreshLiveHealthMetric -> "实时"
@@ -464,6 +493,7 @@ private fun Band9StatusCard(
         else -> "已更新"
     }
     val summaryTone = when {
+        cloudConfigured && cloudFailure -> SpectraStatusTone.ERROR
         summaryMetrics.isEmpty() && state.availability is HealthAvailability.MissingPermissions -> SpectraStatusTone.WARNING
         summaryMetrics.isEmpty() -> SpectraStatusTone.STALE
         hasFreshLiveHealthMetric -> SpectraStatusTone.SUCCESS
@@ -497,7 +527,7 @@ private fun Band9StatusCard(
                 Icon(Icons.Rounded.FavoriteBorder, null, tint = MaterialTheme.colorScheme.onSurface.copy(.78f))
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("小米手环 9", style = MaterialTheme.typography.titleLarge)
+                    Text(if (cloudConfigured) "Mi Fitness 云端" else "小米手环 9", style = MaterialTheme.typography.titleLarge)
                     Text(
                         "今日健康",
                         style = MaterialTheme.typography.bodySmall,
@@ -507,7 +537,7 @@ private fun Band9StatusCard(
                 SpectraStatus(summaryStatus, tone = summaryTone)
                 Icon(
                     Icons.Rounded.KeyboardArrowDown,
-                    contentDescription = "查看手环详情",
+                    contentDescription = if (cloudConfigured) "查看 Mi Fitness 云端详情" else "查看手环详情",
                     modifier = Modifier.padding(start = 4.dp).size(20.dp),
                     tint = MaterialTheme.colorScheme.onSurface.copy(.52f),
                 )
@@ -517,7 +547,7 @@ private fun Band9StatusCard(
                 Text("还没有可展示的健康记录", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "详情里可以检查授权、数据来源和同步状态。",
+                    if (cloudConfigured) "请在详情中手动读取今天的云端步数。" else "详情里可以检查授权、数据来源和同步状态。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(.56f),
                 )
@@ -550,9 +580,9 @@ private fun Band9StatusCard(
                 item {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("小米手环 9", style = MaterialTheme.typography.headlineMedium)
+                            Text(if (cloudConfigured) "Mi Fitness 云端" else "小米手环 9", style = MaterialTheme.typography.headlineMedium)
                             Text(
-                                "健康数据、连接与同步",
+                                if (cloudConfigured) "中国区 · 当天步数 · 手动只读" else "健康数据、连接与同步",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurface.copy(.56f),
                             )
@@ -605,74 +635,100 @@ private fun Band9StatusCard(
                 }
                 item {
                     HealthSheetSection("连接与同步") {
-                        HealthDetailRow("Bridge", band?.bridgeState?.detailLabel() ?: "不可用")
-                        band?.connected?.takeIf { bandFresh }?.let { HealthDetailRow("手环连接", if (it) "已连接" else "未连接") }
-                        band?.batteryPercent?.takeIf { bandFresh && hasRealtimeBattery }?.let { battery ->
-                            val charging = band?.charging == true
-                            HealthDetailRow("手环电量", "$battery%${if (charging) " · 充电中" else ""}")
+                        if (cloudConfigured) {
+                            HealthDetailRow("读取方式", "仅手动 · 只读云端")
+                            HealthDetailRow("手环连接", "不连接，不抢占 Mi Fitness")
+                            HealthDetailRow("数据范围", "中国区 · 当天步数")
+                            HealthDetailRow("聚合规则", "暂定求和 · 首次请与 Mi Fitness 对照")
+                            if (cloudFailure) {
+                                HealthDetailRow("最近刷新", miFitnessFailureLabel(state.miFitnessStatus), error = true)
+                            }
+                        } else {
+                            HealthDetailRow("Bridge", band?.bridgeState?.detailLabel() ?: "不可用")
+                            band?.connected?.takeIf { bandFresh }?.let { HealthDetailRow("手环连接", if (it) "已连接" else "未连接") }
+                            band?.batteryPercent?.takeIf { bandFresh && hasRealtimeBattery }?.let { battery ->
+                                val charging = band?.charging == true
+                                HealthDetailRow("手环电量", "$battery%${if (charging) " · 充电中" else ""}")
+                            }
+                            band?.wearing?.takeIf { bandFresh }?.let {
+                                HealthDetailRow("佩戴状态", if (it) "已佩戴" else "未佩戴")
+                            }
+                            band?.sleeping?.takeIf { bandFresh }?.let {
+                                HealthDetailRow("手环判定", if (it) "睡眠中" else "非睡眠状态")
+                            }
+                            band?.observedAt?.takeIf { it > 0L }?.let {
+                                HealthDetailRow("实时快照", "${compactHealthTime(it)} · ${if (bandFresh) "有效" else "已过期"}")
+                            }
+                            HealthDetailRow("历史同步", band?.historySyncState?.detailLabel() ?: "不可用")
                         }
-                        band?.wearing?.takeIf { bandFresh }?.let {
-                            HealthDetailRow("佩戴状态", if (it) "已佩戴" else "未佩戴")
-                        }
-                        band?.sleeping?.takeIf { bandFresh }?.let {
-                            HealthDetailRow("手环判定", if (it) "睡眠中" else "非睡眠状态")
-                        }
-                        band?.observedAt?.takeIf { it > 0L }?.let {
-                            HealthDetailRow("实时快照", "${compactHealthTime(it)} · ${if (bandFresh) "有效" else "已过期"}")
-                        }
-                        HealthDetailRow("历史同步", band?.historySyncState?.detailLabel() ?: "不可用")
                         snapshot?.lastSyncAt?.let { HealthDetailRow("数据更新", compactHealthTime(it)) }
                         snapshot?.freshness?.let { HealthDetailRow("新鲜度", it.compactLabel()) }
                         exportGap?.let { HealthDetailRow("导出缺口", it.message) }
-                        HealthDetailRow("健康权限", state.permissionLabel())
-                        band?.statusMessage?.takeIf(String::isNotBlank)?.let { HealthDetailRow("Bridge 说明", it) }
+                        if (!cloudConfigured) HealthDetailRow("健康权限", state.permissionLabel())
+                        if (!cloudConfigured) band?.statusMessage?.takeIf(String::isNotBlank)?.let { HealthDetailRow("Bridge 说明", it) }
                         state.actionMessage?.takeIf(String::isNotBlank)?.let { HealthDetailRow("最近操作", it) }
-                        state.healthError?.takeIf(String::isNotBlank)?.let { HealthDetailRow("Health Connect 错误", it, error = true) }
+                        if (!cloudConfigured) state.healthError?.takeIf(String::isNotBlank)?.let { HealthDetailRow("Health Connect 错误", it, error = true) }
                         state.bandError?.takeIf(String::isNotBlank)?.let { HealthDetailRow("Bridge 错误", it, error = true) }
                     }
                 }
                 item {
                     val needsPermission = state.availability is HealthAvailability.MissingPermissions
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (cloudConfigured) {
                             SpectraAction(
-                                text = if (needsPermission) "授权健康数据" else "刷新数据",
-                                onClick = if (needsPermission) onPermissions else onRefresh,
-                                modifier = Modifier.weight(1f),
-                                enabled = !state.loading,
+                                text = if (state.miFitnessSyncing) "正在读取" else "手动刷新云端步数",
+                                onClick = onCloudRefresh,
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !state.loading && !state.miFitnessSyncing,
                                 emphasized = true,
                                 mood = PageMood.HEALTH,
                             )
-                            SpectraAction(
-                                text = when (band?.historySyncState) {
-                                    BandHistorySyncState.CONNECTING -> "正在连接"
-                                    BandHistorySyncState.REQUESTED -> "正在同步"
-                                    else -> "同步历史"
-                                },
-                                onClick = onSyncHistory,
-                                modifier = Modifier.weight(1f),
-                                enabled = !state.loading && band?.historySyncState !in setOf(
-                                    BandHistorySyncState.CONNECTING,
-                                    BandHistorySyncState.REQUESTED,
-                                ),
-                                mood = PageMood.HEALTH,
+                            Text(
+                                "不会连接手环，也不会启动 Gadgetbridge 或 CaesarBandBridge。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(.52f),
                             )
-                        }
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            SpectraAction(
-                                text = if (listening) "停止实时" else "开始实时",
-                                onClick = if (listening) onStopBand else onStartBand,
-                                modifier = Modifier.weight(1f),
-                                selected = listening,
-                                enabled = !state.loading,
-                                mood = PageMood.HEALTH,
-                            )
-                            SpectraAction(
-                                text = "链路诊断",
-                                onClick = onDiagnostics,
-                                modifier = Modifier.weight(1f),
-                                mood = PageMood.HEALTH,
-                            )
+                        } else {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                SpectraAction(
+                                    text = if (needsPermission) "授权健康数据" else "刷新数据",
+                                    onClick = if (needsPermission) onPermissions else onRefresh,
+                                    modifier = Modifier.weight(1f),
+                                    enabled = !state.loading,
+                                    emphasized = true,
+                                    mood = PageMood.HEALTH,
+                                )
+                                SpectraAction(
+                                    text = when (band?.historySyncState) {
+                                        BandHistorySyncState.CONNECTING -> "正在连接"
+                                        BandHistorySyncState.REQUESTED -> "正在同步"
+                                        else -> "同步历史"
+                                    },
+                                    onClick = onSyncHistory,
+                                    modifier = Modifier.weight(1f),
+                                    enabled = !state.loading && band?.historySyncState !in setOf(
+                                        BandHistorySyncState.CONNECTING,
+                                        BandHistorySyncState.REQUESTED,
+                                    ),
+                                    mood = PageMood.HEALTH,
+                                )
+                            }
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                SpectraAction(
+                                    text = if (listening) "停止实时" else "开始实时",
+                                    onClick = if (listening) onStopBand else onStartBand,
+                                    modifier = Modifier.weight(1f),
+                                    selected = listening,
+                                    enabled = !state.loading,
+                                    mood = PageMood.HEALTH,
+                                )
+                                SpectraAction(
+                                    text = "链路诊断",
+                                    onClick = onDiagnostics,
+                                    modifier = Modifier.weight(1f),
+                                    mood = PageMood.HEALTH,
+                                )
+                            }
                         }
                     }
                 }
@@ -747,6 +803,7 @@ internal fun displayedDailySleepMinutes(state: CaesarHealthUiState): Long? =
     }
 
 private fun shouldDisplayMissingDailyMetricsAsZero(state: CaesarHealthUiState): Boolean {
+    if (state.miFitnessConfigured) return false
     val snapshot = state.snapshot ?: return false
     val isToday = snapshot.period.key in setOf("today", "day", "今天", "今日")
     val hasSourceEvidence = snapshot.originPackages.isNotEmpty() ||
@@ -763,7 +820,7 @@ private fun com.campusai.core.health.HealthSnapshot?.orEmptyMissingFields(): Set
 
 private fun healthSourceRows(state: CaesarHealthUiState): List<HealthSourceRow> = buildList {
     state.snapshot?.originPackages?.sorted()?.forEach { raw ->
-        add(HealthSourceRow(healthSourceName(raw), raw, "Health Connect"))
+        add(HealthSourceRow(healthSourceName(raw), raw, if (raw == "mi_fitness_cloud_cn") "只读云端缓存" else "Health Connect"))
     }
     state.band?.source?.takeIf(String::isNotBlank)?.let { raw ->
         add(HealthSourceRow(healthSourceName(raw), raw, "实时 Bridge"))
@@ -862,10 +919,18 @@ private fun CaesarHealthUiState.permissionLabel(): String = when (availability) 
 }
 
 private fun healthSourceName(raw: String): String = when {
+    raw == "mi_fitness_cloud_cn" -> "Mi Fitness 云端（中国区）"
     raw == "com.mi.health" -> "Mi Fitness"
     raw.contains("gadgetbridge", ignoreCase = true) -> "Gadgetbridge"
     raw.contains("caesar", ignoreCase = true) -> "CaesarBandBridge"
     else -> raw.substringAfterLast('.').ifBlank { raw }
+}
+
+private fun miFitnessFailureLabel(status: MiFitnessUiStatus): String = when (status) {
+    MiFitnessUiStatus.AUTH_ERROR -> "身份验证失败，请在个人页更新凭据。"
+    MiFitnessUiStatus.NETWORK_ERROR -> "网络或云端响应异常，请稍后重试。"
+    MiFitnessUiStatus.STORAGE_ERROR -> "系统安全存储暂不可用。"
+    else -> "本次刷新未完成。"
 }
 
 private fun formatHealthLong(value: Long): String = String.format(Locale.CHINA, "%,d", value)

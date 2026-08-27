@@ -2,9 +2,25 @@ package com.campusai.core.health
 
 import android.content.Context
 import android.os.Build
+import com.campusai.core.health.mifitness.MiFitnessCredentialStore
+import com.campusai.core.health.mifitness.MiFitnessStepsCache
+import com.campusai.core.health.mifitness.MiFitnessSummaryHealthGateway
 
 object HealthGatewayFactory {
     fun create(context: Context): HealthGateway {
+        val appContext = context.applicationContext
+        val credentialStore = MiFitnessCredentialStore(appContext)
+        return CacheFirstHealthGateway(
+            cache = MiFitnessSummaryHealthGateway(
+                credentialStore = credentialStore,
+                cache = MiFitnessStepsCache(appContext),
+            ),
+            fallback = createHealthConnectOnly(appContext),
+            fallbackEnabled = { !credentialStore.hasCredentials() },
+        )
+    }
+
+    fun createHealthConnectOnly(context: Context): HealthGateway {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return UnsupportedHealthGateway
         return runCatching {
             Class.forName("com.campusai.core.health.HealthConnectGateway")

@@ -1,0 +1,43 @@
+{
+  "ssecurity_b64": "c3NlY3VyaXR5LXZlY3Rvcg==",
+  "nonce_b64": "AAECAwQFBgcAAAAq",
+  "request": {
+    "metric": "steps",
+    "method": "GET",
+    "path": "/app/v1/data/get_fitness_data_by_time",
+    "payload": {
+      "key": "steps",
+      "start_time": 1743436800,
+      "end_time": 1743523199,
+      "reverse": true,
+      "next_key": ""
+    },
+    "expected_form": {
+      "data": "g3v3b7BuvSDK+4BW0DuyYj3nPPsDj0D4X62ofPJbCgVY1D1/Z4v7XctOR+PQYmIl6iSxRSHeToCQsFp/AKeoZ8Vg2yLKf0HDsHZm8BevxwesX/yLB/BfPKVn",
+      "rc4_hash__": "j/CctLjR04ANsIEshjqaznSKKq0BKTz1NMQ9SQ==",
+      "signature": "e+HHLv3ixrLzwAg8Vpz25kCEvj4=",
+      "_nonce": "AAECAwQFBgcAAAAq"
+    }
+  },
+  "response": {
+    "plaintext": {
+      "code": 0,
+      "result": {
+        "data_list": [
+          {
+            "time": 1743436800,
+            "key": "steps",
+            "value": "{\"steps\":3210,\"distance\":2345,\"calories\":123}"
+          }
+        ],
+        "has_more": false,
+        "next_key": ""
+      }
+    },
+    "ciphertext_b64": "g3v/Za0ppTiJo8dUxmrrLDqxZ/JVtFXlU5fmL7AYHAw3nCkzPtayXZQRFIiXPzx28C6wXjeGHsuBu0E1WOCqcZEpiyfOMQ7S4Dkhp2nj0Qu9cOSyXOhWLLYq0OD/qeOQ/a4wtNBA/TPYqjHeMrpFMhvsIfJkEfkq98m0NwcPPd08ESM9mpIH+i3un5zdISVMegOWRetLotrXPyig99p/oT7K"
+  },
+  "login": {
+    "text": "&&&START&&&{\"userId\":12345,\"cUserId\":\"fake-c-user\",\"passToken\":\"fake-refreshed-token\",\"ssecurity\":\"c3NlY3VyaXR5LXZlY3Rvcg==\",\"nonce\":\"fake-login-nonce\",\"location\":\"https://sts-hlth.io.mi.com/healthapp/sts?sid=miothealth\"}",
+    "expected_client_sign": "rX1ZA6l/U9I8qZEGRgu7+swZ6Wc="
+  }
+}

@@ -142,6 +142,14 @@ fun ProfileScreen(
     personalDeepSeekKeyStore: PersonalDeepSeekKeyStore,
     profileRepository: ProfileRepository,
     contentPadding: PaddingValues,
+    miFitnessConfigured: Boolean = false,
+    miFitnessSyncing: Boolean = false,
+    miFitnessLastSyncAtMillis: Long? = null,
+    miFitnessStatus: MiFitnessSettingsStatus = MiFitnessSettingsStatus.IDLE,
+    miFitnessFormResetKey: Long = 0L,
+    onSaveMiFitnessCredentials: (userId: String, passToken: String) -> Unit = { _, _ -> },
+    onRefreshMiFitnessSteps: () -> Unit = {},
+    onDeleteMiFitnessCredentials: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val layout = SpectraTheme.layout
@@ -206,6 +214,12 @@ fun ProfileScreen(
                     DividerInset()
                     SettingLink(Icons.Rounded.Cloud, "AI 运行方式", aiProviderLabel(preferences.aiProvider)) { sheet = ProfileSheet.AI }
                     DividerInset()
+                    SettingLink(
+                        Icons.Rounded.Cloud,
+                        "Mi Fitness 云同步",
+                        miFitnessEntrySubtitle(miFitnessConfigured, miFitnessSyncing, miFitnessLastSyncAtMillis, miFitnessStatus),
+                    ) { sheet = ProfileSheet.MI_FITNESS }
+                    DividerInset()
                     SettingLink(Icons.Rounded.Palette, "外观与体验", environmentLabel(preferences.environment)) { sheet = ProfileSheet.APPEARANCE }
                     DividerInset()
                     SettingLink(Icons.Rounded.Forum, if (unreadMessages > 0) "消息 · $unreadMessages 条未读" else "消息", onClick = if (authState.signedIn) onOpenMessages else onLogin)
@@ -244,6 +258,7 @@ fun ProfileScreen(
                         when (selected) {
                             ProfileSheet.EDIT -> "编辑资料"
                             ProfileSheet.AI -> "AI 运行方式"
+                            ProfileSheet.MI_FITNESS -> "Mi Fitness 云同步"
                             ProfileSheet.APPEARANCE -> "外观与体验"
                             ProfileSheet.ACHIEVEMENTS -> "全部成就"
                         },
@@ -256,6 +271,18 @@ fun ProfileScreen(
                     }
                     ProfileSheet.AI -> item {
                         LocalAiSettings(preferences, repository, localModelManager, localAiEngine, personalDeepSeekKeyStore)
+                    }
+                    ProfileSheet.MI_FITNESS -> item {
+                        MiFitnessCloudSettings(
+                            configured = miFitnessConfigured,
+                            syncing = miFitnessSyncing,
+                            lastSyncAtMillis = miFitnessLastSyncAtMillis,
+                            status = miFitnessStatus,
+                            formResetKey = miFitnessFormResetKey,
+                            onSaveCredentials = onSaveMiFitnessCredentials,
+                            onRefreshSteps = onRefreshMiFitnessSteps,
+                            onDeleteCredentials = onDeleteMiFitnessCredentials,
+                        )
                     }
                     ProfileSheet.APPEARANCE -> item {
                         AppearanceSettings(preferences, repository) { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
@@ -272,7 +299,19 @@ fun ProfileScreen(
     }
 }
 
-private enum class ProfileSheet { EDIT, AI, APPEARANCE, ACHIEVEMENTS }
+private enum class ProfileSheet { EDIT, AI, MI_FITNESS, APPEARANCE, ACHIEVEMENTS }
+
+/** Fixed presentation states keep credentials, responses, and raw errors out of the UI contract. */
+enum class MiFitnessSettingsStatus {
+    IDLE,
+    VALIDATING,
+    REFRESHING,
+    DELETING,
+    SUCCESS,
+    AUTH_ERROR,
+    NETWORK_ERROR,
+    STORAGE_ERROR,
+}
 
 @Composable
 private fun ProfileHero(profile: CampusProfile, fallbackName: String, level: Int, xp: Long, onEdit: () -> Unit) {
@@ -537,6 +576,192 @@ private fun environmentLabel(value: SpectraEnvironment) = when (value) { Spectra
 private fun themeLabel(value: ThemeMode) = when (value) { ThemeMode.SYSTEM -> "跟随系统"; ThemeMode.LIGHT -> "浅色"; ThemeMode.DARK -> "深色" }
 private fun qualityLabel(value: RenderQuality) = when (value) { RenderQuality.AUTO -> "自动"; RenderQuality.LOW -> "低"; RenderQuality.HIGH -> "高" }
 private fun environmentColors(value: SpectraEnvironment) = when (value) { SpectraEnvironment.ORIGINAL -> listOf(SpectraColors.Cyan, SpectraColors.Violet, SpectraColors.Warm, SpectraColors.Rose); SpectraEnvironment.OCEAN -> listOf(Color(0xFF0C8DBF), SpectraColors.Cyan, SpectraColors.Focus); SpectraEnvironment.ULTRAVIOLET -> listOf(Color(0xFF5138D7), SpectraColors.Violet, SpectraColors.Rose); SpectraEnvironment.EMBER -> listOf(Color(0xFFE04B32), SpectraColors.Warm, Color(0xFFFFC457)) }
+
+private fun miFitnessEntrySubtitle(
+    configured: Boolean,
+    syncing: Boolean,
+    lastSyncAtMillis: Long?,
+    status: MiFitnessSettingsStatus,
+): String = when {
+    status == MiFitnessSettingsStatus.VALIDATING -> "正在验证并保存"
+    status == MiFitnessSettingsStatus.DELETING -> "正在删除本地凭据与缓存"
+    syncing || status == MiFitnessSettingsStatus.REFRESHING -> "正在刷新今日步数"
+    configured && lastSyncAtMillis != null && lastSyncAtMillis > 0L -> "已配置 · 最近刷新 ${formatMiFitnessLastSync(lastSyncAtMillis)}"
+    configured -> "已配置 · 尚未刷新"
+    else -> "中国区 · 仅读取当天步数"
+}
+
+internal fun miFitnessStatusText(status: MiFitnessSettingsStatus, configured: Boolean): String = when (status) {
+    MiFitnessSettingsStatus.IDLE -> if (configured) "已配置，等待手动刷新。" else "尚未配置。"
+    MiFitnessSettingsStatus.VALIDATING -> "正在验证并保存到系统安全存储。"
+    MiFitnessSettingsStatus.REFRESHING -> "正在读取 Mi Fitness 中国区的今日步数。"
+    MiFitnessSettingsStatus.DELETING -> "正在删除本机凭据与步数缓存。"
+    MiFitnessSettingsStatus.SUCCESS -> "最近一次操作已完成。"
+    MiFitnessSettingsStatus.AUTH_ERROR -> "验证失败，请检查 userId 与 passToken。"
+    MiFitnessSettingsStatus.NETWORK_ERROR -> "网络或云端响应异常，请稍后重试。"
+    MiFitnessSettingsStatus.STORAGE_ERROR -> "系统安全存储暂不可用，请稍后重试。"
+}
+
+internal fun formatMiFitnessLastSync(epochMillis: Long?): String {
+    if (epochMillis == null || epochMillis <= 0L) return "尚未刷新"
+    return runCatching {
+        val time = Instant.ofEpochMilli(epochMillis).atZone(ZoneId.systemDefault())
+        "${time.monthValue}月${time.dayOfMonth}日 ${time.hour.toString().padStart(2, '0')}:${time.minute.toString().padStart(2, '0')}"
+    }.getOrDefault("尚未刷新")
+}
+
+@Composable
+private fun MiFitnessCloudSettings(
+    configured: Boolean,
+    syncing: Boolean,
+    lastSyncAtMillis: Long?,
+    status: MiFitnessSettingsStatus,
+    formResetKey: Long,
+    onSaveCredentials: (userId: String, passToken: String) -> Unit,
+    onRefreshSteps: () -> Unit,
+    onDeleteCredentials: () -> Unit,
+) {
+    var userId by remember(formResetKey) { mutableStateOf("") }
+    var passToken by remember(formResetKey) { mutableStateOf("") }
+    var confirmDelete by remember { mutableStateOf(false) }
+    val displayStatus = when (status) {
+        MiFitnessSettingsStatus.VALIDATING,
+        MiFitnessSettingsStatus.DELETING -> status
+        else -> if (syncing) MiFitnessSettingsStatus.REFRESHING else status
+    }
+    val busy = syncing || displayStatus == MiFitnessSettingsStatus.VALIDATING ||
+        displayStatus == MiFitnessSettingsStatus.REFRESHING || displayStatus == MiFitnessSettingsStatus.DELETING
+    val canDelete = configured && displayStatus !in setOf(
+        MiFitnessSettingsStatus.VALIDATING,
+        MiFitnessSettingsStatus.DELETING,
+    )
+    val deleteColor = if (canDelete) SpectraColors.Error else MaterialTheme.colorScheme.onSurface.copy(.38f)
+    val statusColor = when (displayStatus) {
+        MiFitnessSettingsStatus.SUCCESS -> SpectraColors.Success
+        MiFitnessSettingsStatus.AUTH_ERROR,
+        MiFitnessSettingsStatus.NETWORK_ERROR,
+        MiFitnessSettingsStatus.STORAGE_ERROR -> SpectraColors.Error
+        else -> MaterialTheme.colorScheme.onSurface.copy(.70f)
+    }
+
+    GlassPanel(Modifier.fillMaxWidth(), radius = 16, emphasized = true) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Cloud, null)
+                Spacer(Modifier.size(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("中国区 · 当天步数", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (configured) "凭据已配置" else "尚未配置凭据",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(.58f),
+                    )
+                }
+            }
+            Text(
+                "只有点击保存或更新凭据时才会验证账户；只有点击刷新时才会读取 Mi Fitness 中国区云端的当天步数。不会连接手环、不会启动 Gadgetbridge，也不需要 Health Connect 权限。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(.66f),
+            )
+            Text(
+                "userId 与 passToken 由系统安全存储加密保存；页面不会回显已保存的凭据或原始错误。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(.66f),
+            )
+            Text(
+                "首版把云端分桶步数暂定求和；首次成功后请与 Mi Fitness 当天总步数核对。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(.58f),
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("状态", style = MaterialTheme.typography.labelLarge)
+                Text(miFitnessStatusText(displayStatus, configured), style = MaterialTheme.typography.bodyMedium, color = statusColor)
+                Text(
+                    "最近刷新：${formatMiFitnessLastSync(lastSyncAtMillis)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(.58f),
+                )
+            }
+            if (busy) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = SpectraColors.Focus,
+                    trackColor = SpectraColors.Silver.copy(.42f),
+                )
+            }
+            HorizontalDivider(color = SpectraColors.Silver.copy(.68f))
+            OutlinedTextField(
+                value = userId,
+                onValueChange = { userId = it },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
+                label = { Text("userId") },
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+            )
+            OutlinedTextField(
+                value = passToken,
+                onValueChange = { passToken = it },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
+                label = { Text("passToken") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                shape = RoundedCornerShape(12.dp),
+            )
+            Text(
+                "输入只用于这次显式保存；保存成功后，本页会清空输入内容。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(.58f),
+            )
+            SpectraPrimaryButton(
+                text = if (displayStatus == MiFitnessSettingsStatus.VALIDATING) "正在验证…" else if (configured) "安全更新凭据" else "安全验证并保存",
+                onClick = { onSaveCredentials(userId.trim(), passToken) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy && userId.isNotBlank() && passToken.isNotBlank(),
+                icon = Icons.Rounded.Save,
+            )
+            if (configured) {
+                HorizontalDivider(color = SpectraColors.Silver.copy(.68f))
+                SpectraPrimaryButton(
+                    text = if (displayStatus == MiFitnessSettingsStatus.REFRESHING) "正在刷新…" else "刷新今日步数",
+                    onClick = onRefreshSteps,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !busy,
+                    icon = Icons.Rounded.Cloud,
+                )
+                TextButton(
+                    onClick = { confirmDelete = true },
+                    modifier = Modifier.align(Alignment.End),
+                    enabled = canDelete,
+                ) {
+                    Icon(Icons.Rounded.Delete, null, tint = deleteColor)
+                    Spacer(Modifier.size(6.dp))
+                    Text("删除 Mi Fitness 凭据", color = deleteColor)
+                }
+            }
+        }
+    }
+
+    if (confirmDelete && configured) AlertDialog(
+        onDismissRequest = { confirmDelete = false },
+        title = { Text("删除 Mi Fitness 凭据？") },
+        text = {
+            Text(
+                (if (displayStatus == MiFitnessSettingsStatus.REFRESHING) "当前刷新会先取消。" else "") +
+                    "将从本机系统安全存储删除 userId、passToken 与已缓存的步数摘要。" +
+                    "之后需要重新保存，才能手动刷新今日步数。",
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { confirmDelete = false; onDeleteCredentials() },
+                enabled = canDelete,
+            ) { Text("确认删除", color = deleteColor) }
+        },
+        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("取消") } },
+    )
+}
 
 @Composable
 private fun LocalAiSettings(

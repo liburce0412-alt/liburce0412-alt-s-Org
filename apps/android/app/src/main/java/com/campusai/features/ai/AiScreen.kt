@@ -666,6 +666,7 @@ fun AiScreen(
                 showTasks = true
             },
             onRefreshHealth = viewModel::refreshHealthStatus,
+            onSyncMiFitnessSteps = viewModel::refreshMiFitnessSteps,
             onHealthPermissions = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     healthPermissionLauncher.launch(
@@ -711,6 +712,7 @@ fun AiScreen(
             onForgetMemory = viewModel::forgetMemory,
             onForgetAllMemories = viewModel::forgetAllMemories,
             onRefreshHealth = viewModel::refreshHealthStatus,
+            onSyncMiFitnessSteps = viewModel::refreshMiFitnessSteps,
             onStartBand = viewModel::startBandSession,
             onStopBand = viewModel::stopBandSession,
             onSyncBandHistory = viewModel::triggerBandHistorySync,
@@ -935,6 +937,7 @@ private fun AiRuntimeSheet(
     onOpenContext: () -> Unit,
     onOpenTasks: () -> Unit,
     onRefreshHealth: () -> Unit,
+    onSyncMiFitnessSteps: () -> Unit,
     onHealthPermissions: () -> Unit,
     onStartBand: () -> Unit,
     onStopBand: () -> Unit,
@@ -972,6 +975,7 @@ private fun AiRuntimeSheet(
             HealthAndBandStatus(
                 state = healthState,
                 onRefresh = onRefreshHealth,
+                onCloudRefresh = onSyncMiFitnessSteps,
                 onPermissions = onHealthPermissions,
                 onStartBand = onStartBand,
                 onStopBand = onStopBand,
@@ -1148,6 +1152,7 @@ private fun AiContextSheet(
     onForgetMemory: (String) -> Unit,
     onForgetAllMemories: () -> Unit,
     onRefreshHealth: () -> Unit,
+    onSyncMiFitnessSteps: () -> Unit,
     onStartBand: () -> Unit,
     onStopBand: () -> Unit,
     onSyncBandHistory: () -> Unit,
@@ -1181,6 +1186,7 @@ private fun AiContextSheet(
             HealthAndBandStatus(
                 state = healthState,
                 onRefresh = onRefreshHealth,
+                onCloudRefresh = onSyncMiFitnessSteps,
                 onPermissions = onHealthPermissions,
                 onStartBand = onStartBand,
                 onStopBand = onStopBand,
@@ -1356,12 +1362,17 @@ internal fun visibleBandMetrics(snapshot: BandLiveSnapshot): BandVisibleMetrics 
 private fun HealthAndBandStatus(
     state: CaesarHealthUiState,
     onRefresh: () -> Unit,
+    onCloudRefresh: () -> Unit,
     onPermissions: () -> Unit,
     onStartBand: () -> Unit,
     onStopBand: () -> Unit,
     onSyncHistory: () -> Unit,
     onDiagnostics: () -> Unit,
 ) {
+    if (state.miFitnessConfigured) {
+        MiFitnessCloudStatus(state, onCloudRefresh)
+        return
+    }
     val hasVerifiedHealthData = state.snapshot?.metrics?.let { metrics ->
         listOf(
             metrics.steps,
@@ -1508,6 +1519,97 @@ private fun HealthAndBandStatus(
             }
             Text(
                 "历史数据以 Health Connect 为准；实时指标只在 Bridge 能力位与非空数据同时满足时显示，过期值会明确标为“上次”。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(.52f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun MiFitnessCloudStatus(
+    state: CaesarHealthUiState,
+    onRefresh: () -> Unit,
+) {
+    val snapshot = state.snapshot
+    val cloudSnapshot = snapshot?.takeIf {
+        com.campusai.core.health.mifitness.MiFitnessSummaryHealthGateway.SOURCE_ID in it.originPackages
+    }
+    val failed = state.miFitnessStatus in setOf(
+        MiFitnessUiStatus.AUTH_ERROR,
+        MiFitnessUiStatus.NETWORK_ERROR,
+        MiFitnessUiStatus.STORAGE_ERROR,
+    )
+    SpectraSurface(
+        modifier = Modifier.fillMaxWidth(),
+        mood = PageMood.HEALTH,
+        emphasized = true,
+        shadowed = false,
+        contentPadding = PaddingValues(14.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Mi Fitness 云端", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "中国区 · 当天步数 · 手动只读",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(.52f),
+                    )
+                }
+                SpectraStatus(
+                    when {
+                        state.miFitnessSyncing -> "正在读取"
+                        failed && cloudSnapshot != null -> "缓存可用 · 刷新失败"
+                        failed -> "刷新失败"
+                        cloudSnapshot != null -> "已缓存"
+                        else -> "待刷新"
+                    },
+                    tone = when {
+                        failed -> SpectraStatusTone.ERROR
+                        cloudSnapshot != null -> SpectraStatusTone.SUCCESS
+                        else -> SpectraStatusTone.INFO
+                    },
+                )
+            }
+            cloudSnapshot?.metrics?.steps?.let { steps ->
+                Text("今日 $steps 步", style = MaterialTheme.typography.titleMedium)
+            } ?: Text(
+                "本地尚无今日云端步数。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(.66f),
+            )
+            cloudSnapshot?.lastSyncAt?.let {
+                Text(
+                    "最后手动刷新 ${healthStatusTime(it)} · 当前聚合规则仍为 provisional",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(.56f),
+                )
+            }
+            if (failed) {
+                Text(
+                    when (state.miFitnessStatus) {
+                        MiFitnessUiStatus.AUTH_ERROR -> "身份验证失败，请在个人页更新凭据。"
+                        MiFitnessUiStatus.NETWORK_ERROR -> "网络或云端响应异常，请稍后重试。"
+                        MiFitnessUiStatus.STORAGE_ERROR -> "系统安全存储暂不可用。"
+                        else -> "本次刷新未完成。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            state.actionMessage?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = SpectraColors.Success)
+            }
+            SpectraAction(
+                text = if (state.miFitnessSyncing) "正在读取" else "手动刷新今日步数",
+                onClick = onRefresh,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !state.loading && !state.miFitnessSyncing,
+                mood = PageMood.HEALTH,
+            )
+            Text(
+                "该入口不会连接手环、启动 Gadgetbridge/CaesarBandBridge，也不需要 Health Connect 权限；Agent 只读取这里的本地加密缓存。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(.52f),
             )

@@ -1,0 +1,20 @@
+sequenceDiagram
+  actor User as 本机用户
+  participant Poc as 只读 PoC
+  participant Account as Xiaomi Account
+  participant Sts as 动态 STS location
+  participant Health as Xiaomi Health Cloud
+  participant App as Mi Fitness / MiWearCore
+  participant Band as Band 9
+
+  Band-->>App: 官方栈独占 SPP 并同步数据
+  App-->>Health: 官方上云
+  User->>Poc: 隐藏输入 passToken
+  Poc->>Account: GET serviceLogin (passToken 仅此请求)
+  Account-->>Poc: location + nonce + ssecurity + cUserId
+  Poc->>Sts: GET location + clientSign
+  Sts-->>Poc: serviceToken
+  Poc->>Health: 一次加密 GET (cUserId/serviceToken/locale)
+  Health-->>Poc: 加密响应
+  Poc-->>User: 仅记录数与分页状态
+  Note over Poc,Band: PoC 不建立蓝牙连接

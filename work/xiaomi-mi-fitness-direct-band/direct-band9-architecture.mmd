@@ -1,0 +1,12 @@
+flowchart LR
+    band["Xiaomi Smart Band 9"] <-->|RFCOMM SPP| service["CampusAI DirectBand9Service"]
+    service --> transport["SPP v1/v2 分帧与通道"]
+    transport --> auth["16-byte key + nonce / HMAC-SHA256 / AES-CCM"]
+    auth --> proto["ProtobufCommand + Activity 文件"]
+    proto --> live["DirectBand9Gateway"]
+    proto --> history["本地健康历史仓库"]
+    live --> agent["UI 与 Agent 健康工具"]
+    history --> health["HealthGateway"]
+    health --> agent
+    hc["Health Connect"] -. 兼容回退 .-> health
+    cloud["Mi Fitness 私有云"] -. 可选历史补全 .-> history

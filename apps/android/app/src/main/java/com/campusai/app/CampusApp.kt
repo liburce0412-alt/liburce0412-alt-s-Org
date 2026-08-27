@@ -109,6 +109,7 @@ import com.campusai.features.ai.AiViewModel
 import com.campusai.features.ai.AiViewModelFactory
 import com.campusai.features.ai.AiContextSnapshot
 import com.campusai.features.ai.AiPostContext
+import com.campusai.features.ai.MiFitnessUiStatus
 import com.campusai.features.community.CampusViewModel
 import com.campusai.features.community.CampusRepository
 import com.campusai.core.health.BandBridgeIntents
@@ -308,6 +309,7 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
                                  onOpenAi = { showAi = true },
                                  healthState = healthState,
                                  onRefreshHealth = aiViewModel::refreshHealthStatus,
+                                 onSyncMiFitnessSteps = aiViewModel::refreshMiFitnessSteps,
                                  onStartBand = aiViewModel::startBandSession,
                                  onStopBand = aiViewModel::stopBandSession,
                                  onSyncBandHistory = aiViewModel::triggerBandHistorySync,
@@ -360,10 +362,18 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
                                 onOpenMessages = { showMessages = true },
                                 localModelManager = localModelManager,
                                 localAiEngine = localAiEngine,
-                                personalDeepSeekKeyStore = personalDeepSeekKeyStore,
-                                profileRepository = profileRepository,
-                                contentPadding = padding,
-                            )
+                                 personalDeepSeekKeyStore = personalDeepSeekKeyStore,
+                                 profileRepository = profileRepository,
+                                 contentPadding = padding,
+                                 miFitnessConfigured = healthState.miFitnessConfigured,
+                                 miFitnessSyncing = healthState.miFitnessSyncing,
+                                 miFitnessLastSyncAtMillis = healthState.miFitnessLastSyncAt,
+                                 miFitnessStatus = healthState.miFitnessStatus.toSettingsStatus(),
+                                 miFitnessFormResetKey = healthState.miFitnessFormResetKey,
+                                 onSaveMiFitnessCredentials = aiViewModel::saveMiFitnessCredentials,
+                                 onRefreshMiFitnessSteps = aiViewModel::refreshMiFitnessSteps,
+                                 onDeleteMiFitnessCredentials = aiViewModel::deleteMiFitnessCredentials,
+                             )
                         }
                     }
                     } else {
@@ -418,6 +428,17 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
         }
         }
     }
+}
+
+private fun MiFitnessUiStatus.toSettingsStatus(): MiFitnessSettingsStatus = when (this) {
+    MiFitnessUiStatus.IDLE -> MiFitnessSettingsStatus.IDLE
+    MiFitnessUiStatus.VALIDATING -> MiFitnessSettingsStatus.VALIDATING
+    MiFitnessUiStatus.REFRESHING -> MiFitnessSettingsStatus.REFRESHING
+    MiFitnessUiStatus.DELETING -> MiFitnessSettingsStatus.DELETING
+    MiFitnessUiStatus.SUCCESS -> MiFitnessSettingsStatus.SUCCESS
+    MiFitnessUiStatus.AUTH_ERROR -> MiFitnessSettingsStatus.AUTH_ERROR
+    MiFitnessUiStatus.NETWORK_ERROR -> MiFitnessSettingsStatus.NETWORK_ERROR
+    MiFitnessUiStatus.STORAGE_ERROR -> MiFitnessSettingsStatus.STORAGE_ERROR
 }
 
 @Composable
