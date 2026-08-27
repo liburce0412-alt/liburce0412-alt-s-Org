@@ -14,6 +14,7 @@
 | WI-010 | Determine whether CampusAI can self-enroll in Mi Fitness's provider whitelist | cre | Mi Fitness APK and CampusAI application ID | android_ipc | completed | E-009 | No production registration path; vendor package-and-signature enrollment would be required |
 | WI-011 | Validate one authorized CN cloud read | cre | User-owned Xiaomi account and Mi Fitness cloud | cloud_api | completed | E-010 | Live one-day steps GET succeeded with 11 records; no raw records or credentials retained |
 | WI-012 | Integrate the bounded CN steps reader into CampusAI | lead | CampusAI Android app | local_app_integration | completed | E-011 | Manual-only cloud access, Keystore cache, configured fail-closed reads, Band isolation, Agent allowlist, 201 tests, and debug build validated |
+| WI-013 | Correct and validate installed zero-step behavior | lead | CampusAI Android app and authorized phone | local_app_integration | completed | E-012 | Empty cloud responses are NO_DATA rather than 0; system proxy selection restored; account-switched UI is isolated; 210 tests and debug APK validated |
 
 ## Coverage
 - [x] Recon/analysis complete for currently available in_scope assets

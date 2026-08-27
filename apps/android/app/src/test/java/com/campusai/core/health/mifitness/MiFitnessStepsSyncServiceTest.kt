@@ -138,6 +138,73 @@ class MiFitnessStepsSyncServiceTest {
     }
 
     @Test
+    fun `empty cloud result persists a refreshed token without replacing the previous cache`() = runTest {
+        val storage = RecordingSecretStorage()
+        val store = MiFitnessCredentialStore(storage)
+        store.save("12345", "synthetic-pass-token")
+        val credential = checkNotNull(store.read())
+        val cache = MiFitnessStepsCache(storage)
+        val transport = FakeTransport(page(emptyList(), hasMore = false)).apply {
+            refreshedPassToken = "rotated-pass-token"
+        }
+        val service = service(store, transport, cache)
+        val window = service.todayWindow()
+        val oldSummary = MiFitnessStepsSummary(
+            period = window.period,
+            localDate = window.localDate,
+            accountScope = credential.accountScope,
+            steps = 42L,
+            recordCount = 1,
+            observedAt = FIXED_CLOCK.millis() - 1_000L,
+            lastSyncAt = FIXED_CLOCK.millis() - 1_000L,
+        )
+        cache.save(oldSummary)
+        storage.writes.clear()
+
+        val result = service.syncToday()
+
+        assertEquals("no_cloud_data", (result.exceptionOrNull() as MiFitnessStepsSyncException).code)
+        assertEquals("rotated-pass-token", store.read()?.passToken)
+        assertEquals(oldSummary, cache.read(window.period, window.localDate, credential.accountScope))
+        assertEquals(1, storage.writes.size)
+        assertTrue(storage.writes.single().second.contains("\"passToken\":\"rotated-pass-token\""))
+    }
+
+    @Test
+    fun `empty cloud result and rejected refreshed token leave credentials and cache untouched`() = runTest {
+        val storage = RecordingSecretStorage()
+        val store = MiFitnessCredentialStore(storage)
+        store.save("12345", "synthetic-pass-token")
+        val credential = checkNotNull(store.read())
+        val cache = MiFitnessStepsCache(storage)
+        val transport = FakeTransport(page(emptyList(), hasMore = false)).apply {
+            refreshedPassToken = "rotated-pass-token"
+        }
+        val service = service(store, transport, cache)
+        val window = service.todayWindow()
+        val oldSummary = MiFitnessStepsSummary(
+            period = window.period,
+            localDate = window.localDate,
+            accountScope = credential.accountScope,
+            steps = 42L,
+            recordCount = 1,
+            observedAt = FIXED_CLOCK.millis() - 1_000L,
+            lastSyncAt = FIXED_CLOCK.millis() - 1_000L,
+        )
+        cache.save(oldSummary)
+        storage.writes.clear()
+        storage.rejectCredentialWrites = true
+
+        val result = service.syncToday()
+
+        val error = result.exceptionOrNull() as MiFitnessStepsSyncException
+        assertEquals("credential_write_failed", error.code)
+        assertEquals("synthetic-pass-token", store.read()?.passToken)
+        assertEquals(oldSummary, cache.read(window.period, window.localDate, credential.accountScope))
+        assertFalse(error.toString().contains("rotated-pass-token"))
+    }
+
+    @Test
     fun `missing credentials and unexpected transport failures expose no secret`() = runTest {
         val emptyStorage = RecordingSecretStorage()
         val unusedTransport = FakeTransport()

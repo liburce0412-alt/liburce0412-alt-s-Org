@@ -1,6 +1,7 @@
 package com.campusai.core.health.mifitness
 
 import com.campusai.core.health.HealthPeriod
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -125,6 +126,7 @@ class MiFitnessSecureStorageTest {
 
         val validPeriod = HealthPeriod(1_000L, 2_000L, "today")
         assertTrue(cache.save(summary.copy(period = validPeriod)).isSuccess)
+        assertTrue(cache.save(summary.copy(period = validPeriod, steps = 0L, recordCount = 0)).isFailure)
         storage.values[storage.onlyKey()] = "not-json"
         assertNull(
             cache.read(
@@ -133,6 +135,34 @@ class MiFitnessSecureStorageTest {
                 "0123456789abcdef0123456789abcdef",
             ),
         )
+    }
+
+    @Test
+    fun `legacy empty aggregate is ignored without mutating encrypted storage`() {
+        val storage = MemorySecretStorage()
+        val cache = MiFitnessStepsCache(storage)
+        val period = HealthPeriod(1_000L, 2_000L, "today")
+        val localDate = LocalDate.of(2026, 8, 27)
+        val scope = "0123456789abcdef0123456789abcdef"
+        val valid = MiFitnessStepsSummary(
+            period = period,
+            localDate = localDate,
+            accountScope = scope,
+            steps = 10L,
+            recordCount = 1,
+            observedAt = 1_900L,
+            lastSyncAt = 1_900L,
+        )
+        assertTrue(cache.save(valid).isSuccess)
+        val key = storage.onlyKey()
+        val legacyEmpty = JSONObject(checkNotNull(storage.values[key]))
+            .put("steps", 0L)
+            .put("recordCount", 0)
+            .toString()
+        storage.values[key] = legacyEmpty
+
+        assertNull(cache.read(period, localDate, scope))
+        assertEquals(legacyEmpty, storage.values[key])
     }
 
     private class MemorySecretStorage : MiFitnessSecretStorage {

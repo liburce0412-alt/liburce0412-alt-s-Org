@@ -436,6 +436,7 @@ private fun MiFitnessUiStatus.toSettingsStatus(): MiFitnessSettingsStatus = when
     MiFitnessUiStatus.REFRESHING -> MiFitnessSettingsStatus.REFRESHING
     MiFitnessUiStatus.DELETING -> MiFitnessSettingsStatus.DELETING
     MiFitnessUiStatus.SUCCESS -> MiFitnessSettingsStatus.SUCCESS
+    MiFitnessUiStatus.NO_DATA -> MiFitnessSettingsStatus.NO_DATA
     MiFitnessUiStatus.AUTH_ERROR -> MiFitnessSettingsStatus.AUTH_ERROR
     MiFitnessUiStatus.NETWORK_ERROR -> MiFitnessSettingsStatus.NETWORK_ERROR
     MiFitnessUiStatus.STORAGE_ERROR -> MiFitnessSettingsStatus.STORAGE_ERROR

@@ -308,6 +308,7 @@ enum class MiFitnessSettingsStatus {
     REFRESHING,
     DELETING,
     SUCCESS,
+    NO_DATA,
     AUTH_ERROR,
     NETWORK_ERROR,
     STORAGE_ERROR,
@@ -597,6 +598,7 @@ internal fun miFitnessStatusText(status: MiFitnessSettingsStatus, configured: Bo
     MiFitnessSettingsStatus.REFRESHING -> "正在读取 Mi Fitness 中国区的今日步数。"
     MiFitnessSettingsStatus.DELETING -> "正在删除本机凭据与步数缓存。"
     MiFitnessSettingsStatus.SUCCESS -> "最近一次操作已完成。"
+    MiFitnessSettingsStatus.NO_DATA -> "Mi Fitness 云端暂未返回今天的步数记录；不会把空记录当成 0 步。"
     MiFitnessSettingsStatus.AUTH_ERROR -> "验证失败，请检查 userId 与 passToken。"
     MiFitnessSettingsStatus.NETWORK_ERROR -> "网络或云端响应异常，请稍后重试。"
     MiFitnessSettingsStatus.STORAGE_ERROR -> "系统安全存储暂不可用，请稍后重试。"
@@ -638,6 +640,7 @@ private fun MiFitnessCloudSettings(
     val deleteColor = if (canDelete) SpectraColors.Error else MaterialTheme.colorScheme.onSurface.copy(.38f)
     val statusColor = when (displayStatus) {
         MiFitnessSettingsStatus.SUCCESS -> SpectraColors.Success
+        MiFitnessSettingsStatus.NO_DATA -> SpectraColors.Warm
         MiFitnessSettingsStatus.AUTH_ERROR,
         MiFitnessSettingsStatus.NETWORK_ERROR,
         MiFitnessSettingsStatus.STORAGE_ERROR -> SpectraColors.Error

@@ -55,6 +55,45 @@ class MiFitnessAccountServiceTest {
     }
 
     @Test
+    fun `valid credentials are saved when the cloud has no records without caching zero`() = runTest {
+        val fixture = fixture()
+        fixture.transport.response = emptyPage()
+        fixture.storage.writes.clear()
+
+        val result = fixture.account.validateAndSave("22222", "candidate-token")
+
+        assertEquals("no_cloud_data", (result.exceptionOrNull() as MiFitnessStepsSyncException).code)
+        val saved = checkNotNull(fixture.store.read())
+        assertEquals("22222", saved.userId)
+        assertEquals("refreshed-token", saved.passToken)
+        assertNull(fixture.cache.read(fixture.window.period, fixture.window.localDate, saved.accountScope))
+        assertEquals(1, fixture.storage.writes.size)
+        assertTrue(fixture.storage.writes.single().second.contains("\"passToken\":\"refreshed-token\""))
+    }
+
+    @Test
+    fun `empty cloud result and rejected credential write leave the previous cache untouched`() = runTest {
+        val fixture = fixture(withOldState = true)
+        fixture.transport.response = emptyPage()
+        fixture.storage.rejectCredentialWrites = true
+        fixture.storage.writes.clear()
+
+        val result = fixture.account.validateAndSave("22222", "candidate-token")
+
+        assertEquals("credential_write_failed", (result.exceptionOrNull() as MiFitnessAccountException).code)
+        assertEquals("11111", fixture.store.read()?.userId)
+        assertEquals(
+            42L,
+            fixture.cache.read(
+                fixture.window.period,
+                fixture.window.localDate,
+                checkNotNull(fixture.oldScope),
+            )?.steps,
+        )
+        assertEquals(1, fixture.storage.writes.size)
+    }
+
+    @Test
     fun `validation and network failure leave old state untouched`() = runTest {
         val fixture = fixture(withOldState = true)
         fixture.storage.writes.clear()
@@ -180,5 +219,8 @@ class MiFitnessAccountServiceTest {
         val FIXED_CLOCK: Clock = Clock.fixed(Instant.parse("2026-08-27T04:00:00Z"), ZoneOffset.UTC)
         fun page(time: Long, steps: Long): String =
             """{"code":0,"result":{"data_list":[{"time":$time,"key":"steps","value":"{\"steps\":$steps}"}],"has_more":false,"next_key":""}}"""
+
+        fun emptyPage(): String =
+            """{"code":0,"result":{"data_list":[],"has_more":false,"next_key":""}}"""
     }
 }

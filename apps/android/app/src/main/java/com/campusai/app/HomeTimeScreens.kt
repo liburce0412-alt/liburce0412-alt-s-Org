@@ -404,6 +404,7 @@ private fun Band9StatusCard(
     val displayState = if (cloudConfigured) state.copy(snapshot = cloudSnapshot, band = null) else state
     val band = displayState.band
     val cloudFailure = state.miFitnessStatus in setOf(
+        MiFitnessUiStatus.NO_DATA,
         MiFitnessUiStatus.AUTH_ERROR,
         MiFitnessUiStatus.NETWORK_ERROR,
         MiFitnessUiStatus.STORAGE_ERROR,
@@ -439,6 +440,7 @@ private fun Band9StatusCard(
     val statusText = if (cloudConfigured) {
         when {
             state.miFitnessSyncing -> "正在读取云端步数"
+            state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> "云端暂无今日记录"
             cloudFailure && hasVerifiedHistoryData -> "缓存可用 · 本次刷新失败"
             cloudFailure -> "云端刷新失败"
             hasVerifiedHistoryData -> "云端步数已缓存"
@@ -460,6 +462,7 @@ private fun Band9StatusCard(
     }
     val statusTone = when {
         cloudConfigured && state.miFitnessSyncing -> SpectraStatusTone.INFO
+        cloudConfigured && state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> SpectraStatusTone.WARNING
         cloudConfigured && cloudFailure -> SpectraStatusTone.ERROR
         cloudConfigured && hasVerifiedHistoryData -> SpectraStatusTone.SUCCESS
         cloudConfigured -> SpectraStatusTone.STALE
@@ -484,6 +487,7 @@ private fun Band9StatusCard(
     }.distinct()
     val summaryStatus = when {
         state.loading || state.miFitnessSyncing -> "更新中"
+        cloudConfigured && state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> "云端暂无记录"
         cloudConfigured && cloudFailure -> "刷新失败"
         cloudConfigured && summaryMetrics.isEmpty() -> "待刷新"
         summaryMetrics.isEmpty() && state.availability is HealthAvailability.MissingPermissions -> "待授权"
@@ -493,6 +497,7 @@ private fun Band9StatusCard(
         else -> "已更新"
     }
     val summaryTone = when {
+        cloudConfigured && state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> SpectraStatusTone.WARNING
         cloudConfigured && cloudFailure -> SpectraStatusTone.ERROR
         summaryMetrics.isEmpty() && state.availability is HealthAvailability.MissingPermissions -> SpectraStatusTone.WARNING
         summaryMetrics.isEmpty() -> SpectraStatusTone.STALE
@@ -927,6 +932,7 @@ private fun healthSourceName(raw: String): String = when {
 }
 
 private fun miFitnessFailureLabel(status: MiFitnessUiStatus): String = when (status) {
+    MiFitnessUiStatus.NO_DATA -> "Mi Fitness 云端暂未返回今天的步数记录。"
     MiFitnessUiStatus.AUTH_ERROR -> "身份验证失败，请在个人页更新凭据。"
     MiFitnessUiStatus.NETWORK_ERROR -> "网络或云端响应异常，请稍后重试。"
     MiFitnessUiStatus.STORAGE_ERROR -> "系统安全存储暂不可用。"

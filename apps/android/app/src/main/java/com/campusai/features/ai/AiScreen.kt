@@ -1536,6 +1536,7 @@ private fun MiFitnessCloudStatus(
         com.campusai.core.health.mifitness.MiFitnessSummaryHealthGateway.SOURCE_ID in it.originPackages
     }
     val failed = state.miFitnessStatus in setOf(
+        MiFitnessUiStatus.NO_DATA,
         MiFitnessUiStatus.AUTH_ERROR,
         MiFitnessUiStatus.NETWORK_ERROR,
         MiFitnessUiStatus.STORAGE_ERROR,
@@ -1560,12 +1561,14 @@ private fun MiFitnessCloudStatus(
                 SpectraStatus(
                     when {
                         state.miFitnessSyncing -> "正在读取"
+                        state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> "云端暂无记录"
                         failed && cloudSnapshot != null -> "缓存可用 · 刷新失败"
                         failed -> "刷新失败"
                         cloudSnapshot != null -> "已缓存"
                         else -> "待刷新"
                     },
                     tone = when {
+                        state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> SpectraStatusTone.WARNING
                         failed -> SpectraStatusTone.ERROR
                         cloudSnapshot != null -> SpectraStatusTone.SUCCESS
                         else -> SpectraStatusTone.INFO
@@ -1589,6 +1592,7 @@ private fun MiFitnessCloudStatus(
             if (failed) {
                 Text(
                     when (state.miFitnessStatus) {
+                        MiFitnessUiStatus.NO_DATA -> "Mi Fitness 云端暂未返回今天的步数记录。"
                         MiFitnessUiStatus.AUTH_ERROR -> "身份验证失败，请在个人页更新凭据。"
                         MiFitnessUiStatus.NETWORK_ERROR -> "网络或云端响应异常，请稍后重试。"
                         MiFitnessUiStatus.STORAGE_ERROR -> "系统安全存储暂不可用。"

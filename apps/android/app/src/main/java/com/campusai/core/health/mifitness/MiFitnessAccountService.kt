@@ -50,12 +50,19 @@ class MiFitnessAccountService internal constructor(
                     false
                 }
                 if (!credentialSaved) {
-                    restoreCache(oldSummary)
+                    if (outcome.summary != null) restoreCache(oldSummary)
                     return@serialized Result.failure(
                         MiFitnessAccountException("credential_write_failed", "系统安全存储不可用，小米运动健康凭据未保存。"),
                     )
                 }
-                Result.success(outcome.summary)
+                val summary = outcome.summary
+                    ?: return@serialized Result.failure(
+                        MiFitnessStepsSyncException(
+                            "no_cloud_data",
+                            "Mi Fitness 云端尚未返回今天的步数记录。",
+                        ),
+                    )
+                Result.success(summary)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {

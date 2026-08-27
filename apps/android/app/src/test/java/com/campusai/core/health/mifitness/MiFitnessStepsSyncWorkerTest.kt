@@ -40,11 +40,15 @@ class MiFitnessStepsSyncWorkerTest {
         val known = MiFitnessStepsSyncWorker.failureData(
             MiFitnessStepsSyncException("network_failed", "safe"),
         )
+        val noData = MiFitnessStepsSyncWorker.failureData(
+            MiFitnessStepsSyncException("no_cloud_data", "safe"),
+        )
         val unknown = MiFitnessStepsSyncWorker.failureData(
             IllegalStateException("synthetic-pass-token raw-response"),
         )
 
         assertEquals(mapOf("error_code" to "network_failed"), known.keyValueMap)
+        assertEquals(mapOf("error_code" to "no_cloud_data"), noData.keyValueMap)
         assertEquals(mapOf("error_code" to "sync_failed"), unknown.keyValueMap)
         assertFalse(unknown.toString().contains("synthetic-pass-token"))
         assertFalse(unknown.toString().contains("raw-response"))

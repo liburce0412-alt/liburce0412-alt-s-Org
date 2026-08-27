@@ -111,3 +111,11 @@
 - artifacts: [evidence/E-011-campusai-mi-fitness-integration.md, ../../docs/2026-08-27_reverse-mi-fitness-cloud-report.md]
 - evidence_ids: [E-011]
 - next: install on the user's device only when requested, then compare the first manual steps result with Mi Fitness; do not enable background scheduling or additional metrics yet
+
+## 2026-08-28T02:55:00+08:00 | lead | false-zero-runtime-fix
+- action: diagnose the installed app's zero-step result, correct empty-result handling, and validate the cloud path on the authorized phone
+- command_or_ref: Android unit tests, debug APK install, redacted stage/status logs, and read-only package/process checks
+- result_summary: removed the empty-list-to-zero path, invalidated legacy empty aggregates, added a distinct NO_DATA state, preserved valid credentials without writing zero, cleared stale cloud UI across account changes, and removed the forced Android proxy bypass; 210 tests plus lint/build passed, and with VPN disabled the live login, STS, and steps requests all returned HTTP 200 while the new CN day had no cloud records
+- artifacts: [evidence/E-012-campusai-zero-step-runtime-fix.md]
+- evidence_ids: [E-012]
+- next: compare a later non-empty current-day result with Mi Fitness; separately re-check the system-proxy path while the user's VPN is enabled if requested

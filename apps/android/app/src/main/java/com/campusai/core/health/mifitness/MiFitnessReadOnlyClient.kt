@@ -1,5 +1,6 @@
 package com.campusai.core.health.mifitness
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -13,7 +14,6 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
-import java.net.Proxy
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 
@@ -49,7 +49,7 @@ class MiFitnessReadOnlyClient(
             )
             .get()
             .build()
-        val loginResponse = executeOnce(loginRequest).also(::requireSuccess)
+        val loginResponse = executeOnce(loginRequest, "login").also(::requireSuccess)
         val loginCookies = cookies(loginResponse)
         val extensionHeader = listOf(
             "Extension-Pragma",
@@ -111,7 +111,7 @@ class MiFitnessReadOnlyClient(
             )
             .get()
             .build()
-        val response = executeOnce(request).also(::requireSuccess)
+        val response = executeOnce(request, "steps").also(::requireSuccess)
         MiFitnessProtocol.decryptResponse(
             ciphertextBase64 = response.body,
             ssecurityBase64 = session.ssecurityBase64,
@@ -139,7 +139,7 @@ class MiFitnessReadOnlyClient(
                 }
                 .get()
                 .build()
-            val response = executeOnce(request)
+            val response = executeOnce(request, "sts")
             serviceToken(response.url, response.headers)?.let { return it }
             cookies(response)["miothealth_serviceToken"]?.let { return it }
             cookies(response)["serviceToken"]?.let { return it }
@@ -160,11 +160,15 @@ class MiFitnessReadOnlyClient(
         throw MiFitnessAuthenticationException("Xiaomi STS exceeded the redirect limit")
     }
 
-    private suspend fun executeOnce(request: Request): HttpResponse = suspendCancellableCoroutine { continuation ->
+    private suspend fun executeOnce(
+        request: Request,
+        stage: String,
+    ): HttpResponse = suspendCancellableCoroutine { continuation ->
         val call = client.newCall(request)
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                Log.i(LOG_TAG, "stage=$stage transport=${e.javaClass.simpleName}")
                 if (continuation.isActive) {
                     continuation.resumeWith(
                         Result.failure(MiFitnessNetworkException("Xiaomi network request failed")),
@@ -173,6 +177,7 @@ class MiFitnessReadOnlyClient(
             }
 
             override fun onResponse(call: Call, response: okhttp3.Response) {
+                Log.i(LOG_TAG, "stage=$stage http=${response.code}")
                 val result = try {
                     response.use {
                         Result.success(
@@ -185,6 +190,7 @@ class MiFitnessReadOnlyClient(
                         )
                     }
                 } catch (_: IOException) {
+                    Log.i(LOG_TAG, "stage=$stage body=read_failed")
                     Result.failure(MiFitnessNetworkException("Xiaomi network request failed"))
                 } catch (error: Exception) {
                     Result.failure(error)
@@ -236,11 +242,11 @@ class MiFitnessReadOnlyClient(
 
     companion object {
         private const val MAX_STS_REQUESTS = 5
+        private const val LOG_TAG = "MiFitnessHttp"
         private const val MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024L
         private val random = SecureRandom()
 
-        private fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
-            .proxy(Proxy.NO_PROXY)
+        internal fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
             .followRedirects(false)
             .followSslRedirects(false)
             .cookieJar(CookieJar.NO_COOKIES)

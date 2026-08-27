@@ -1,6 +1,7 @@
 package com.campusai.core.health.mifitness
 
 import android.content.Context
+import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
@@ -18,17 +19,26 @@ class MiFitnessStepsSyncWorker(
     override suspend fun doWork(): Result {
         val outcome = MiFitnessStepsSyncService(applicationContext).syncToday()
         return outcome.fold(
-            onSuccess = { Result.success() },
-            onFailure = { error -> Result.failure(failureData(error)) },
+            onSuccess = {
+                Log.i(LOG_TAG, "result=success")
+                Result.success()
+            },
+            onFailure = { error ->
+                val data = failureData(error)
+                Log.i(LOG_TAG, "result=failure code=${data.getString(KEY_ERROR_CODE)}")
+                Result.failure(data)
+            },
         )
     }
 
     companion object {
         internal const val KEY_ERROR_CODE = "error_code"
+        private const val LOG_TAG = "MiFitnessSync"
         private val safeErrorCodes = setOf(
             "credentials_missing",
             "authentication_failed",
             "network_failed",
+            "no_cloud_data",
             "response_invalid",
             "record_out_of_window",
             "record_limit",

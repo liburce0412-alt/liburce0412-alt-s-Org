@@ -41,7 +41,9 @@ object MiFitnessStepsParser {
         val records = buildList {
             repeat(list.length()) { index ->
                 val item = list.getJSONObject(index)
-                if (item.getString("key") != "steps") return@repeat
+                if (item.has("key") && !item.isNull("key")) {
+                    require(item.getString("key") == "steps") { "步数记录 key 无效。" }
+                }
                 val epochSeconds = exactLong(item.get("time"), "time")
                 require(epochSeconds in 0..MAX_EPOCH_SECONDS) { "步数记录时间无效。" }
                 val value = when (val rawValue = item.get("value")) {
@@ -101,6 +103,7 @@ object MiFitnessStepsAggregator {
             count += 1
             latest = maxOf(latest ?: record.epochSeconds, record.epochSeconds)
         }
+        require(count > 0) { "没有可聚合的步数记录。" }
         MiFitnessStepsAggregate(total, count, latest)
     }
 

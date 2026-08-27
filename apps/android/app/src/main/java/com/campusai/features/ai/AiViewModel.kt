@@ -118,6 +118,7 @@ enum class MiFitnessUiStatus {
     REFRESHING,
     DELETING,
     SUCCESS,
+    NO_DATA,
     AUTH_ERROR,
     NETWORK_ERROR,
     STORAGE_ERROR,
@@ -275,13 +276,23 @@ class AiViewModel(
                     loadHealthStatus("Mi Fitness 今日步数已手动刷新。")
                 },
                 onFailure = { error ->
-                    _healthState.value = _healthState.value.copy(
-                        miFitnessConfigured = miFitnessCredentialStore.hasCredentials(),
-                        loading = false,
-                        miFitnessSyncing = false,
-                        miFitnessStatus = error.toMiFitnessUiStatus(),
-                        actionMessage = null,
-                    )
+                    val previous = _healthState.value
+                    val configured = miFitnessCredentialStore.hasCredentials()
+                    val savedWithoutCloudData = configured &&
+                        (error as? MiFitnessStepsSyncException)?.code == "no_cloud_data"
+                    if (savedWithoutCloudData) {
+                        val message = "Mi Fitness 凭据已安全保存；云端暂无今日步数记录。"
+                        _healthState.value = previous.afterMiFitnessNoDataCredentialSave(message)
+                        loadHealthStatus(message)
+                    } else {
+                        _healthState.value = previous.copy(
+                            miFitnessConfigured = configured,
+                            loading = false,
+                            miFitnessSyncing = false,
+                            miFitnessStatus = error.toMiFitnessUiStatus(),
+                            actionMessage = null,
+                        )
+                    }
                 },
             )
         }
@@ -521,6 +532,7 @@ class AiViewModel(
     ) {
         "invalid_credentials", "authentication_failed", "validation_failed", "credentials_missing" ->
             MiFitnessUiStatus.AUTH_ERROR
+        "no_cloud_data" -> MiFitnessUiStatus.NO_DATA
         "network_failed", "response_invalid", "record_out_of_window", "record_limit",
         "cursor_missing", "cursor_limit", "cursor_repeated", "page_limit", "aggregation_invalid",
         "sync_failed" -> MiFitnessUiStatus.NETWORK_ERROR
@@ -529,6 +541,7 @@ class AiViewModel(
 
     private fun String?.toMiFitnessUiStatus(): MiFitnessUiStatus = when (this) {
         "credentials_missing", "authentication_failed" -> MiFitnessUiStatus.AUTH_ERROR
+        "no_cloud_data" -> MiFitnessUiStatus.NO_DATA
         "network_failed", "response_invalid", "record_out_of_window", "record_limit",
         "cursor_missing", "cursor_limit", "cursor_repeated", "page_limit", "aggregation_invalid",
         "sync_failed" -> MiFitnessUiStatus.NETWORK_ERROR
@@ -975,6 +988,22 @@ class AiViewModel(
         super.onCleared()
     }
 }
+
+internal fun CaesarHealthUiState.afterMiFitnessNoDataCredentialSave(
+    message: String,
+): CaesarHealthUiState = copy(
+    miFitnessConfigured = true,
+    loading = false,
+    miFitnessSyncing = false,
+    miFitnessStatus = MiFitnessUiStatus.NO_DATA,
+    miFitnessLastSyncAt = null,
+    miFitnessFormResetKey = miFitnessFormResetKey + 1L,
+    snapshot = null,
+    band = null,
+    healthError = null,
+    bandError = null,
+    actionMessage = message,
+)
 
 internal fun generationFailureMessage(error: Throwable): String =
     (error as? AiRoutingException)?.message ?: "生成中断，请重试。"

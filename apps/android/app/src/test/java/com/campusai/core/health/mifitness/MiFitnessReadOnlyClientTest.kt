@@ -14,6 +14,7 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -26,6 +27,11 @@ import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 class MiFitnessReadOnlyClientTest {
+    @Test
+    fun `default client follows the Android system proxy selector`() {
+        assertNull(MiFitnessReadOnlyClient.defaultHttpClient().proxy)
+    }
+
     @Test
     fun `cancelling authentication cancels the active OkHttp call`() = runTest {
         val started = CountDownLatch(1)

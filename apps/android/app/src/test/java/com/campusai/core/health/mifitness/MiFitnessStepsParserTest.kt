@@ -10,15 +10,14 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class MiFitnessStepsParserTest {
     @Test
-    fun `parser extracts only verified steps records and pagination`() {
+    fun `parser trusts the request scoped metric and does not require an item key`() {
         val raw = """
             {
               "code": 0,
               "result": {
                 "data_list": [
-                  {"time": 1770000000, "key": "steps", "value": "{\"steps\":3210}"},
-                  {"time": 1770000001, "key": "distance", "value": "{\"distance\":99}"},
-                  {"time": 1770000002, "key": "steps", "value": {"steps":"12"}}
+                  {"time": 1770000000, "value": "{\"steps\":3210}"},
+                  {"time": 1770000001, "key": "steps", "value": {"steps":"12"}}
                 ],
                 "has_more": true,
                 "next_key": "unit-next"
@@ -29,7 +28,7 @@ class MiFitnessStepsParserTest {
         val page = MiFitnessStepsParser.parse(raw).getOrThrow()
 
         assertEquals(
-            listOf(MiFitnessStepRecord(1_770_000_000L, 3_210L), MiFitnessStepRecord(1_770_000_002L, 12L)),
+            listOf(MiFitnessStepRecord(1_770_000_000L, 3_210L), MiFitnessStepRecord(1_770_000_001L, 12L)),
             page.records,
         )
         assertTrue(page.hasMore)
@@ -42,6 +41,20 @@ class MiFitnessStepsParserTest {
             val raw = """{"code":200,"result":{"data_list":[{"time":1770000000,"key":"steps","value":"{\"steps\":$stepsLiteral}"}],"has_more":false}}"""
             assertTrue("value=$stepsLiteral", MiFitnessStepsParser.parse(raw).isFailure)
         }
+    }
+
+    @Test
+    fun `parser rejects a request scoped record without a steps value`() {
+        val raw = """{"code":0,"result":{"data_list":[{"time":1770000000,"key":"distance","value":"{\"distance\":99}"}],"has_more":false}}"""
+
+        assertTrue(MiFitnessStepsParser.parse(raw).isFailure)
+    }
+
+    @Test
+    fun `parser rejects an explicit non steps item key even when the value has steps`() {
+        val raw = """{"code":0,"result":{"data_list":[{"time":1770000000,"key":"steps-vendor-variant","value":"{\"steps\":99}"}],"has_more":false}}"""
+
+        assertTrue(MiFitnessStepsParser.parse(raw).isFailure)
     }
 
     @Test
@@ -68,6 +81,6 @@ class MiFitnessStepsParserTest {
         assertTrue(MiFitnessStepsAggregator.sumIncremental(listOf(MiFitnessStepRecord(10L, -1L))).isFailure)
         val overCap = List(11) { MiFitnessStepRecord(it.toLong(), 1_000_000L) }
         assertTrue(MiFitnessStepsAggregator.sumIncremental(overCap).isFailure)
-        assertFalse(MiFitnessStepsAggregator.sumIncremental(emptyList()).isFailure)
+        assertTrue(MiFitnessStepsAggregator.sumIncremental(emptyList()).isFailure)
     }
 }

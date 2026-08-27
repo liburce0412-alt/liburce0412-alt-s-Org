@@ -96,7 +96,7 @@ class MiFitnessStepsCache internal constructor(
             summary.period.endEpochMillis < summary.period.startEpochMillis -> "缓存结束时间无效。"
             !ACCOUNT_SCOPE_PATTERN.matches(summary.accountScope) -> "缓存账号范围无效。"
             summary.steps !in 0..MAX_TOTAL_STEPS -> "缓存步数无效。"
-            summary.recordCount !in 0..MAX_RECORDS -> "缓存记录数无效。"
+            summary.recordCount !in 1..MAX_RECORDS -> "缓存记录数无效。"
             summary.observedAt < 0 || summary.lastSyncAt < 0 -> "缓存同步时间无效。"
             !summary.schemaProvisional || !summary.aggregationProvisional -> "缓存版本标记无效。"
             else -> null

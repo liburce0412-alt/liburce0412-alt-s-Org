@@ -114,8 +114,9 @@ sequenceDiagram
 | E-009 | `DataProviderManager` / `DataContentProvider` | Java + smali 全局调用点搜索 | `8df26f59…ac4c5` | 白名单无生产写入点或外部注册接口 |
 | E-010 | 用户授权的 CN `steps` live PoC | `py -3 readonly_poc.py --live --metric steps --days 1 --region cn --utc-offset +08:00` | `ce2bf8c…d8f1`，安全摘要截图 | 两跳换票、加密 GET 和响应解密获真实服务器接受；一天窗口 11 条，无后续页信号 |
 | E-011 | CampusAI Android 源码、单测与 debug APK | `testDebugUnitTest`; `assembleDebug` | APK `43890612…4ccc8e3` | 手动只读、加密缓存、取消/超时、配置后 fail-closed、Agent/Band 隔离完成；201 测试通过 |
+| E-012 | CampusAI 安装包与授权手机运行时验证 | `testDebugUnitTest`; `lintDebug`; `assembleDebug`; `adb install -r` | APK `dcb628c9…33a42229` | 修正空列表被缓存为 0、账号切换残留与强制绕过系统代理；210 测试通过，VPN 关闭后三段请求均 HTTP 200，当日空响应正确显示 NO_DATA |
 
-证据详情：[E-008](../work/xiaomi-mi-fitness-direct-band/evidence/E-008-mi-fitness-cloud-protocol.md)、[E-009](../work/xiaomi-mi-fitness-direct-band/evidence/E-009-mi-fitness-whitelist-gate.md)、[E-010](../work/xiaomi-mi-fitness-direct-band/evidence/E-010-mi-fitness-cloud-live-read.md)。
+证据详情：[E-008](../work/xiaomi-mi-fitness-direct-band/evidence/E-008-mi-fitness-cloud-protocol.md)、[E-009](../work/xiaomi-mi-fitness-direct-band/evidence/E-009-mi-fitness-whitelist-gate.md)、[E-010](../work/xiaomi-mi-fitness-direct-band/evidence/E-010-mi-fitness-cloud-live-read.md)、[E-012](../work/xiaomi-mi-fitness-direct-band/evidence/E-012-campusai-zero-step-runtime-fix.md)。
 
 ### Findings
 
@@ -127,6 +128,7 @@ sequenceDiagram
 | F-016 | CampusAI 不能从普通应用进程把自己加入 Mi Fitness 白名单 | `n/a_re` | E-009 | 高 | `DataProviderManager`, `DataContentProvider` | validated |
 | F-017 | E-008 的离线 PoC 证明内部算法与安全边界自洽；其服务端验收缺口仅由后续 E-010 对 CN/steps 单窗口补足 | `n/a_re` | E-008, E-010 | 高 | `poc/mi_fitness_cloud_readonly` | live gap partially closed |
 | F-018 | 当前 CN 账号的真实服务器接受恢复出的两跳换票、加密 GET 与响应解密链 | `n/a_re` | E-010 | 高 | `get_fitness_data_by_time`, `steps`, one-day window | validated live once |
+| F-019 | 新自然日的空云端列表不能解释为 0 步，Android 端也不应强制绕过系统代理 | `n/a_re` | E-012 | 高 | steps sync/cache boundary; default OkHttp client | validated on device |
 
 ### P-003：不争抢手环的只读取数路径
 
@@ -178,7 +180,7 @@ py -3 readonly_poc.py --live --metric steps --days 1 --region cn --utc-offset +0
 - 凭据和聚合摘要都经现有 Android Keystore 包装的 `SecurePreferences` 加密，且该偏好文件已从云备份和设备迁移中排除。没有复用可备份的 Room `health_summary_cache`，也不落盘原始响应、分页记录、serviceToken、ssecurity 或 deviceId。
 - `HealthGatewayFactory.create()` 只在未配置 Mi Fitness 时允许 Health Connect fallback；配置后云端缓存缺失会 fail-closed，不混合也不冒充。Health Connect 授权 Activity 使用独立 `createHealthConnectOnly()`。
 - 网络调用与协程取消绑定，单次 Call 有超时，整个同步上限 90 秒；刷新中删除凭据会先取消 Work。Agent 还会在执行时校验本轮 projected-tool allowlist。
-- 完整 Android 单测 201/201 通过，`assembleDebug` 与 `lintDebug` 成功（Lint 0 fatal / 0 error）；实现验证过程未访问真实小米云。证据见 [E-011](../work/xiaomi-mi-fitness-direct-band/evidence/E-011-campusai-mi-fitness-integration.md)。
+- 首版 E-011 的完整 Android 单测 201/201 通过，`assembleDebug` 与 `lintDebug` 成功（Lint 0 fatal / 0 error）。设备验证后的 E-012 修正版为 210/210，`assembleDebug` 与 `lintDebug` 成功，并已覆盖安装、冷启动确认。
 - `CaesarAppTools` 的健康工具不再持有 Band gateway 或 `HealthSyncCoordinator`，只调用 `HealthGateway.snapshot()`；Agent 不能启动实时会话、历史同步或云端刷新。
 - Profile、首页和 AI 设置均展示固定安全状态。凭据输入不使用 saveable 状态，passToken 始终遮罩；成功后清空输入，删除时同时删除凭据与摘要。
 - 首版仅开放中国区当天 steps。分桶求和语义仍标记为 provisional，首次成功结果应与 Mi Fitness 当天总步数人工对照；没有记录不得由 UI 推断成 0。
@@ -193,5 +195,6 @@ py -3 readonly_poc.py --live --metric steps --days 1 --region cn --utc-offset +0
 6. 2026-08-27：完成一次用户授权的 CN `steps` live read；真实服务器返回 11 条记录且没有后续页信号。
 7. 2026-08-27：完成 CampusAI 首版只读接入：显式手动联网、Keystore 加密凭据/摘要、cache-first 网关、Agent/Band 隔离和固定安全 UI。
 8. 2026-08-27：全量 201 个 Android 单测与 debug APK 构建通过，并完成取消/超时、fail-closed 与 projected-tool 执行白名单复核。
+9. 2026-08-28：设备上定位空列表被误显示为 0 及 FlClash 假 IP 与强制代理绕过的冲突；同时封住账号切换残留旧步数边界。修正后 210 个测试通过，VPN 关闭状态下登录、STS 与步数请求均返回 HTTP 200。
 
 完整记录见 [timeline.md](../work/xiaomi-mi-fitness-direct-band/timeline.md)。

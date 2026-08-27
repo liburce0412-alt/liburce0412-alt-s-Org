@@ -50,7 +50,7 @@ internal data class MiFitnessCnDayWindow(
 )
 
 internal class MiFitnessStepsSyncOutcome(
-    val summary: MiFitnessStepsSummary,
+    val summary: MiFitnessStepsSummary?,
     val refreshedPassToken: String?,
 ) {
     override fun toString(): String = "MiFitnessStepsSyncOutcome(<redacted>)"
@@ -92,11 +92,13 @@ class MiFitnessStepsSyncService internal constructor(
                 false
             }
             if (!saved) {
-                restoreCache(oldSummary)
+                if (outcome.summary != null) restoreCache(oldSummary)
                 return@serialized failure("credential_write_failed", "系统安全存储不可用，刷新凭据未保存。")
             }
         }
-        Result.success(outcome.summary)
+        val summary = outcome.summary
+            ?: return@serialized failure("no_cloud_data", "Mi Fitness 云端尚未返回今天的步数记录。")
+        Result.success(summary)
     }
 
     internal fun todayWindow(): MiFitnessCnDayWindow {
@@ -162,6 +164,14 @@ class MiFitnessStepsSyncService internal constructor(
             }
             if (!complete) {
                 throw error("page_limit", "本次步数分页超出安全上限。")
+            }
+            if (records.isEmpty()) {
+                return@withTimeout Result.success(
+                    MiFitnessStepsSyncOutcome(
+                        summary = null,
+                        refreshedPassToken = session.refreshedPassToken,
+                    ),
+                )
             }
 
             val aggregate = MiFitnessStepsAggregator.sumIncremental(records).getOrElse {
