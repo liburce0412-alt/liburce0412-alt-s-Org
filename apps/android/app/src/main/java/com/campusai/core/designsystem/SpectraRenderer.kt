@@ -155,7 +155,8 @@ private class SpectraGlRenderer : GLSurfaceView.Renderer {
         sceneFramebuffer = 0
         sceneTexture = 0
         sceneFramebufferReady = false
-        GLES20.glClearColor(.97f, .98f, 1f, 1f)
+        val fallback = fallbackColor()
+        GLES20.glClearColor(fallback[0], fallback[1], fallback[2], 1f)
         lastFrameAt = SystemClock.elapsedRealtime()
     }
 
@@ -438,12 +439,21 @@ private class SpectraGlRenderer : GLSurfaceView.Renderer {
     }
 
     private fun fallbackColor(): FloatArray {
-        if (darkMode) return floatArrayOf(.051f, .078f, .133f)
+        if (darkMode) {
+            return when (environment) {
+                SpectraEnvironment.AURORA -> floatArrayOf(.043f, .098f, .082f)
+                SpectraEnvironment.ORIGINAL,
+                SpectraEnvironment.OCEAN,
+                SpectraEnvironment.ULTRAVIOLET,
+                SpectraEnvironment.EMBER -> floatArrayOf(.051f, .078f, .133f)
+            }
+        }
         return when (environment) {
             SpectraEnvironment.ORIGINAL -> floatArrayOf(.91f, .93f, .98f)
             SpectraEnvironment.OCEAN -> floatArrayOf(.86f, .95f, .98f)
             SpectraEnvironment.ULTRAVIOLET -> floatArrayOf(.92f, .89f, .99f)
             SpectraEnvironment.EMBER -> floatArrayOf(.99f, .92f, .88f)
+            SpectraEnvironment.AURORA -> floatArrayOf(.88f, .96f, .91f)
         }
     }
 
@@ -490,12 +500,30 @@ private class SpectraGlRenderer : GLSurfaceView.Renderer {
                 }
                 return value;
             }
-            float smoothUnion(float a, float b, float softness) {
-                float h = clamp(0.5 + 0.5 * (b - a) / softness, 0.0, 1.0);
-                return mix(b, a, h) - softness * h * (1.0 - h);
-            }
-            float ellipseSdf(vec2 p, vec2 centre, vec2 radius) {
-                return length((p - centre) / radius) - 1.0;
+            vec2 liquidDropletField(
+                vec2 p,
+                vec2 origin,
+                vec2 scattered,
+                vec2 gathered,
+                vec2 radius,
+                float scatter,
+                float gather,
+                float t,
+                float seed
+            ) {
+                vec2 centre = mix(origin, scattered, scatter);
+                centre = mix(centre, gathered, gather);
+                float breathe = 1.0 + 0.055 * sin(t * 0.78 + seed * 6.2831);
+                vec2 shapedRadius = radius * vec2(breathe, 2.0 - breathe);
+                vec2 q = (p - centre) / shapedRadius;
+                // A slight pear-shaped deformation keeps the drops under surface tension instead
+                // of reading as stamped circles. It is stable for a seed and never jitters.
+                q.y += q.x * q.x * 0.11 * sin(seed * 9.17);
+                float body = exp(-dot(q, q) * 1.55);
+                vec2 specularCentre = centre + vec2(-shapedRadius.x * 0.26, shapedRadius.y * 0.28);
+                vec2 highlightQ = (p - specularCentre) / (shapedRadius * 0.42);
+                float highlight = exp(-dot(highlightQ, highlightQ) * 2.15);
+                return vec2(body, highlight);
             }
             vec3 accentPalette(float environment, float index) {
                 vec3 cyan = vec3(0.08, 0.70, 0.78);
@@ -505,13 +533,17 @@ private class SpectraGlRenderer : GLSurfaceView.Renderer {
                 if (environment < 0.5) { if (index < 0.5) return cyan; if (index < 1.5) return violet; return warm; }
                 if (environment < 1.5) { if (index < 0.5) return vec3(0.03, 0.45, 0.60); if (index < 1.5) return cyan; return vec3(0.18, 0.34, 0.78); }
                 if (environment < 2.5) { if (index < 0.5) return vec3(0.22, 0.14, 0.60); if (index < 1.5) return violet; return rose; }
-                if (index < 0.5) return vec3(0.73, 0.22, 0.13); if (index < 1.5) return warm; return rose;
+                if (environment < 3.5) { if (index < 0.5) return vec3(0.73, 0.22, 0.13); if (index < 1.5) return warm; return rose; }
+                if (index < 0.5) return vec3(0.055, 0.50, 0.32);
+                if (index < 1.5) return vec3(0.20, 0.78, 0.50);
+                return vec3(0.60, 0.82, 0.32);
             }
             vec3 bodyPalette(float environment) {
                 if (environment < 0.5) return vec3(0.145, 0.165, 0.220);
                 if (environment < 1.5) return vec3(0.080, 0.205, 0.260);
                 if (environment < 2.5) return vec3(0.155, 0.105, 0.255);
-                return vec3(0.265, 0.135, 0.095);
+                if (environment < 3.5) return vec3(0.265, 0.135, 0.095);
+                return vec3(0.070, 0.230, 0.160);
             }
             vec3 envAccent(float index) {
                 float amount = smoothstep(0.0, 1.0, uEnvironmentMix);
@@ -524,6 +556,169 @@ private class SpectraGlRenderer : GLSurfaceView.Renderer {
             float softLobe(vec2 p, vec2 centre, vec2 radius) {
                 vec2 q = (p - centre) / radius;
                 return exp(-dot(q, q) * 1.05);
+            }
+            // Shared continuous liquid rail for both CLASSIC and FLUID. x is normalised to the
+            // viewport at each call site. The four-unit cycle is about 20 seconds because main()
+            // scales wall-clock time by 0.20: stretch/neck, bridged fork, droplets, attraction,
+            // then a pressure-like merge back into one rail. x/y fields are body/specular masks.
+            vec2 silverRailMask(vec2 railP, float railAxis, float t) {
+                float cycle = fract(t / 4.0);
+                float stretch = smoothstep(0.02, 0.14, cycle) *
+                    (1.0 - smoothstep(0.24, 0.36, cycle));
+                float fork = smoothstep(0.12, 0.30, cycle) *
+                    (1.0 - smoothstep(0.72, 0.90, cycle));
+                float droplets = smoothstep(0.30, 0.46, cycle) *
+                    (1.0 - smoothstep(0.86, 0.98, cycle));
+                float scatter = smoothstep(0.36, 0.54, cycle) *
+                    (1.0 - smoothstep(0.67, 0.80, cycle));
+                float gather = smoothstep(0.66, 0.79, cycle) *
+                    (1.0 - smoothstep(0.91, 0.985, cycle));
+
+                float x = railP.x;
+                float axis = railAxis - 0.012;
+                axis += sin(x * 5.8 - t * 0.62) * 0.010 * stretch;
+                float neckWave = 0.5 + 0.5 * sin(x * 12.4 + t * 0.48);
+                float singleWidth = 0.034 * (1.0 - 0.34 * stretch * neckWave);
+                float singleField = exp(-pow(axis / singleWidth, 2.0));
+
+                float branchDistance = (0.018 + 0.040 * fork) * fork;
+                float branchWarp = sin(x * 7.1 - t * 0.54) * 0.007 * fork;
+                float branchWidth = mix(0.031, 0.021, fork);
+                float upperBranch = exp(-pow(
+                    (axis - branchDistance - branchWarp) / branchWidth,
+                    2.0
+                ));
+                float lowerBranch = exp(-pow(
+                    (axis + branchDistance + branchWarp) / branchWidth,
+                    2.0
+                ));
+                float branchField = (upperBranch + lowerBranch) * 0.58;
+
+                // Uneven vertical necks form true liquid bridges while the rail forks. Their
+                // contribution fades continuously as droplets pull free; there is no binary cut.
+                float bridgeSpan = branchDistance + 0.024;
+                float bridgeEnvelope = exp(-pow(axis / bridgeSpan, 2.0));
+                float bridgeNodes = (
+                    exp(-pow((x + 0.285) / 0.070, 2.0)) * 0.72 +
+                    exp(-pow((x - 0.035) / 0.092, 2.0)) * 0.88 +
+                    exp(-pow((x - 0.335) / 0.062, 2.0)) * 0.64
+                ) * bridgeEnvelope * fork * (1.0 - droplets * 0.86);
+                float liquidThread = exp(-pow(axis / 0.014, 2.0)) *
+                    fork * (1.0 - droplets * 0.90) * 0.15;
+                float railField = mix(singleField, branchField, fork) +
+                    bridgeNodes * 0.46 + liquidThread;
+
+                vec2 dropField = vec2(0.0);
+                if (droplets > 0.001) {
+                    vec2 dropP = vec2(x, axis);
+                    float branchOrigin = 0.052 * fork;
+                    // LOW retains four deliberately different metaballs. AUTO/HIGH add three
+                    // smaller drops between them; neither branch uses a grid, hash, or bead wave.
+                    dropField += liquidDropletField(
+                        dropP,
+                        vec2(-0.38, -branchOrigin),
+                        vec2(-0.44, -0.155),
+                        vec2(-0.090, -0.030),
+                        vec2(0.058, 0.041),
+                        scatter,
+                        gather,
+                        t,
+                        0.13
+                    );
+                    dropField += liquidDropletField(
+                        dropP,
+                        vec2(-0.12, branchOrigin),
+                        vec2(-0.18, 0.205),
+                        vec2(-0.030, 0.034),
+                        vec2(0.039, 0.056),
+                        scatter,
+                        gather,
+                        t,
+                        0.37
+                    );
+                    dropField += liquidDropletField(
+                        dropP,
+                        vec2(0.14, -branchOrigin),
+                        vec2(0.19, -0.215),
+                        vec2(0.038, -0.024),
+                        vec2(0.048, 0.036),
+                        scatter,
+                        gather,
+                        t,
+                        0.61
+                    );
+                    dropField += liquidDropletField(
+                        dropP,
+                        vec2(0.39, branchOrigin),
+                        vec2(0.44, 0.148),
+                        vec2(0.096, 0.027),
+                        vec2(0.062, 0.047),
+                        scatter,
+                        gather,
+                        t,
+                        0.89
+                    );
+                    if (uQuality > 0.5) {
+                        dropField += liquidDropletField(
+                            dropP,
+                            vec2(-0.265, branchOrigin),
+                            vec2(-0.315, 0.112),
+                            vec2(-0.064, 0.018),
+                            vec2(0.031, 0.037),
+                            scatter,
+                            gather,
+                            t,
+                            0.24
+                        );
+                        dropField += liquidDropletField(
+                            dropP,
+                            vec2(-0.005, -branchOrigin),
+                            vec2(-0.042, -0.132),
+                            vec2(-0.010, -0.014),
+                            vec2(0.035, 0.030),
+                            scatter,
+                            gather,
+                            t,
+                            0.49
+                        );
+                        dropField += liquidDropletField(
+                            dropP,
+                            vec2(0.270, branchOrigin),
+                            vec2(0.315, 0.188),
+                            vec2(0.068, 0.016),
+                            vec2(0.036, 0.052),
+                            scatter,
+                            gather,
+                            t,
+                            0.76
+                        );
+                    }
+                }
+
+                float railKeep = 1.0 - droplets * 0.92;
+                float density = railField * railKeep + dropField.x * droplets;
+                // During attraction the drop fields overlap into one softly necked cluster before
+                // the re-forming rail takes over, preserving the visual sense of mass.
+                density += exp(-pow(x / 0.165, 2.0) - pow(axis / 0.064, 2.0)) *
+                    gather * droplets * 0.28;
+                float body = smoothstep(0.16, 0.62, density);
+
+                float singleHighlight = exp(-pow((axis - singleWidth * 0.32) /
+                    max(singleWidth * 0.24, 0.006), 2.0));
+                float branchHighlight = (
+                    exp(-pow((axis - branchDistance - branchWarp - 0.006) / 0.008, 2.0)) +
+                    exp(-pow((axis + branchDistance + branchWarp - 0.006) / 0.008, 2.0))
+                ) * 0.64;
+                float highlightDensity = mix(singleHighlight, branchHighlight, fork) * railKeep +
+                    dropField.y * droplets * 0.86;
+                float tensionEdge = smoothstep(0.10, 0.26, density) *
+                    (1.0 - smoothstep(0.46, 0.72, density));
+                float highlight = clamp(
+                    smoothstep(0.22, 0.72, highlightDensity) * body + tensionEdge * 0.22,
+                    0.0,
+                    1.0
+                );
+                return vec2(body, highlight);
             }
             vec3 classicScene(vec2 uv, vec2 p, float aspect, float t) {
                 vec3 icePaper = mix(vec3(0.948, 0.956, 0.982), vec3(0.051, 0.078, 0.133), uDark);
@@ -574,6 +769,22 @@ private class SpectraGlRenderer : GLSurfaceView.Renderer {
                 float foldLight = exp(-pow((foldAxis - 0.095) / 0.210, 2.0));
                 color = mix(color, mix(envBody(), color, 0.36), foldShade * mix(0.080, 0.14, uDark));
                 color = mix(color, paperLift, foldLight * mix(0.090, 0.08, uDark));
+                vec2 classicRail = silverRailMask(
+                    vec2(fieldP.x / max(aspect, 0.001), fieldP.y),
+                    foldAxis,
+                    t
+                );
+                vec3 classicRailReflection = mix(
+                    mix(vec3(0.985, 0.995, 1.0), vec3(0.62, 0.73, 0.88), uDark),
+                    envAccent(1.0),
+                    mix(0.12, 0.18, uDark)
+                );
+                color = mix(
+                    color,
+                    classicRailReflection,
+                    classicRail.x * mix(0.70, 0.50, uDark)
+                );
+                color = mix(color, vec3(1.0), classicRail.y * mix(0.30, 0.20, uDark));
                 float classicLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
                 color += vec3(max(0.0, 0.700 - classicLuma)) * (1.0 - uDark);
                 return clamp(color, 0.0, 1.0);
@@ -675,13 +886,17 @@ private class SpectraGlRenderer : GLSurfaceView.Renderer {
                 float foldAxis = topologyAxis + 0.020;
                 float foldShadow = exp(-pow((foldAxis + 0.055) / 0.105, 2.0));
                 float foldGlow = exp(-pow((foldAxis - 0.080) / 0.170, 2.0));
-                float foldPearl = exp(-pow((foldAxis - 0.012) / 0.028, 2.0));
+                // CLASSIC and FLUID deliberately share the exact same rail lifecycle. FLUID only
+                // changes its carrier axis, so switching visual systems never hides the feature.
+                vec2 foldPearl = silverRailMask(r, foldAxis, t);
                 float foldCalm = 1.0 - readingQuiet * 0.34;
                 vec3 shade = mix(vec3(0.220, 0.280, 0.440), vec3(0.020, 0.055, 0.120), uDark);
                 vec3 glow = mix(vec3(0.995, 0.997, 1.000), vec3(0.250, 0.355, 0.565), uDark);
+                vec3 railReflection = mix(vec3(1.0), envAccent(1.0), mix(0.10, 0.16, uDark));
                 color = mix(color, shade, foldShadow * foldCalm * mix(0.78, 0.58, uDark));
                 color = mix(color, glow, foldGlow * foldCalm * mix(0.34, 0.26, uDark));
-                color = mix(color, vec3(1.0), foldPearl * foldCalm * mix(0.52, 0.34, uDark));
+                color = mix(color, railReflection, foldPearl.x * foldCalm * mix(0.68, 0.48, uDark));
+                color = mix(color, vec3(1.0), foldPearl.y * foldCalm * mix(0.30, 0.20, uDark));
 
                 // Caustics stay attached to the open fold, so colour reads as refraction through
                 // the environment instead of a decorative rainbow outline.

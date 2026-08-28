@@ -2,12 +2,9 @@ package com.campusai
 
 import com.campusai.core.health.HealthFreshness
 import com.campusai.core.health.HealthRecordEvidence
-import com.campusai.core.health.BandLiveSnapshot
-import com.campusai.core.health.BandLiveState
 import com.campusai.core.health.assembleHealthProvenance
 import com.campusai.core.health.evaluateHealthPermissionOutcome
 import com.campusai.core.health.healthFreshness
-import com.campusai.core.health.healthExportGap
 import com.campusai.core.health.HealthMetrics
 import com.campusai.core.health.HealthPeriod
 import com.campusai.core.health.HealthSnapshot
@@ -57,30 +54,9 @@ class HealthSnapshotEvidenceTest {
     }
 
     @Test
-    fun staleBandSnapshotStillCarriesDeterministicStatus() {
-        val snapshot = BandLiveSnapshot(
-            observedAt = 1L,
-            connected = null,
-            batteryPercent = null,
-            charging = null,
-            wearing = null,
-            sleeping = null,
-            heartRateBpm = null,
-            stepDelta = null,
-            capabilityBits = 0L,
-            bridgeState = BandLiveState.UNAVAILABLE,
-            statusMessage = "protocol unavailable",
-        )
-
-        assertEquals(false, snapshot.isFresh(now = 30_000L))
-        assertEquals("protocol unavailable", snapshot.statusMessage)
-        assertEquals(BandLiveState.UNAVAILABLE, snapshot.bridgeState)
-    }
-
-    @Test
-    fun partialGadgetbridgeExportKeepsRawMissingValuesWhileAllowingZeroPresentation() {
+    fun missingHealthMetricsRemainUnknownInsteadOfBecomingZero() {
         val snapshot = HealthSnapshot(
-            originPackages = setOf("nodomain.freeyourgadget.gadgetbridge"),
+            originPackages = setOf("com.mi.health"),
             period = HealthPeriod(0L, 10_000L, "today"),
             observedAt = 10_000L,
             lastSyncAt = 9_000L,
@@ -90,28 +66,8 @@ class HealthSnapshotEvidenceTest {
             confidence = 1.0,
         )
 
-        val gap = healthExportGap(snapshot)
-
-        assertEquals(setOf("steps", "sleep"), gap?.missingFields)
-        assertEquals(true, gap?.message?.contains("步数、睡眠"))
-        assertEquals(true, gap?.message?.contains("页面可按无记录显示 0"))
         assertNull(snapshot.metrics.steps)
         assertNull(snapshot.metrics.sleepMinutes)
-    }
-
-    @Test
-    fun noExportGapIsClaimedWithoutGadgetbridgeEvidence() {
-        val snapshot = HealthSnapshot(
-            originPackages = setOf("com.mi.health"),
-            period = HealthPeriod(0L, 10_000L, "today"),
-            observedAt = 10_000L,
-            lastSyncAt = 9_000L,
-            freshness = HealthFreshness.FRESH,
-            metrics = HealthMetrics(),
-            missingFields = setOf("steps", "sleep"),
-            confidence = 1.0,
-        )
-
-        assertNull(healthExportGap(snapshot))
+        assertEquals(setOf("steps", "sleep", "distance"), snapshot.missingFields)
     }
 }

@@ -19,6 +19,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import com.campusai.R
+import com.campusai.core.model.SpectraEnvironment
 import com.campusai.core.model.ThemeMode
 
 object SpectraColors {
@@ -34,6 +35,8 @@ object SpectraColors {
     val Warning = Color(0xFFFFB020)
     val Error = Color(0xFFD33F65)
     val Focus = Color(0xFF5A7DFF)
+    val Aurora = Color(0xFF187A53)
+    val AuroraLight = Color(0xFF72DCA5)
 }
 
 val Tomorrow = FontFamily(
@@ -72,6 +75,44 @@ private val DarkColors = darkColorScheme(
     error = Color(0xFFFF7D9D),
 )
 
+/**
+ * Environment palettes remain restrained Material schemes rather than a second theme system.
+ * Existing environments retain the original scheme; 森屿 adds a readable green emphasis and
+ * a matching paper/night canvas so the static reduced-motion surface keeps its identity.
+ */
+internal fun spectraColorScheme(
+    dark: Boolean,
+    environment: SpectraEnvironment,
+): ColorScheme {
+    val base = if (dark) DarkColors else LightColors
+    if (environment != SpectraEnvironment.AURORA) return base
+    return if (dark) {
+        base.copy(
+            primary = SpectraColors.AuroraLight,
+            onPrimary = Color(0xFF082018),
+            secondary = Color(0xFFA6DC75),
+            tertiary = Color(0xFF55D8C0),
+            background = Color(0xFF0B1915),
+            onBackground = Color(0xFFEFF9F3),
+            surface = Color(0xFF10231D),
+            onSurface = Color(0xFFEFF9F3),
+            outline = Color(0xFF3D6757),
+        )
+    } else {
+        base.copy(
+            primary = SpectraColors.Aurora,
+            onPrimary = Color.White,
+            secondary = Color(0xFF5F8F35),
+            tertiary = Color(0xFF198B78),
+            background = Color(0xFFF3FAF6),
+            onBackground = Color(0xFF13251D),
+            surface = Color(0xFFFAFFFC),
+            onSurface = Color(0xFF13251D),
+            outline = Color(0xFFC6DBD0),
+        )
+    }
+}
+
 private val SpectraTypography = androidx.compose.material3.Typography(
     displayLarge = TextStyle(fontFamily = Plex, fontWeight = FontWeight.SemiBold, fontSize = 40.sp, lineHeight = 44.sp),
     headlineLarge = TextStyle(fontFamily = Plex, fontWeight = FontWeight.SemiBold, fontSize = 24.sp, lineHeight = 30.sp),
@@ -85,13 +126,17 @@ private val SpectraTypography = androidx.compose.material3.Typography(
 )
 
 @Composable
-fun CampusTheme(themeMode: ThemeMode, content: @Composable () -> Unit) {
+fun CampusTheme(
+    themeMode: ThemeMode,
+    environment: SpectraEnvironment = SpectraEnvironment.ORIGINAL,
+    content: @Composable () -> Unit,
+) {
     val dark = when (themeMode) {
         ThemeMode.SYSTEM -> isSystemInDarkTheme()
         ThemeMode.LIGHT -> false
         ThemeMode.DARK -> true
     }
-    val colors: ColorScheme = if (dark) DarkColors else LightColors
+    val colors = spectraColorScheme(dark, environment)
     val view = LocalView.current
     DisposableEffect(dark) {
         val window = (view.context as? Activity)?.window

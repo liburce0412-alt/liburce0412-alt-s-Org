@@ -20,15 +20,15 @@ class MiFitnessSettingsPresentationTest {
         assertEquals("尚未配置。", miFitnessStatusText(MiFitnessSettingsStatus.IDLE, configured = false))
         assertEquals("已配置，等待手动刷新。", miFitnessStatusText(MiFitnessSettingsStatus.IDLE, configured = true))
         assertEquals("正在验证并保存到系统安全存储。", miFitnessStatusText(MiFitnessSettingsStatus.VALIDATING, false))
-        assertEquals("正在读取 Mi Fitness 中国区的今日步数。", miFitnessStatusText(MiFitnessSettingsStatus.REFRESHING, true))
-        assertEquals("正在删除本机凭据与步数缓存。", miFitnessStatusText(MiFitnessSettingsStatus.DELETING, true))
+        assertEquals("正在同步 Mi Fitness 今日健康。", miFitnessStatusText(MiFitnessSettingsStatus.REFRESHING, true))
+        assertEquals("正在删除本机凭据与健康缓存。", miFitnessStatusText(MiFitnessSettingsStatus.DELETING, true))
         assertEquals("最近一次操作已完成。", miFitnessStatusText(MiFitnessSettingsStatus.SUCCESS, true))
         assertEquals(
-            "Mi Fitness 云端暂未返回今天的步数记录；不会把空记录当成 0 步。",
+            "今天还没有同步到健康数据。",
             miFitnessStatusText(MiFitnessSettingsStatus.NO_DATA, true),
         )
         assertEquals("验证失败，请检查 userId 与 passToken。", miFitnessStatusText(MiFitnessSettingsStatus.AUTH_ERROR, true))
-        assertEquals("网络或云端响应异常，请稍后重试。", miFitnessStatusText(MiFitnessSettingsStatus.NETWORK_ERROR, true))
+        assertEquals("网络异常，请稍后重试。", miFitnessStatusText(MiFitnessSettingsStatus.NETWORK_ERROR, true))
         assertEquals("系统安全存储暂不可用，请稍后重试。", miFitnessStatusText(MiFitnessSettingsStatus.STORAGE_ERROR, true))
     }
 
@@ -60,7 +60,7 @@ class MiFitnessSettingsPresentationTest {
             missingFields = emptySet(),
             confidence = 1.0,
         )
-        val message = "Mi Fitness 凭据已安全保存；云端暂无今日步数记录。"
+        val message = "Mi Fitness 已连接；今天还没有同步到健康数据。"
 
         val updated = CaesarHealthUiState(
             miFitnessConfigured = true,

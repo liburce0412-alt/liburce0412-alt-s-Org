@@ -2,6 +2,7 @@ package com.campusai.core.health.mifitness
 
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.Call
@@ -80,15 +81,75 @@ class MiFitnessReadOnlyClient(
     suspend fun fetchSteps(
         session: MiFitnessSession,
         startEpochSeconds: Long,
-        endEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
+        nextKey: String = "",
+    ): String = fetchDailyAggregate(
+        session = session,
+        metric = "steps",
+        startEpochSeconds = startEpochSeconds,
+        endEpochSecondsExclusive = endEpochSecondsExclusive,
+        nextKey = nextKey,
+    )
+
+    suspend fun fetchDailyAggregate(
+        session: MiFitnessSession,
+        metric: String,
+        startEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
         nextKey: String = "",
     ): String = withContext(Dispatchers.IO) {
-        val readRequest = MiFitnessProtocol.buildReadRequest(
-            metric = "steps",
-            startEpochSeconds = startEpochSeconds,
-            endEpochSeconds = endEpochSeconds,
-            nextKey = nextKey,
+        executeRead(
+            session,
+            MiFitnessProtocol.buildDailyAggregateRequest(
+                metric = metric,
+                startEpochSeconds = startEpochSeconds,
+                endEpochSecondsExclusive = endEpochSecondsExclusive,
+                nextKey = nextKey,
+            ),
+            stage = "daily_aggregate",
         )
+    }
+
+    suspend fun fetchStepSeries(
+        session: MiFitnessSession,
+        startEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
+        nextKey: String = "",
+    ): String = withContext(Dispatchers.IO) {
+        executeRead(
+            session,
+            MiFitnessProtocol.buildTimeSeriesRequest(
+                metric = "steps",
+                startEpochSeconds = startEpochSeconds,
+                endEpochSecondsExclusive = endEpochSecondsExclusive,
+                nextKey = nextKey,
+            ),
+            stage = "step_series",
+        )
+    }
+
+    suspend fun fetchSportRecords(
+        session: MiFitnessSession,
+        startEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
+        nextKey: String = "",
+    ): String = withContext(Dispatchers.IO) {
+        executeRead(
+            session,
+            MiFitnessProtocol.buildSportRecordsRequest(
+                startEpochSeconds = startEpochSeconds,
+                endEpochSecondsExclusive = endEpochSecondsExclusive,
+                nextKey = nextKey,
+            ),
+            stage = "sport_records",
+        )
+    }
+
+    private suspend fun executeRead(
+        session: MiFitnessSession,
+        readRequest: MiFitnessReadRequest,
+        stage: String,
+    ): String {
         val form = MiFitnessProtocol.buildEncryptedForm(readRequest, session.ssecurityBase64)
         val url = MiFitnessProtocol.regionBaseUrl("cn").newBuilder()
             .addPathSegments(readRequest.path.removePrefix("/"))
@@ -111,12 +172,39 @@ class MiFitnessReadOnlyClient(
             )
             .get()
             .build()
-        val response = executeOnce(request, "steps").also(::requireSuccess)
-        MiFitnessProtocol.decryptResponse(
+        val response = executeReadWithRetry(request, stage)
+        return MiFitnessProtocol.decryptResponse(
             ciphertextBase64 = response.body,
             ssecurityBase64 = session.ssecurityBase64,
             nonceBase64 = form.nonceBase64,
         )
+    }
+
+    private suspend fun executeReadWithRetry(request: Request, stage: String): HttpResponse {
+        var retry = 0
+        while (true) {
+            val response = try {
+                executeOnce(request, stage)
+            } catch (network: MiFitnessNetworkException) {
+                if (retry >= MAX_TRANSIENT_READ_RETRIES) throw network
+                delay(transientBackoffMillis(retry++))
+                continue
+            }
+            try {
+                requireSuccess(response)
+                return response
+            } catch (rateLimit: MiFitnessRateLimitException) {
+                if (retry >= MAX_TRANSIENT_READ_RETRIES) throw rateLimit
+                val delayMillis = rateLimit.retryAfterMillis
+                    ?.coerceIn(MIN_RETRY_DELAY_MILLIS, MAX_RETRY_DELAY_MILLIS)
+                    ?: transientBackoffMillis(retry)
+                retry += 1
+                delay(delayMillis)
+            } catch (server: MiFitnessServerException) {
+                if (retry >= MAX_TRANSIENT_READ_RETRIES) throw server
+                delay(transientBackoffMillis(retry++))
+            }
+        }
     }
 
     private suspend fun exchangeSts(initialUrl: HttpUrl, cUserId: String, deviceId: String): String {
@@ -205,8 +293,22 @@ class MiFitnessReadOnlyClient(
         if (response.code == 401 || response.code == 403) {
             throw MiFitnessAuthenticationException("Xiaomi authentication failed (HTTP ${response.code})")
         }
+        if (response.code == 429) {
+            val retryAfterMillis = response.headers["Retry-After"]
+                ?.trim()
+                ?.toLongOrNull()
+                ?.takeIf { it >= 0L }
+                ?.let { seconds ->
+                    seconds.coerceAtMost(MAX_RETRY_DELAY_MILLIS / 1_000L) * 1_000L
+                }
+            throw MiFitnessRateLimitException(retryAfterMillis)
+        }
+        if (response.code in 500..599) throw MiFitnessServerException()
         throw MiFitnessNetworkException("Xiaomi request failed (HTTP ${response.code})")
     }
+
+    private fun transientBackoffMillis(retry: Int): Long =
+        (BASE_RETRY_DELAY_MILLIS * (1L shl retry.coerceIn(0, 4))).coerceAtMost(MAX_RETRY_DELAY_MILLIS)
 
     private fun cookies(response: HttpResponse): Map<String, String> =
         Cookie.parseAll(response.url, response.headers).associate { cookie -> cookie.name to cookie.value }
@@ -242,6 +344,10 @@ class MiFitnessReadOnlyClient(
 
     companion object {
         private const val MAX_STS_REQUESTS = 5
+        private const val MAX_TRANSIENT_READ_RETRIES = 2
+        private const val BASE_RETRY_DELAY_MILLIS = 250L
+        private const val MIN_RETRY_DELAY_MILLIS = 100L
+        private const val MAX_RETRY_DELAY_MILLIS = 5_000L
         private const val LOG_TAG = "MiFitnessHttp"
         private const val MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024L
         private val random = SecureRandom()

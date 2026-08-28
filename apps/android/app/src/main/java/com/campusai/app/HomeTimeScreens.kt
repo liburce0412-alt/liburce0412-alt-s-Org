@@ -56,20 +56,17 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.School
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Timer
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -97,13 +94,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
-import com.campusai.caesar.bandcontract.BandBridgeContract
 import com.campusai.core.designsystem.BrandMark
 import com.campusai.core.designsystem.GlassPanel
 import com.campusai.core.designsystem.PageMood
 import com.campusai.core.designsystem.SpectraAction
 import com.campusai.core.designsystem.SpectraColors
+import com.campusai.core.designsystem.SpectraDialog
 import com.campusai.core.designsystem.SpectraIconAction
+import com.campusai.core.designsystem.SpectraModalBottomSheet
 import com.campusai.core.designsystem.SpectraPageScaffold
 import com.campusai.core.designsystem.SpectraPrimaryButton
 import com.campusai.core.designsystem.SpectraStateKind
@@ -115,12 +113,14 @@ import com.campusai.core.designsystem.SpectraTheme
 import com.campusai.core.designsystem.TelemetryChip
 import com.campusai.core.model.TimeRecord
 import com.campusai.core.model.UiState
-import com.campusai.core.health.BandHistorySyncState
-import com.campusai.core.health.BandLiveState
 import com.campusai.core.health.HealthAvailability
 import com.campusai.core.health.HealthFreshness
+import com.campusai.core.health.HealthMetricKey
+import com.campusai.core.health.HealthMetricStatus
+import com.campusai.core.health.HealthMetricTimeSeries
+import com.campusai.core.health.HealthMetrics
+import com.campusai.core.health.HealthSnapshot
 import com.campusai.core.health.HealthPermissionActivity
-import com.campusai.core.health.healthExportGap
 import com.campusai.core.health.mifitness.MiFitnessSummaryHealthGateway
 import com.campusai.features.ai.CaesarHealthUiState
 import com.campusai.features.ai.MiFitnessUiStatus
@@ -151,10 +151,6 @@ fun HomeScreen(
     healthState: CaesarHealthUiState,
     onRefreshHealth: () -> Unit,
     onSyncMiFitnessSteps: () -> Unit,
-    onStartBand: () -> Unit,
-    onStopBand: () -> Unit,
-    onSyncBandHistory: () -> Unit,
-    onBandDiagnostics: () -> Unit,
     contentPadding: PaddingValues,
 ) {
     val context = LocalContext.current
@@ -256,17 +252,13 @@ fun HomeScreen(
             }
         }
         item {
-            Band9StatusCard(
+            HealthOverviewCard(
                 state = healthState,
                 onRefresh = onRefreshHealth,
                 onCloudRefresh = onSyncMiFitnessSteps,
                 onPermissions = {
                     healthPermissionLauncher.launch(Intent(context, HealthPermissionActivity::class.java))
                 },
-                onStartBand = onStartBand,
-                onStopBand = onStopBand,
-                onSyncHistory = onSyncBandHistory,
-                onDiagnostics = onBandDiagnostics,
             )
         }
         item {
@@ -386,138 +378,51 @@ fun HomeScreen(
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
-private fun Band9StatusCard(
+private fun HealthOverviewCard(
     state: CaesarHealthUiState,
     onRefresh: () -> Unit,
     onCloudRefresh: () -> Unit,
     onPermissions: () -> Unit,
-    onStartBand: () -> Unit,
-    onStopBand: () -> Unit,
-    onSyncHistory: () -> Unit,
-    onDiagnostics: () -> Unit,
 ) {
     var showDetails by rememberSaveable { mutableStateOf(false) }
+    var showTechnicalDetails by rememberSaveable { mutableStateOf(false) }
     val cloudConfigured = state.miFitnessConfigured
-    val cloudSnapshot = state.snapshot?.takeIf {
-        MiFitnessSummaryHealthGateway.SOURCE_ID in it.originPackages
+    val snapshot = state.snapshot?.takeIf { candidate ->
+        !cloudConfigured || MiFitnessSummaryHealthGateway.SOURCE_ID in candidate.originPackages
     }
-    val displayState = if (cloudConfigured) state.copy(snapshot = cloudSnapshot, band = null) else state
-    val band = displayState.band
+    val displayState = state.copy(snapshot = snapshot)
     val cloudFailure = state.miFitnessStatus in setOf(
         MiFitnessUiStatus.NO_DATA,
         MiFitnessUiStatus.AUTH_ERROR,
         MiFitnessUiStatus.NETWORK_ERROR,
         MiFitnessUiStatus.STORAGE_ERROR,
     )
-    val listening = band?.bridgeState == BandLiveState.LISTENING
-    val bandFresh = band?.isFresh() == true
-    val liveCapabilityMask = BandBridgeContract.Capability.REALTIME_HEART_RATE or
-        BandBridgeContract.Capability.REALTIME_STEPS or
-        BandBridgeContract.Capability.BATTERY or
-        BandBridgeContract.Capability.WEARING_STATE
-    val hasRealtimeCapability = band?.capabilityBits?.and(liveCapabilityMask) != 0L
-    val hasRealtimeBattery = band?.capabilityBits
-        ?.and(BandBridgeContract.Capability.BATTERY) != 0L
-    val hasFreshLiveHealthMetric = bandFresh && band?.let {
-        (it.heartRateBpm != null && it.capabilityBits.and(BandBridgeContract.Capability.REALTIME_HEART_RATE) != 0L) ||
-            (it.stepDelta != null && it.capabilityBits.and(BandBridgeContract.Capability.REALTIME_STEPS) != 0L)
-    } == true
-    val snapshot = displayState.snapshot
-    val hasVerifiedHistoryData = snapshot?.metrics?.let { metrics ->
-        listOf(
-            metrics.steps,
-            metrics.distanceMeters,
-            metrics.activeCaloriesKcal,
-            metrics.heartRateAverageBpm,
-            metrics.heartRateMaximumBpm,
-            metrics.restingHeartRateBpm,
-            metrics.oxygenSaturationAveragePercent,
-            metrics.sleepMinutes,
-            metrics.sleepStageCount,
-            metrics.workoutCount,
-        ).any { it != null }
-    } == true
-    val statusText = if (cloudConfigured) {
-        when {
-            state.miFitnessSyncing -> "正在读取云端步数"
-            state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> "云端暂无今日记录"
-            cloudFailure && hasVerifiedHistoryData -> "缓存可用 · 本次刷新失败"
-            cloudFailure -> "云端刷新失败"
-            hasVerifiedHistoryData -> "云端步数已缓存"
-            else -> "等待手动刷新"
-        }
-    } else when (band?.bridgeState) {
-        BandLiveState.LISTENING -> when {
-            hasFreshLiveHealthMetric -> "实时数据已读取"
-            hasRealtimeCapability -> "实时数据已过期"
-            else -> "Bridge 正在监听"
-        }
-        BandLiveState.IDLE -> "Bridge 已就绪"
-        BandLiveState.ERROR -> "Bridge 需要处理"
-        BandLiveState.UNAVAILABLE, null -> when (state.availability) {
-            HealthAvailability.Available -> if (hasVerifiedHistoryData) "历史数据已读取" else "已授权 · 尚无数据"
-            is HealthAvailability.MissingPermissions -> "等待健康授权"
-            else -> "链路待检查"
-        }
+    val metrics = historicalHealthMetrics(displayState)
+    val summaryMetrics = healthSummaryMetrics(displayState)
+    val sourceRows = healthSourceRows(displayState)
+    val stepSeries = snapshot?.metricTimeSeries?.get(HealthMetricKey.STEPS)
+        ?.takeIf { it.points.isNotEmpty() }
+    val hasData = metrics.isNotEmpty()
+    val issueNotice = healthMetricIssueNotice(displayState)
+    val statusText = when {
+        state.loading || state.miFitnessSyncing -> "更新中"
+        cloudConfigured && state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> "今天暂无记录"
+        cloudFailure && hasData -> "缓存可用 · 刷新失败"
+        cloudFailure -> "刷新失败"
+        snapshot?.freshness == HealthFreshness.STALE -> "缓存已过期"
+        hasData -> "已更新"
+        state.availability is HealthAvailability.MissingPermissions -> "待授权"
+        else -> "暂无数据"
     }
     val statusTone = when {
-        cloudConfigured && state.miFitnessSyncing -> SpectraStatusTone.INFO
         cloudConfigured && state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> SpectraStatusTone.WARNING
-        cloudConfigured && cloudFailure -> SpectraStatusTone.ERROR
-        cloudConfigured && hasVerifiedHistoryData -> SpectraStatusTone.SUCCESS
-        cloudConfigured -> SpectraStatusTone.STALE
-        hasFreshLiveHealthMetric -> SpectraStatusTone.SUCCESS
-        band?.bridgeState == BandLiveState.ERROR -> SpectraStatusTone.ERROR
-        state.availability is HealthAvailability.MissingPermissions -> SpectraStatusTone.WARNING
-        hasVerifiedHistoryData || listening || band?.bridgeState == BandLiveState.IDLE -> SpectraStatusTone.INFO
-        else -> SpectraStatusTone.STALE
-    }
-    val summaryMetrics = bandSummaryMetrics(displayState)
-    val historicalMetrics = historicalHealthMetrics(displayState)
-    val liveMetrics = liveHealthMetrics(displayState)
-    val zeroFilledDailyMetrics = buildList {
-        if (displayedDailySteps(displayState) == 0L && snapshot?.metrics?.steps == null) add("步数")
-        if (displayedDailySleepMinutes(displayState) == 0L && snapshot?.metrics?.sleepMinutes == null) add("睡眠")
-    }
-    val sourceRows = healthSourceRows(displayState)
-    val exportGap = healthExportGap(snapshot)
-    val sourceNames = buildList {
-        snapshot?.originPackages?.sorted()?.map(::healthSourceName)?.let(::addAll)
-        if (hasFreshLiveHealthMetric) band?.source?.takeIf(String::isNotBlank)?.let { add(healthSourceName(it)) }
-    }.distinct()
-    val summaryStatus = when {
-        state.loading || state.miFitnessSyncing -> "更新中"
-        cloudConfigured && state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> "云端暂无记录"
-        cloudConfigured && cloudFailure -> "刷新失败"
-        cloudConfigured && summaryMetrics.isEmpty() -> "待刷新"
-        summaryMetrics.isEmpty() && state.availability is HealthAvailability.MissingPermissions -> "待授权"
-        summaryMetrics.isEmpty() -> "暂无数据"
-        hasFreshLiveHealthMetric -> "实时"
-        snapshot?.freshness == HealthFreshness.STALE -> "已过期"
-        else -> "已更新"
-    }
-    val summaryTone = when {
-        cloudConfigured && state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> SpectraStatusTone.WARNING
-        cloudConfigured && cloudFailure -> SpectraStatusTone.ERROR
-        summaryMetrics.isEmpty() && state.availability is HealthAvailability.MissingPermissions -> SpectraStatusTone.WARNING
-        summaryMetrics.isEmpty() -> SpectraStatusTone.STALE
-        hasFreshLiveHealthMetric -> SpectraStatusTone.SUCCESS
+        cloudFailure -> SpectraStatusTone.ERROR
         snapshot?.freshness == HealthFreshness.STALE -> SpectraStatusTone.STALE
+        hasData -> SpectraStatusTone.SUCCESS
+        state.availability is HealthAvailability.MissingPermissions -> SpectraStatusTone.WARNING
         else -> SpectraStatusTone.INFO
     }
-    val summaryMeta = buildList {
-        sourceNames.takeIf { it.isNotEmpty() }?.let { names ->
-            add(
-                if (names.size <= 2) names.joinToString(" + ")
-                else "${names.take(2).joinToString(" + ")} 等 ${names.size} 个来源",
-            )
-        }
-        when {
-            hasFreshLiveHealthMetric -> add("实时")
-            snapshot?.freshness != null -> add(snapshot.freshness.compactLabel())
-        }
-        snapshot?.lastSyncAt?.let { add("更新 ${compactHealthClock(it)}") }
-    }.joinToString("  ·  ").ifBlank { "点击查看数据来源与连接状态" }
+    val summaryMeta = if (hasData) "查看今日健康详情" else "同步后显示今日健康数据"
 
     GlassPanel(
         modifier = Modifier.fillMaxWidth(),
@@ -532,27 +437,32 @@ private fun Band9StatusCard(
                 Icon(Icons.Rounded.FavoriteBorder, null, tint = MaterialTheme.colorScheme.onSurface.copy(.78f))
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(if (cloudConfigured) "Mi Fitness 云端" else "小米手环 9", style = MaterialTheme.typography.titleLarge)
+                    Text(if (cloudConfigured) "Mi Fitness" else "健康数据", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        "今日健康",
+                        if (cloudConfigured) "今日健康" else "Health Connect",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface.copy(.52f),
                     )
                 }
-                SpectraStatus(summaryStatus, tone = summaryTone)
+                SpectraStatus(statusText, tone = statusTone)
                 Icon(
                     Icons.Rounded.KeyboardArrowDown,
-                    contentDescription = if (cloudConfigured) "查看 Mi Fitness 云端详情" else "查看手环详情",
+                    contentDescription = "查看健康数据详情",
                     modifier = Modifier.padding(start = 4.dp).size(20.dp),
                     tint = MaterialTheme.colorScheme.onSurface.copy(.52f),
                 )
             }
             Spacer(Modifier.height(16.dp))
             if (summaryMetrics.isEmpty()) {
-                Text("还没有可展示的健康记录", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    if (hasData) "${metrics.size} 项健康数据已同步" else "还没有可展示的健康记录",
+                    style = MaterialTheme.typography.titleMedium,
+                )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    if (cloudConfigured) "请在详情中手动读取今天的云端步数。" else "详情里可以检查授权、数据来源和同步状态。",
+                    if (hasData) "点击查看完整的今日健康详情。"
+                    else if (cloudConfigured) "同步后会在这里显示今日健康数据。"
+                    else "请检查 Health Connect 授权与已写入的数据来源。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(.56f),
                 )
@@ -571,12 +481,7 @@ private fun Band9StatusCard(
     }
 
     if (showDetails) {
-        ModalBottomSheet(
-            onDismissRequest = { showDetails = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-            containerColor = MaterialTheme.colorScheme.surface.copy(.96f),
-        ) {
+        SpectraModalBottomSheet(onDismissRequest = { showDetails = false }) {
             LazyColumn(
                 modifier = Modifier.fillMaxWidth().navigationBarsPadding(),
                 contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 28.dp),
@@ -585,9 +490,9 @@ private fun Band9StatusCard(
                 item {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text(if (cloudConfigured) "Mi Fitness 云端" else "小米手环 9", style = MaterialTheme.typography.headlineMedium)
+                            Text(if (cloudConfigured) "Mi Fitness" else "Health Connect", style = MaterialTheme.typography.headlineMedium)
                             Text(
-                                if (cloudConfigured) "中国区 · 当天步数 · 手动只读" else "健康数据、连接与同步",
+                                if (cloudConfigured) "今日健康" else "本机健康记录",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurface.copy(.56f),
                             )
@@ -597,83 +502,29 @@ private fun Band9StatusCard(
                 }
                 item {
                     HealthSheetSection("今日健康") {
-                        if (historicalMetrics.isEmpty() && liveMetrics.isEmpty()) {
+                        if (metrics.isEmpty()) {
                             Text(
-                                "当前没有可验证的健康指标。",
+                                issueNotice ?: "今天还没有可显示的健康数据。",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurface.copy(.58f),
                             )
                         } else {
-                            liveMetrics.forEach { HealthMetricDetailRow(it, badge = "实时") }
-                            historicalMetrics.forEach { HealthMetricDetailRow(it) }
-                            if (zeroFilledDailyMetrics.isNotEmpty()) {
+                            metrics.forEach { HealthMetricDetailRow(it) }
+                            issueNotice?.let { notice ->
                                 Text(
-                                    "${zeroFilledDailyMetrics.joinToString("、")}本次没有记录，页面按 0 展示；原始 Health Connect 值仍为空。",
+                                    notice,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(.52f),
+                                    color = MaterialTheme.colorScheme.onSurface.copy(.56f),
                                 )
                             }
                         }
                     }
                 }
-                item {
-                    HealthSheetSection("数据来源") {
-                        if (sourceRows.isEmpty()) {
-                            Text(
-                                "还没有可识别的数据来源。",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurface.copy(.58f),
-                            )
-                        } else {
-                            sourceRows.forEach { source ->
-                                HealthDetailRow(source.name, source.channel)
-                                Text(
-                                    source.raw,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(.46f),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
+                if (stepSeries != null) {
+                    item {
+                        HealthSheetSection("今日步数分时") {
+                            StepSeriesList(stepSeries)
                         }
-                    }
-                }
-                item {
-                    HealthSheetSection("连接与同步") {
-                        if (cloudConfigured) {
-                            HealthDetailRow("读取方式", "仅手动 · 只读云端")
-                            HealthDetailRow("手环连接", "不连接，不抢占 Mi Fitness")
-                            HealthDetailRow("数据范围", "中国区 · 当天步数")
-                            HealthDetailRow("聚合规则", "暂定求和 · 首次请与 Mi Fitness 对照")
-                            if (cloudFailure) {
-                                HealthDetailRow("最近刷新", miFitnessFailureLabel(state.miFitnessStatus), error = true)
-                            }
-                        } else {
-                            HealthDetailRow("Bridge", band?.bridgeState?.detailLabel() ?: "不可用")
-                            band?.connected?.takeIf { bandFresh }?.let { HealthDetailRow("手环连接", if (it) "已连接" else "未连接") }
-                            band?.batteryPercent?.takeIf { bandFresh && hasRealtimeBattery }?.let { battery ->
-                                val charging = band?.charging == true
-                                HealthDetailRow("手环电量", "$battery%${if (charging) " · 充电中" else ""}")
-                            }
-                            band?.wearing?.takeIf { bandFresh }?.let {
-                                HealthDetailRow("佩戴状态", if (it) "已佩戴" else "未佩戴")
-                            }
-                            band?.sleeping?.takeIf { bandFresh }?.let {
-                                HealthDetailRow("手环判定", if (it) "睡眠中" else "非睡眠状态")
-                            }
-                            band?.observedAt?.takeIf { it > 0L }?.let {
-                                HealthDetailRow("实时快照", "${compactHealthTime(it)} · ${if (bandFresh) "有效" else "已过期"}")
-                            }
-                            HealthDetailRow("历史同步", band?.historySyncState?.detailLabel() ?: "不可用")
-                        }
-                        snapshot?.lastSyncAt?.let { HealthDetailRow("数据更新", compactHealthTime(it)) }
-                        snapshot?.freshness?.let { HealthDetailRow("新鲜度", it.compactLabel()) }
-                        exportGap?.let { HealthDetailRow("导出缺口", it.message) }
-                        if (!cloudConfigured) HealthDetailRow("健康权限", state.permissionLabel())
-                        if (!cloudConfigured) band?.statusMessage?.takeIf(String::isNotBlank)?.let { HealthDetailRow("Bridge 说明", it) }
-                        state.actionMessage?.takeIf(String::isNotBlank)?.let { HealthDetailRow("最近操作", it) }
-                        if (!cloudConfigured) state.healthError?.takeIf(String::isNotBlank)?.let { HealthDetailRow("Health Connect 错误", it, error = true) }
-                        state.bandError?.takeIf(String::isNotBlank)?.let { HealthDetailRow("Bridge 错误", it, error = true) }
                     }
                 }
                 item {
@@ -681,58 +532,53 @@ private fun Band9StatusCard(
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         if (cloudConfigured) {
                             SpectraAction(
-                                text = if (state.miFitnessSyncing) "正在读取" else "手动刷新云端步数",
+                                text = if (state.miFitnessSyncing) "正在同步" else "同步今日健康",
                                 onClick = onCloudRefresh,
                                 modifier = Modifier.fillMaxWidth(),
                                 enabled = !state.loading && !state.miFitnessSyncing,
                                 emphasized = true,
                                 mood = PageMood.HEALTH,
                             )
-                            Text(
-                                "不会连接手环，也不会启动 Gadgetbridge 或 CaesarBandBridge。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(.52f),
-                            )
                         } else {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                SpectraAction(
-                                    text = if (needsPermission) "授权健康数据" else "刷新数据",
-                                    onClick = if (needsPermission) onPermissions else onRefresh,
-                                    modifier = Modifier.weight(1f),
-                                    enabled = !state.loading,
-                                    emphasized = true,
-                                    mood = PageMood.HEALTH,
-                                )
-                                SpectraAction(
-                                    text = when (band?.historySyncState) {
-                                        BandHistorySyncState.CONNECTING -> "正在连接"
-                                        BandHistorySyncState.REQUESTED -> "正在同步"
-                                        else -> "同步历史"
-                                    },
-                                    onClick = onSyncHistory,
-                                    modifier = Modifier.weight(1f),
-                                    enabled = !state.loading && band?.historySyncState !in setOf(
-                                        BandHistorySyncState.CONNECTING,
-                                        BandHistorySyncState.REQUESTED,
-                                    ),
-                                    mood = PageMood.HEALTH,
-                                )
-                            }
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                SpectraAction(
-                                    text = if (listening) "停止实时" else "开始实时",
-                                    onClick = if (listening) onStopBand else onStartBand,
-                                    modifier = Modifier.weight(1f),
-                                    selected = listening,
-                                    enabled = !state.loading,
-                                    mood = PageMood.HEALTH,
-                                )
-                                SpectraAction(
-                                    text = "链路诊断",
-                                    onClick = onDiagnostics,
-                                    modifier = Modifier.weight(1f),
-                                    mood = PageMood.HEALTH,
-                                )
+                            SpectraAction(
+                                text = if (needsPermission) "授权健康数据" else "刷新数据",
+                                onClick = if (needsPermission) onPermissions else onRefresh,
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !state.loading,
+                                emphasized = true,
+                                mood = PageMood.HEALTH,
+                            )
+                        }
+                    }
+                }
+                item {
+                    HealthSheetSection("更多信息") {
+                        TextButton(onClick = { showTechnicalDetails = !showTechnicalDetails }) {
+                            Text(if (showTechnicalDetails) "收起数据与同步信息" else "查看数据与同步信息")
+                        }
+                        AnimatedVisibility(showTechnicalDetails) {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                sourceRows.forEach { source ->
+                                    HealthDetailRow(source.name, source.channel)
+                                }
+                                if (cloudConfigured) {
+                                    HealthDetailRow("同步范围", "今日健康")
+                                    HealthDetailRow("手环连接", "CampusAI 不连接手环")
+                                    HealthDetailRow("本机存储", "健康摘要加密保存")
+                                    if (cloudFailure) {
+                                        HealthDetailRow("最近同步", miFitnessFailureLabel(state.miFitnessStatus), error = true)
+                                    }
+                                } else {
+                                    HealthDetailRow("健康权限", state.permissionLabel())
+                                }
+                                snapshot?.lastSyncAt?.let { HealthDetailRow("数据更新", compactHealthTime(it)) }
+                                snapshot?.freshness?.let { HealthDetailRow("新鲜度", it.compactLabel()) }
+                                state.actionMessage?.takeIf(String::isNotBlank)?.let {
+                                    HealthDetailRow("最近操作", it)
+                                }
+                                state.healthError?.takeIf(String::isNotBlank)?.let {
+                                    HealthDetailRow("同步状态", "暂时不可用", error = true)
+                                }
                             }
                         }
                     }
@@ -742,95 +588,192 @@ private fun Band9StatusCard(
     }
 }
 
-private data class HealthMetricItem(val label: String, val value: String, val unit: String? = null)
+private data class HealthMetricItem(
+    val label: String,
+    val value: String,
+    val unit: String? = null,
+    val statusLabel: String? = null,
+    val error: Boolean = false,
+)
 
 private data class HealthSourceRow(val name: String, val raw: String, val channel: String)
 
-private fun bandSummaryMetrics(state: CaesarHealthUiState): List<HealthMetricItem> {
-    val band = state.band
+private fun healthSummaryMetrics(state: CaesarHealthUiState): List<HealthMetricItem> {
     val snapshot = state.snapshot
-    val freshBand = band?.isFresh() == true
-    val realtimeHeartRate = band?.heartRateBpm?.takeIf {
-        freshBand && band?.capabilityBits?.and(BandBridgeContract.Capability.REALTIME_HEART_RATE) != 0L
-    }
     val candidates = buildList<Pair<Int, HealthMetricItem>> {
-        if (realtimeHeartRate != null) add(100 to HealthMetricItem("当前心率", realtimeHeartRate.toString(), "bpm"))
-        else snapshot?.metrics?.heartRateAverageBpm?.let { add(96 to HealthMetricItem("平均心率", it.toString(), "bpm")) }
-        displayedDailySteps(state)?.let { add(92 to HealthMetricItem("今日步数", formatHealthLong(it), "步")) }
-        displayedDailySleepMinutes(state)?.let { add(88 to compactSleepMetric(it)) }
+        snapshot?.metrics?.steps?.let { add(100 to HealthMetricItem("今日步数", formatHealthLong(it), "步")) }
+        snapshot?.metrics?.sleepMinutes?.let { add(96 to compactSleepMetric(it)) }
+        snapshot?.metrics?.heartRateAverageBpm?.let { add(92 to HealthMetricItem("平均心率", it.toString(), "bpm")) }
         snapshot?.metrics?.oxygenSaturationAveragePercent?.let {
-            add(84 to HealthMetricItem("平均血氧", formatHealthDouble(it), "%"))
+            add(88 to HealthMetricItem("平均血氧", formatHealthDouble(it), "%"))
         }
         snapshot?.metrics?.activeCaloriesKcal?.let {
-            add(80 to HealthMetricItem("活动消耗", formatHealthDouble(it), "千卡"))
+            add(84 to HealthMetricItem("活动消耗", formatHealthDouble(it), "千卡"))
         }
-        snapshot?.metrics?.restingHeartRateBpm?.let { add(60 to HealthMetricItem("静息心率", it.toString(), "bpm")) }
-        snapshot?.metrics?.workoutCount?.let { add(50 to HealthMetricItem("训练", it.toString(), "次")) }
-        snapshot?.metrics?.distanceMeters?.let { add(40 to distanceMetric(it)) }
+        snapshot?.metrics?.activityDurationMinutes?.let {
+            add(82 to HealthMetricItem("活动时长", formatSleepMinutes(it)))
+        }
+        snapshot?.metrics?.restingHeartRateBpm?.let { add(80 to HealthMetricItem("静息心率", it.toString(), "bpm")) }
+        snapshot?.metrics?.stressAverage?.let { add(78 to HealthMetricItem("平均压力", it.toString(), "分")) }
+        snapshot?.metrics?.workoutCount?.let { add(76 to HealthMetricItem("训练", it.toString(), "次")) }
+        snapshot?.metrics?.distanceMeters?.let { add(72 to distanceMetric(it)) }
     }
     return candidates.sortedByDescending { it.first }.take(3).map { it.second }
 }
 
-private fun liveHealthMetrics(state: CaesarHealthUiState): List<HealthMetricItem> {
-    val band = state.band?.takeIf { it.isFresh() } ?: return emptyList()
+private fun historicalHealthMetrics(state: CaesarHealthUiState): List<HealthMetricItem> {
+    val snapshot = state.snapshot ?: return emptyList()
     return buildList {
-        band.heartRateBpm?.takeIf {
-            band.capabilityBits.and(BandBridgeContract.Capability.REALTIME_HEART_RATE) != 0L
-        }?.let { add(HealthMetricItem("当前心率", it.toString(), "bpm")) }
-        band.stepDelta?.takeIf {
-            band.capabilityBits.and(BandBridgeContract.Capability.REALTIME_STEPS) != 0L
-        }?.let { add(HealthMetricItem("实时步数增量", formatHealthLong(it), "步")) }
+        HealthMetricKey.entries.forEach { key -> healthMetricItem(snapshot, key)?.let(::add) }
+        snapshot.metrics.sleepStageCount?.let {
+            add(HealthMetricItem("睡眠阶段记录", it.toString(), "段", statusLabel = "时序"))
+        }
     }
 }
 
-private fun historicalHealthMetrics(state: CaesarHealthUiState): List<HealthMetricItem> = buildList {
-    val metrics = state.snapshot?.metrics ?: return@buildList
-    displayedDailySteps(state)?.let { add(HealthMetricItem("今日步数", formatHealthLong(it), "步")) }
-    metrics.distanceMeters?.let { add(distanceMetric(it)) }
-    metrics.activeCaloriesKcal?.let { add(HealthMetricItem("活动消耗", formatHealthDouble(it), "千卡")) }
-    metrics.heartRateAverageBpm?.let { add(HealthMetricItem("平均心率", it.toString(), "bpm")) }
-    metrics.heartRateMaximumBpm?.let { add(HealthMetricItem("最高心率", it.toString(), "bpm")) }
-    metrics.restingHeartRateBpm?.let { add(HealthMetricItem("静息心率", it.toString(), "bpm")) }
-    metrics.oxygenSaturationAveragePercent?.let { add(HealthMetricItem("平均血氧", formatHealthDouble(it), "%")) }
-    displayedDailySleepMinutes(state)?.let { add(HealthMetricItem("睡眠时长", formatSleepMinutes(it))) }
-    metrics.sleepStageCount?.let { add(HealthMetricItem("睡眠阶段", it.toString(), "段")) }
-    metrics.workoutCount?.let { add(HealthMetricItem("训练记录", it.toString(), "次")) }
+private fun healthMetricItem(snapshot: HealthSnapshot, key: HealthMetricKey): HealthMetricItem? {
+    val typed = snapshot.metricValues[key]
+    val fallback = healthMetricFallback(snapshot.metrics, key)
+    val status = typed?.status ?: if (fallback == null) HealthMetricStatus.EMPTY else HealthMetricStatus.AVAILABLE
+    if (status in setOf(HealthMetricStatus.EMPTY, HealthMetricStatus.ERROR)) return null
+    val value = typed?.value ?: fallback ?: return null
+    val statusLabel = when (status) {
+        HealthMetricStatus.AVAILABLE -> null
+        HealthMetricStatus.EMPTY -> "无记录"
+        HealthMetricStatus.PARTIAL -> "部分数据"
+        HealthMetricStatus.STALE -> "已过期"
+        HealthMetricStatus.ERROR -> typed?.reasonCode?.let { "错误 · $it" } ?: "读取错误"
+    }
+    val formatted = formatRegisteredHealthMetric(key, value)
+    return formatted.copy(
+        statusLabel = statusLabel,
+        error = false,
+    )
 }
 
-internal fun displayedDailySteps(state: CaesarHealthUiState): Long? =
-    state.snapshot?.metrics?.steps ?: 0L.takeIf {
-        shouldDisplayMissingDailyMetricsAsZero(state) && "steps" in state.snapshot.orEmptyMissingFields()
+internal fun healthMetricIssueNotice(state: CaesarHealthUiState): String? {
+    if (state.miFitnessStatus == MiFitnessUiStatus.NO_DATA && state.snapshot?.metricValues.orEmpty().values.none {
+            it.value != null && it.status !in setOf(HealthMetricStatus.EMPTY, HealthMetricStatus.ERROR)
+        }
+    ) {
+        return "今天还没有同步到健康数据。"
     }
-
-internal fun displayedDailySleepMinutes(state: CaesarHealthUiState): Long? =
-    state.snapshot?.metrics?.sleepMinutes ?: 0L.takeIf {
-        shouldDisplayMissingDailyMetricsAsZero(state) && "sleep" in state.snapshot.orEmptyMissingFields()
+    val metricError = state.snapshot?.metricValues.orEmpty().values.any { it.status == HealthMetricStatus.ERROR }
+    val seriesError = state.snapshot?.metricTimeSeries.orEmpty().values.any { it.status == HealthMetricStatus.ERROR }
+    val refreshError = state.miFitnessStatus in setOf(
+        MiFitnessUiStatus.AUTH_ERROR,
+        MiFitnessUiStatus.NETWORK_ERROR,
+        MiFitnessUiStatus.STORAGE_ERROR,
+    )
+    return if (metricError || seriesError || refreshError || !state.healthError.isNullOrBlank()) {
+        "部分健康数据暂未同步，请稍后重试。"
+    } else {
+        null
     }
-
-private fun shouldDisplayMissingDailyMetricsAsZero(state: CaesarHealthUiState): Boolean {
-    if (state.miFitnessConfigured) return false
-    val snapshot = state.snapshot ?: return false
-    val isToday = snapshot.period.key in setOf("today", "day", "今天", "今日")
-    val hasSourceEvidence = snapshot.originPackages.isNotEmpty() ||
-        state.band?.historySyncState == BandHistorySyncState.FINISHED
-    return !state.loading &&
-        state.healthError.isNullOrBlank() &&
-        state.availability == HealthAvailability.Available &&
-        isToday &&
-        hasSourceEvidence
 }
 
-private fun com.campusai.core.health.HealthSnapshot?.orEmptyMissingFields(): Set<String> =
-    this?.missingFields.orEmpty()
+private fun healthMetricFallback(metrics: HealthMetrics, key: HealthMetricKey): Double? = when (key) {
+    HealthMetricKey.STEPS -> metrics.steps?.toDouble()
+    HealthMetricKey.DISTANCE_METERS -> metrics.distanceMeters
+    HealthMetricKey.ACTIVE_CALORIES_KCAL -> metrics.activeCaloriesKcal
+    HealthMetricKey.ACTIVITY_DURATION_MINUTES -> metrics.activityDurationMinutes?.toDouble()
+    HealthMetricKey.VALID_STAND_COUNT -> metrics.validStandCount?.toDouble()
+    HealthMetricKey.SLEEP_MINUTES -> metrics.sleepMinutes?.toDouble()
+    HealthMetricKey.SLEEP_DEEP_MINUTES -> metrics.sleepDeepMinutes?.toDouble()
+    HealthMetricKey.SLEEP_LIGHT_MINUTES -> metrics.sleepLightMinutes?.toDouble()
+    HealthMetricKey.SLEEP_REM_MINUTES -> metrics.sleepRemMinutes?.toDouble()
+    HealthMetricKey.SLEEP_AWAKE_MINUTES -> metrics.sleepAwakeMinutes?.toDouble()
+    HealthMetricKey.SLEEP_SCORE -> metrics.sleepScore?.toDouble()
+    HealthMetricKey.HEART_RATE_AVERAGE_BPM -> metrics.heartRateAverageBpm?.toDouble()
+    HealthMetricKey.HEART_RATE_MAXIMUM_BPM -> metrics.heartRateMaximumBpm?.toDouble()
+    HealthMetricKey.HEART_RATE_MINIMUM_BPM -> metrics.heartRateMinimumBpm?.toDouble()
+    HealthMetricKey.RESTING_HEART_RATE_BPM -> metrics.restingHeartRateBpm?.toDouble()
+    HealthMetricKey.OXYGEN_SATURATION_AVERAGE_PERCENT -> metrics.oxygenSaturationAveragePercent
+    HealthMetricKey.OXYGEN_SATURATION_MAXIMUM_PERCENT -> metrics.oxygenSaturationMaximumPercent
+    HealthMetricKey.OXYGEN_SATURATION_MINIMUM_PERCENT -> metrics.oxygenSaturationMinimumPercent
+    HealthMetricKey.STRESS_AVERAGE -> metrics.stressAverage?.toDouble()
+    HealthMetricKey.STRESS_MAXIMUM -> metrics.stressMaximum?.toDouble()
+    HealthMetricKey.STRESS_MINIMUM -> metrics.stressMinimum?.toDouble()
+    HealthMetricKey.VO2_MAX_AVERAGE -> metrics.vo2MaxAverage
+    HealthMetricKey.VO2_MAX_MAXIMUM -> metrics.vo2MaxMaximum
+    HealthMetricKey.VO2_MAX_MINIMUM -> metrics.vo2MaxMinimum
+    HealthMetricKey.WORKOUT_COUNT -> metrics.workoutCount?.toDouble()
+}
 
-private fun healthSourceRows(state: CaesarHealthUiState): List<HealthSourceRow> = buildList {
-    state.snapshot?.originPackages?.sorted()?.forEach { raw ->
-        add(HealthSourceRow(healthSourceName(raw), raw, if (raw == "mi_fitness_cloud_cn") "只读云端缓存" else "Health Connect"))
-    }
-    state.band?.source?.takeIf(String::isNotBlank)?.let { raw ->
-        add(HealthSourceRow(healthSourceName(raw), raw, "实时 Bridge"))
-    }
-}.distinctBy { "${it.channel}:${it.raw}" }
+private fun healthMetricLabel(key: HealthMetricKey): String = when (key) {
+    HealthMetricKey.STEPS -> "今日步数"
+    HealthMetricKey.DISTANCE_METERS -> "活动距离"
+    HealthMetricKey.ACTIVE_CALORIES_KCAL -> "活动消耗"
+    HealthMetricKey.ACTIVITY_DURATION_MINUTES -> "活动时长"
+    HealthMetricKey.VALID_STAND_COUNT -> "有效站立"
+    HealthMetricKey.SLEEP_MINUTES -> "睡眠时长"
+    HealthMetricKey.SLEEP_DEEP_MINUTES -> "深睡时长"
+    HealthMetricKey.SLEEP_LIGHT_MINUTES -> "浅睡时长"
+    HealthMetricKey.SLEEP_REM_MINUTES -> "REM 时长"
+    HealthMetricKey.SLEEP_AWAKE_MINUTES -> "清醒时长"
+    HealthMetricKey.SLEEP_SCORE -> "睡眠评分"
+    HealthMetricKey.HEART_RATE_AVERAGE_BPM -> "平均心率"
+    HealthMetricKey.HEART_RATE_MAXIMUM_BPM -> "最高心率"
+    HealthMetricKey.HEART_RATE_MINIMUM_BPM -> "最低心率"
+    HealthMetricKey.RESTING_HEART_RATE_BPM -> "静息心率"
+    HealthMetricKey.OXYGEN_SATURATION_AVERAGE_PERCENT -> "平均血氧"
+    HealthMetricKey.OXYGEN_SATURATION_MAXIMUM_PERCENT -> "最高血氧"
+    HealthMetricKey.OXYGEN_SATURATION_MINIMUM_PERCENT -> "最低血氧"
+    HealthMetricKey.STRESS_AVERAGE -> "平均压力"
+    HealthMetricKey.STRESS_MAXIMUM -> "最高压力"
+    HealthMetricKey.STRESS_MINIMUM -> "最低压力"
+    HealthMetricKey.VO2_MAX_AVERAGE -> "平均最大摄氧量"
+    HealthMetricKey.VO2_MAX_MAXIMUM -> "最高最大摄氧量"
+    HealthMetricKey.VO2_MAX_MINIMUM -> "最低最大摄氧量"
+    HealthMetricKey.WORKOUT_COUNT -> "训练记录"
+}
+
+private fun formatRegisteredHealthMetric(key: HealthMetricKey, value: Double): HealthMetricItem = when (key) {
+    HealthMetricKey.DISTANCE_METERS -> distanceMetric(value)
+    HealthMetricKey.SLEEP_MINUTES,
+    HealthMetricKey.SLEEP_DEEP_MINUTES,
+    HealthMetricKey.SLEEP_LIGHT_MINUTES,
+    HealthMetricKey.SLEEP_REM_MINUTES,
+    HealthMetricKey.SLEEP_AWAKE_MINUTES,
+    HealthMetricKey.ACTIVITY_DURATION_MINUTES -> HealthMetricItem(healthMetricLabel(key), formatSleepMinutes(value.toLong()))
+    HealthMetricKey.ACTIVE_CALORIES_KCAL -> HealthMetricItem(healthMetricLabel(key), formatHealthDouble(value), "千卡")
+    HealthMetricKey.HEART_RATE_AVERAGE_BPM,
+    HealthMetricKey.HEART_RATE_MAXIMUM_BPM,
+    HealthMetricKey.HEART_RATE_MINIMUM_BPM,
+    HealthMetricKey.RESTING_HEART_RATE_BPM -> HealthMetricItem(healthMetricLabel(key), formatHealthDouble(value), "bpm")
+    HealthMetricKey.OXYGEN_SATURATION_AVERAGE_PERCENT,
+    HealthMetricKey.OXYGEN_SATURATION_MAXIMUM_PERCENT,
+    HealthMetricKey.OXYGEN_SATURATION_MINIMUM_PERCENT -> HealthMetricItem(healthMetricLabel(key), formatHealthDouble(value), "%")
+    HealthMetricKey.STRESS_AVERAGE,
+    HealthMetricKey.STRESS_MAXIMUM,
+    HealthMetricKey.STRESS_MINIMUM,
+    HealthMetricKey.SLEEP_SCORE -> HealthMetricItem(healthMetricLabel(key), formatHealthDouble(value), "分")
+    HealthMetricKey.VO2_MAX_AVERAGE,
+    HealthMetricKey.VO2_MAX_MAXIMUM,
+    HealthMetricKey.VO2_MAX_MINIMUM -> HealthMetricItem(healthMetricLabel(key), formatHealthDouble(value), "ml/kg/min")
+    HealthMetricKey.STEPS -> HealthMetricItem(healthMetricLabel(key), formatHealthLong(value.toLong()), "步")
+    HealthMetricKey.VALID_STAND_COUNT -> HealthMetricItem(healthMetricLabel(key), value.toLong().toString(), "次")
+    HealthMetricKey.WORKOUT_COUNT -> HealthMetricItem(healthMetricLabel(key), value.toLong().toString(), "次")
+}
+
+internal fun displayedDailySteps(state: CaesarHealthUiState): Long? = state.snapshot?.metrics?.steps
+
+internal fun displayedDailySleepMinutes(state: CaesarHealthUiState): Long? = state.snapshot?.metrics?.sleepMinutes
+
+internal fun displayedHealthMetricLabels(state: CaesarHealthUiState): List<String> =
+    historicalHealthMetrics(state).map(HealthMetricItem::label)
+
+internal fun displayedStepSeries(state: CaesarHealthUiState): HealthMetricTimeSeries? =
+    state.snapshot?.metricTimeSeries?.get(HealthMetricKey.STEPS)?.takeIf { it.points.isNotEmpty() }
+
+private fun healthSourceRows(state: CaesarHealthUiState): List<HealthSourceRow> =
+    state.snapshot?.originPackages.orEmpty().sorted().map { raw ->
+        HealthSourceRow(
+            name = healthSourceName(raw),
+            raw = raw,
+            channel = if (raw == MiFitnessSummaryHealthGateway.SOURCE_ID) "已同步" else "Health Connect",
+        )
+    }.distinctBy { "${it.channel}:${it.raw}" }
 
 @Composable
 private fun HealthMetricStrip(metrics: List<HealthMetricItem>) {
@@ -864,6 +807,46 @@ private fun HealthMetricStrip(metrics: List<HealthMetricItem>) {
 }
 
 @Composable
+private fun StepSeriesList(series: HealthMetricTimeSeries) {
+    if (series.status == HealthMetricStatus.PARTIAL || series.status == HealthMetricStatus.STALE) {
+        Text(
+            if (series.status == HealthMetricStatus.PARTIAL) "部分分时记录" else "来自上次同步",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(.56f),
+        )
+    }
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(series.points, key = { it.epochMillis }) { point ->
+            GlassPanel(
+                modifier = Modifier.width(92.dp).height(68.dp),
+                radius = 16,
+                shadowed = false,
+                optical = false,
+            ) {
+                Column(
+                    modifier = Modifier.align(Alignment.Center).padding(horizontal = 10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        compactHealthClock(point.epochMillis),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(.54f),
+                    )
+                    Text(
+                        "${formatHealthLong(point.value.toLong())} 步",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun HealthSheetSection(title: String, content: @Composable () -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(title, style = MaterialTheme.typography.titleMedium)
@@ -872,7 +855,7 @@ private fun HealthSheetSection(title: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun HealthMetricDetailRow(metric: HealthMetricItem, badge: String? = null) {
+private fun HealthMetricDetailRow(metric: HealthMetricItem, badge: String? = metric.statusLabel) {
     HealthDetailRow(
         label = buildString {
             append(metric.label)
@@ -882,6 +865,7 @@ private fun HealthMetricDetailRow(metric: HealthMetricItem, badge: String? = nul
             append(metric.value)
             metric.unit?.takeIf(String::isNotBlank)?.let { append(" $it") }
         },
+        error = metric.error,
     )
 }
 
@@ -899,22 +883,6 @@ private fun HealthDetailRow(label: String, value: String, error: Boolean = false
     }
 }
 
-private fun BandLiveState.detailLabel(): String = when (this) {
-    BandLiveState.UNAVAILABLE -> "不可用"
-    BandLiveState.IDLE -> "已就绪"
-    BandLiveState.LISTENING -> "实时会话中"
-    BandLiveState.ERROR -> "需要处理"
-}
-
-private fun BandHistorySyncState.detailLabel(): String = when (this) {
-    BandHistorySyncState.UNAVAILABLE -> "不可用"
-    BandHistorySyncState.IDLE -> "待命"
-    BandHistorySyncState.CONNECTING -> "正在连接手环"
-    BandHistorySyncState.REQUESTED -> "等待 Bridge 回执"
-    BandHistorySyncState.FINISHED -> "最近一次已完成"
-    BandHistorySyncState.ERROR -> "同步失败"
-}
-
 private fun CaesarHealthUiState.permissionLabel(): String = when (availability) {
     HealthAvailability.Available -> "已授权 $grantedPermissionCount / $requiredPermissionCount 项"
     is HealthAvailability.MissingPermissions -> "缺少 ${availability.permissions.size} 项权限"
@@ -924,17 +892,15 @@ private fun CaesarHealthUiState.permissionLabel(): String = when (availability) 
 }
 
 private fun healthSourceName(raw: String): String = when {
-    raw == "mi_fitness_cloud_cn" -> "Mi Fitness 云端（中国区）"
+    raw == "mi_fitness_cloud_cn" -> "Mi Fitness"
     raw == "com.mi.health" -> "Mi Fitness"
-    raw.contains("gadgetbridge", ignoreCase = true) -> "Gadgetbridge"
-    raw.contains("caesar", ignoreCase = true) -> "CaesarBandBridge"
     else -> raw.substringAfterLast('.').ifBlank { raw }
 }
 
 private fun miFitnessFailureLabel(status: MiFitnessUiStatus): String = when (status) {
-    MiFitnessUiStatus.NO_DATA -> "Mi Fitness 云端暂未返回今天的步数记录。"
+    MiFitnessUiStatus.NO_DATA -> "今天还没有同步到健康数据。"
     MiFitnessUiStatus.AUTH_ERROR -> "身份验证失败，请在个人页更新凭据。"
-    MiFitnessUiStatus.NETWORK_ERROR -> "网络或云端响应异常，请稍后重试。"
+    MiFitnessUiStatus.NETWORK_ERROR -> "网络异常，请稍后重试。"
     MiFitnessUiStatus.STORAGE_ERROR -> "系统安全存储暂不可用。"
     else -> "本次刷新未完成。"
 }
@@ -1226,8 +1192,23 @@ fun TimeScreen(
         onIcs = { showImport = false; icsPicker.launch(arrayOf("text/calendar", "application/ics", "application/octet-stream")) },
         onManual = { showImport = false; importDrafts = listOf(CourseDraft("新课程", 1, 8*60, 9*60+40)) },
     )
-    if (importing) AlertDialog(onDismissRequest = {}, confirmButton = {}, title = { Text("正在读取课程表") }, text = { Text("识别在本机完成。完成后会先让你确认，不会直接覆盖现有课程。") })
-    importError?.let { message -> AlertDialog(onDismissRequest = { importError = null }, confirmButton = { TextButton(onClick = { importError = null }) { Text("知道了") } }, title = { Text("暂时没能导入") }, text = { Text(message) }) }
+    if (importing) SpectraDialog(onDismissRequest = {}) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("正在读取课程表", style = MaterialTheme.typography.titleLarge)
+            Text("识别在本机完成。完成后会先让你确认，不会直接覆盖现有课程。")
+        }
+    }
+    importError?.let { message ->
+        SpectraDialog(onDismissRequest = { importError = null }) {
+            Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("暂时没能导入", style = MaterialTheme.typography.titleLarge)
+                Text(message)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { importError = null }) { Text("知道了") }
+                }
+            }
+        }
+    }
     importDrafts?.let { drafts -> SchedulePreviewDialog(
         initial = drafts,
         onDismiss = { importDrafts = null },
@@ -1240,26 +1221,27 @@ fun TimeScreen(
 
 @Composable
 private fun ImportScheduleSourceDialog(onDismiss:()->Unit,onImage:()->Unit,onIcs:()->Unit,onManual:()->Unit) {
-    AlertDialog(
-        onDismissRequest=onDismiss,
-        title={Text("导入课程表")},
-        text={Column(verticalArrangement=Arrangement.spacedBy(10.dp)){
+    SpectraDialog(onDismissRequest=onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement=Arrangement.spacedBy(10.dp)){
+            Text("导入课程表", style = MaterialTheme.typography.titleLarge)
             Text("最省事的方式是截取一张完整课程表。识别结果会先进入可编辑预览。", style=MaterialTheme.typography.bodyMedium)
             SpectraPrimaryButton("选择课程表截图",onImage,Modifier.fillMaxWidth(),icon=Icons.Rounded.ImageSearch)
             TextButton(onClick=onIcs,Modifier.fillMaxWidth()){Text("从 .ics 日历文件导入")}
             TextButton(onClick=onManual,Modifier.fillMaxWidth()){Text("手动添加课程")}
-        }},
-        confirmButton={}, dismissButton={TextButton(onClick=onDismiss){Text("取消")}}, shape=RoundedCornerShape(24.dp),
-    )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick=onDismiss){Text("取消")}
+            }
+        }
+    }
 }
 
 @Composable
 private fun SchedulePreviewDialog(initial:List<CourseDraft>,onDismiss:()->Unit,onConfirm:(List<CourseDraft>)->Unit) {
     var drafts by remember(initial){mutableStateOf(initial)}
-    AlertDialog(
-        onDismissRequest=onDismiss,
-        title={Text("确认课程（${drafts.size}）")},
-        text={LazyColumn(Modifier.fillMaxWidth().height(420.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
+    SpectraDialog(onDismissRequest=onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("确认课程（${drafts.size}）", style = MaterialTheme.typography.titleLarge)
+            LazyColumn(Modifier.fillMaxWidth().height(420.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
             item{Text("识别可能会把教室当作课程名。请在保存前快速检查；重复课程会自动跳过。",style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurface.copy(.62f))}
             items(drafts.size){index-> val item=drafts[index]; var startText by remember(index,item.startMinute){mutableStateOf(formatClock(item.startMinute))}; var endText by remember(index,item.endMinute){mutableStateOf(formatClock(item.endMinute))}; GlassPanel(Modifier.fillMaxWidth(),radius=16){Column(Modifier.padding(12.dp)){
                 OutlinedTextField(item.name,{value->drafts=drafts.toMutableList().also{it[index]=item.copy(name=value)}},label={Text("课程名")},singleLine=true,shape=RoundedCornerShape(12.dp))
@@ -1282,10 +1264,13 @@ private fun SchedulePreviewDialog(initial:List<CourseDraft>,onDismiss:()->Unit,o
                 if(item.endMinute<=item.startMinute) Text("结束时间必须晚于开始时间。",color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodyMedium)
                 TextButton(onClick={drafts=drafts.filterIndexed{i,_->i!=index}}){Text("移除这条")}
             }}}
-        }},
-        confirmButton={TextButton(enabled=drafts.any{it.name.isNotBlank()}&&drafts.all{it.endMinute>it.startMinute},onClick={onConfirm(drafts.filter{it.name.isNotBlank()})}){Text("确认导入")}},
-        dismissButton={TextButton(onClick=onDismiss){Text("取消")}}, shape=RoundedCornerShape(24.dp),
-    )
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick=onDismiss){Text("取消")}
+                TextButton(enabled=drafts.any{it.name.isNotBlank()}&&drafts.all{it.endMinute>it.startMinute},onClick={onConfirm(drafts.filter{it.name.isNotBlank()})}){Text("确认导入")}
+            }
+        }
+    }
 }
 
 @Composable
@@ -1311,12 +1296,9 @@ private fun AddTimeRecordDialog(initial: TimeRecord?, onDismiss: () -> Unit, onS
     var category by rememberSaveable(initial?.id) { mutableStateOf(initial?.category ?: "学习") }
     var note by rememberSaveable(initial?.id) { mutableStateOf(initial?.remark.orEmpty()) }
     var minutes by rememberSaveable(initial?.id) { mutableIntStateOf(initial?.durationMinutes?.toInt()?.coerceIn(5, 240) ?: 50) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        shape = RoundedCornerShape(24.dp),
-        title = { Text(if (initial == null) "补录时间" else "编辑记录", style = MaterialTheme.typography.headlineMedium) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    SpectraDialog(onDismissRequest = onDismiss) {
+            Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(if (initial == null) "补录时间" else "编辑记录", style = MaterialTheme.typography.headlineMedium)
                 OutlinedTextField(title, { title = it }, label = { Text("做了什么") }, singleLine = true, shape = RoundedCornerShape(12.dp))
                 OutlinedTextField(category, { category = it }, label = { Text("分类") }, singleLine = true, shape = RoundedCornerShape(12.dp))
                 Text("$minutes 分钟", style = MaterialTheme.typography.labelMedium)
@@ -1333,11 +1315,12 @@ private fun AddTimeRecordDialog(initial: TimeRecord?, onDismiss: () -> Unit, onS
                     steps = 46,
                 )
                 OutlinedTextField(note, { note = it }, label = { Text("描述（可选）") }, shape = RoundedCornerShape(12.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("取消") }
+                    TextButton(enabled = title.isNotBlank(), onClick = { onSave(title.trim(), category.trim().ifEmpty { "其他" }, minutes.toLong(), note.trim()) }) { Text("保存") }
+                }
             }
-        },
-        confirmButton = { TextButton(enabled = title.isNotBlank(), onClick = { onSave(title.trim(), category.trim().ifEmpty { "其他" }, minutes.toLong(), note.trim()) }) { Text("保存") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
+    }
 }
 
 @Composable

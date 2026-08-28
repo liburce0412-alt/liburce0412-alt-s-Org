@@ -120,7 +120,7 @@ class MiFitnessReadOnlyClientTest {
     }
 
     @Test
-    fun `steps fetch uses only CN read endpoint and decrypts response`() = runTest {
+    fun `steps fetch uses only verified CN daily aggregate endpoint and decrypts response`() = runTest {
         val plaintext = "{\"code\":0,\"result\":{\"data_list\":[],\"has_more\":false,\"next_key\":\"\"}}"
         val session = MiFitnessSession(
             userId = "12345",
@@ -147,11 +147,27 @@ class MiFitnessReadOnlyClientTest {
         val request = transport.requests.single()
         assertEquals("GET", request.method)
         assertEquals("hlth.io.mi.com", request.url.host)
-        assertEquals("/app/v1/data/get_fitness_data_by_time", request.url.encodedPath)
+        assertEquals("/app/v1/data/get_aggregated_fitness_data_by_time", request.url.encodedPath)
         assertEquals("cn", request.header("region_tag"))
         assertEquals("true", request.header("handleparams"))
         assertTrue(request.header("Cookie").orEmpty().contains("serviceToken=synthetic-service-token"))
         assertTrue(request.url.queryParameterNames.containsAll(setOf("data", "rc4_hash__", "signature", "_nonce")))
+    }
+
+    @Test
+    fun `read retries bounded rate limit and server failures before succeeding`() = runTest {
+        val plaintext = "{\"code\":0,\"result\":{\"data_list\":[],\"has_more\":false,\"next_key\":\"\"}}"
+        val session = syntheticSession()
+        val transport = SyntheticInterceptor(
+            { syntheticResponse(code = 429, headers = Headers.headersOf("Retry-After", "0")) },
+            { syntheticResponse(code = 503) },
+            { request -> encryptedResponse(request, session, plaintext) },
+        )
+
+        val actual = client(transport).fetchSteps(session, 100L, 200L)
+
+        assertEquals(plaintext, actual)
+        assertEquals(3, transport.requests.size)
     }
 
     @Test
@@ -177,6 +193,29 @@ class MiFitnessReadOnlyClientTest {
 
     private fun client(interceptor: Interceptor): MiFitnessReadOnlyClient =
         MiFitnessReadOnlyClient(OkHttpClient.Builder().addInterceptor(interceptor).build())
+
+    private fun syntheticSession() = MiFitnessSession(
+        userId = "12345",
+        cUserId = "synthetic-c-user",
+        serviceToken = "synthetic-service-token",
+        ssecurityBase64 = "c3NlY3VyaXR5LXZlY3Rvcg==",
+        deviceId = "synthetic-device",
+        tokenRefreshed = false,
+    )
+
+    private fun encryptedResponse(
+        request: Request,
+        session: MiFitnessSession,
+        plaintext: String,
+    ): SyntheticResponse {
+        val nonce = MiFitnessProtocol.decodeBase64(checkNotNull(request.url.queryParameter("_nonce")), "nonce")
+        val security = MiFitnessProtocol.decodeBase64(session.ssecurityBase64, "ssecurity")
+        val ciphertext = MiFitnessProtocol.rc4Crypt(
+            MiFitnessProtocol.signedNonce(security, nonce),
+            plaintext.toByteArray(),
+        )
+        return syntheticResponse(body = MiFitnessProtocol.encodeBase64(ciphertext))
+    }
 
     private class SyntheticInterceptor(
         vararg handlers: (Request) -> SyntheticResponse,

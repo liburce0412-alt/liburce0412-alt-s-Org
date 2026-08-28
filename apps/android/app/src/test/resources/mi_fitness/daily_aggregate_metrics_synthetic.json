@@ -1,0 +1,14 @@
+{
+  "fixture_kind": "synthetic_desensitized",
+  "responses": {
+    "steps": {"code":0,"result":{"data_list":[{"tag":"daily_report","key":"steps","time":1777305600,"zone_offset":28800,"sid":"synthetic-aggregate","zone_name":"Asia/Shanghai","source_sid_list":["synthetic-phone","synthetic-band"],"value":{"steps":3210,"distance":1926,"calories":123,"goal":6000}}],"next_key":"","has_more":false}},
+    "calories": {"code":0,"result":{"data_list":[{"tag":"daily_report","key":"calories","time":1777305600,"zone_offset":28800,"sid":"synthetic-aggregate","zone_name":"Asia/Shanghai","source_sid_list":["synthetic-band"],"value":{"calories":123,"goal":300}}],"next_key":"","has_more":false}},
+    "intensity": {"code":0,"result":{"data_list":[{"tag":"daily_report","key":"intensity","time":1777305600,"zone_offset":28800,"sid":"synthetic-aggregate","zone_name":"Asia/Shanghai","source_sid_list":["synthetic-band"],"value":{"duration":28,"process":[]}}],"next_key":"","has_more":false}},
+    "valid_stand": {"code":0,"result":{"data_list":[{"tag":"daily_report","key":"valid_stand","time":1777305600,"zone_offset":28800,"sid":"synthetic-aggregate","zone_name":"Asia/Shanghai","source_sid_list":["synthetic-band"],"value":{"count":7}}],"next_key":"","has_more":false}},
+    "sleep": {"code":0,"result":{"data_list":[{"tag":"daily_report","key":"sleep","time":1777305600,"zone_offset":28800,"sid":"synthetic-aggregate","zone_name":"Asia/Shanghai","source_sid_list":["synthetic-band"],"value":{"total_duration":421,"sleep_deep_duration":86,"sleep_light_duration":247,"sleep_rem_duration":74,"sleep_awake_duration":14,"sleep_score":83}}],"next_key":"","has_more":false}},
+    "heart_rate": {"code":0,"result":{"data_list":[{"tag":"daily_report","key":"heart_rate","time":1777305600,"zone_offset":28800,"sid":"synthetic-aggregate","zone_name":"Asia/Shanghai","source_sid_list":["synthetic-band"],"value":{"avg_hr":72,"max_hr":131,"min_hr":49,"avg_rhr":58}}],"next_key":"","has_more":false}},
+    "spo2": {"code":0,"result":{"data_list":[{"tag":"daily_report","key":"spo2","time":1777305600,"zone_offset":28800,"sid":"synthetic-aggregate","zone_name":"Asia/Shanghai","source_sid_list":["synthetic-band"],"value":{"avg_spo2":97.2,"max_spo2":100,"min_spo2":92,"lack_spo2_count":0}}],"next_key":"","has_more":false}},
+    "stress": {"code":0,"result":{"data_list":[{"tag":"daily_report","key":"stress","time":1777305600,"zone_offset":28800,"sid":"synthetic-aggregate","zone_name":"Asia/Shanghai","source_sid_list":["synthetic-band"],"value":{"avg_stress":31,"max_stress":68,"min_stress":12,"stress_scale":1}}],"next_key":"","has_more":false}},
+    "vo2_max": {"code":0,"result":{"data_list":[{"tag":"daily_report","key":"vo2_max","time":1777305600,"zone_offset":28800,"sid":"synthetic-aggregate","zone_name":"Asia/Shanghai","source_sid_list":["synthetic-band"],"value":{"avg_vo2_max":42.5,"max_vo2_max":44.1,"min_vo2_max":40.8}}],"next_key":"","has_more":false}}
+  }
+}

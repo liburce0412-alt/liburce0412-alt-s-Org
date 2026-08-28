@@ -50,9 +50,9 @@ Caesar∞ 把模型、工具、个人上下文和原生界面放进同一个受�
 | App 工具 | Tool Registry、DAG、类型校验、确认、幂等与动态结果卡片 | 模型不能绕过 Repository / UseCase 直接碰数据库或令牌 |
 | 个人记忆 | 短期任务状态、结构化摘要、确认式长期记忆 | 原始健康序列不写入记忆；拒绝后不落库 |
 | 健康感知 | Health Connect 聚合、来源、新鲜度、首页折叠卡和 Agent 健康工具 | Caesar∞ 解释状态与趋势，不提供医疗诊断 |
-| Band 9 | 独立 CaesarBandBridge、签名保护 IPC、Gadgetbridge 同步触发与诊断 | 私有协议仍有固件差异；实时指标只在 Bridge 声明能力时显示 |
+| 小米手环健康 | Mi Fitness 每日健康汇总、步数分时趋势与本机加密缓存 | 新鲜度取决于 Mi Fitness 先完成手环到云端的同步；CampusAI 不建立 BLE/SPP 连接 |
 | 动态界面 | 类型化 CaesarSurface Compose Renderer、A2UI 稳定子集适配 | 未知组件、任意 URI、代码、SQL 与未注册 `actionId` 会被拒绝 |
-| 受控联网 | Supabase 业务数据；用户主动选择时直连 DeepSeek | 本地模型不会自行联网；V1 没有通用 `web.search` / `web.open` |
+| 受控联网 | Supabase 业务数据；用户主动选择时直连 DeepSeek 或 Google Gemini | 本地模型不会自行联网；V1 没有通用 `web.search` / `web.open` |
 
 ## 从一句话到一次可靠执行
 
@@ -62,18 +62,16 @@ flowchart LR
     Runtime --> Route{规则路由 / DAG}
     Route --> Fast[FAST · Qwen3.5-2B]
     Route --> Deep[DEEP · Qwen3.5-4B]
-    Route --> Cloud[DeepSeek · 主动选择]
+    Route --> Cloud[DeepSeek / Gemini · 主动选择]
     Fast --> Guard[输出守卫 / Tool Registry]
     Deep --> Guard
     Cloud --> Guard
     Guard --> Policy[参数 · 风险 · 确认 · 幂等]
     Policy --> UseCase[Repository / UseCase]
     UseCase --> UI[文本 + CaesarSurface]
-    Band[Band 9] --> GB[Gadgetbridge]
-    GB --> HC[Health Connect]
-    GB --> Bridge[CaesarBandBridge]
-    HC --> Health[Health Gateway]
-    Bridge --> Health
+    Band[Band 9] --> MiFitness[Mi Fitness / 小米互联服务]
+    MiFitness --> XiaomiCloud[小米健康云]
+    XiaomiCloud --> Health[Mi Fitness Cloud Health Gateway]
     Health --> Guard
 ```
 
@@ -95,10 +93,8 @@ flowchart LR
 ```powershell
 .\gradlew.bat `
   :apps:android:app:testDebugUnitTest `
-  :apps:android:app:assembleDebug `
-  :apps:android:bandbridge:testDebugUnitTest `
-  :apps:android:bandbridge:lintDebug `
-  :apps:android:bandbridge:assembleDebug
+  :apps:android:app:lintDebug `
+  :apps:android:app:assembleDebug
 ```
 
 Robolectric 首次运行会下载对应 Android SDK 测试包。在网络受限环境中，可以先运行目标测试类和 `assembleDebug`；不要把依赖下载超时误判成源码失败，也不要在物理手机上运行 `connectedDebugAndroidTest`。
@@ -130,36 +126,33 @@ npm run test
 Caesar∞ V1 只有两类受控网络入口：
 
 1. **Supabase**：登录、树洞、心愿墙、资料与同步等应用业务。
-2. **DeepSeek**：用户在设备上保存自己的 Key，并主动选择 DeepSeek 后直连固定域名 `api.deepseek.com`。
+2. **Agent Provider**：用户在设备上分别保存自己的 DeepSeek 或 Google Gemini Key，并在发起请求前显式选择 Provider。
 
-DeepSeek Key 使用 Android Keystore 加密、不参与备份、不上传 Supabase。图片、健康、手环和明确的设备私密上下文不会自动发送到云端。
+两类 Provider Key 均使用 Android Keystore 加密、不参与备份、不上传 Supabase。图片、手环设备信息和分钟级健康原始数据不会发送到云端；仅在用户本次明确勾选“附带健康摘要”时，才附带必要的当日汇总。
 
 当前没有把 OkHttp、WebView、浏览器 Cookie 或任意 URL 暴露给模型。未来若加入通用联网，会以有限的只读 `web.search` / `web.open` 工具实现，并对 HTTPS、重定向、私网地址、响应类型、大小和超时做代码校验。网页内容始终视为不可信数据，不能修改系统指令、权限、记忆规则或工具风险级别。
 
 ## 小米手环与健康数据
 
-稳定历史链路：
+当前只读链路：
 
 ```text
-Band 9 → Gadgetbridge → Health Connect → Caesar Health Gateway
-                    ↘ CaesarBandBridge → 签名保护状态 IPC
+Band 9 → Mi Fitness / 小米互联服务 → 小米健康云 → CampusAI 只读健康缓存
 ```
 
 接入顺序：
 
-1. 在 Gadgetbridge 中完成真实 Band 9 配对和历史同步；不要从调试页面添加测试设备。
-2. 在 Health Connect 给 Gadgetbridge 写权限、给 Caesar∞ 读权限。
-3. 安装与主应用同签名的 CaesarBandBridge。
-4. 在首页健康卡中刷新；完整来源、同步时间、连接状态和诊断位于折叠详情。
+1. 保持 Mi Fitness 与小米互联服务正常运行，先在 Mi Fitness 中完成手环同步。
+2. 在 CampusAI 设置中显式保存本机加密的小米账户凭据。
+3. 点击手动刷新，只读获取当天官方日汇总；缓存未命中时不会用 0 或其他数据源冒充。
+4. 在首页健康卡查看指标、来源、状态与最近同步时间。
 
-手环本地有数据，不代表 Gadgetbridge 能为当前固件解析并导出同样的记录。V1 不承诺实时 SpO₂、实时压力、血压、VO₂max 或完整睡眠状态；不支持的实时能力必须显示为不可用，不能填入伪造值。
+该链路不会抢占手环的蓝牙连接。云端暂无、部分、过期或读取失败的指标会显示明确状态，不会填入伪造值。历史逆向调研保留在 `docs/` 和 `work/` 中，但 Gadgetbridge/CaesarBandBridge 已不是产品运行链路。
 
 ## 仓库地图
 
 ```text
 apps/android/app/            Caesar∞ Android 主应用
-apps/android/band-contract/  主应用与 Bridge 的稳定契约
-apps/android/bandbridge/     独立 Band 伴侣 APK
 apps/admin/                  React / TypeScript 管理台
 supabase/                    migration、RLS、RPC 与 Edge Functions
 design/                      SPECTRA、品牌与视觉验收规范
@@ -176,21 +169,20 @@ scripts/                     评测、设备测试与数据诊断脚本
 - 日志与 Trace 不保存密码、令牌、配对密钥、原始健康序列或模型思维链。
 - `artifacts/`、模型权重、本机报告和设备抓取内容已被 Git 忽略。
 
-Band Bridge 只使用公开可观察的 Android / Gadgetbridge Intent 边界与自有高层契约。若分发 Gadgetbridge 派生组件或复制其实现，必须另行完成 AGPL 与署名审查。
+小米云凭据与健康摘要使用 Android Keystore 包装的本机加密存储，并排除在备份和设备迁移之外。
 
 ## V1 验证状态
 
 已完成：
 
-- Android 主应用与 CaesarBandBridge debug 构建；
+- Android 主应用 debug 构建；
 - arm64 MNN JNI 编译与链接；
-- Band Bridge lint；
 - 输出守卫、生成代次、路由并发、本地/云选择、健康证据和健康展示定向测试；
 - 2B / 4B 独立下载、Agent 闭环、幂等、图片、语音、Health Connect 与数据库迁移测试源码。
 
 仍需长期验证：
 
-- Band 9 在更多固件上的稳定连接、完整历史解析和实时指标；
+- Mi Fitness 私有云端接口的长期兼容性、限流恢复和各指标的真机对照；
 - dark mode、全部 SPECTRA 环境、低质量档与长期热表现；
 - Robolectric Android 36 测试依赖在所有网络环境中的稳定获取。
 

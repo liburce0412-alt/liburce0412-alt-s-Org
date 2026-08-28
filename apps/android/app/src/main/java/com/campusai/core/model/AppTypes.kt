@@ -3,9 +3,13 @@ package com.campusai.core.model
 enum class ThemeMode { SYSTEM, LIGHT, DARK }
 enum class MotionMode { ON, OFF }
 enum class RenderQuality { AUTO, LOW, HIGH }
-enum class SpectraEnvironment { ORIGINAL, OCEAN, ULTRAVIOLET, EMBER }
+/**
+ * Persisted by enum name and consumed by the renderer as an ordinal.
+ * Keep the legacy entries in their original order; append new environments only.
+ */
+enum class SpectraEnvironment { ORIGINAL, OCEAN, ULTRAVIOLET, EMBER, AURORA }
 enum class AiMode { FAST, DEEP }
-enum class AiProvider { AUTO, DEEPSEEK, LOCAL }
+enum class AiProvider { AUTO, DEEPSEEK, GOOGLE_GEMINI, LOCAL }
 
 sealed interface LocalModelState {
     data object NotDownloaded : LocalModelState
@@ -38,6 +42,10 @@ data class AiConversationMessage(
     val content: String,
     val presentationJson: String? = null,
     val attachmentPaths: List<String> = emptyList(),
+    /** In-memory provider state needed to continue DeepSeek reasoning; never persisted or rendered. */
+    val providerReasoningContent: String? = null,
+    /** A one-turn health disclosure must never be replayed into a later cloud request. */
+    val cloudHealthSensitive: Boolean = false,
 )
 data class AiReport(
     val id: String,

@@ -24,10 +24,10 @@ class MiFitnessProtocolTest {
 
     @Test
     fun `continuous sorted-field stream matches verified form`() {
-        val request = MiFitnessProtocol.buildReadRequest(
+        val request = MiFitnessProtocol.buildTimeSeriesRequest(
             metric = "steps",
             startEpochSeconds = 1_743_436_800L,
-            endEpochSeconds = 1_743_523_199L,
+            endEpochSecondsExclusive = 1_743_523_199L,
         )
         val nonce = MiFitnessProtocol.decodeBase64("AAECAwQFBgcAAAAq", "nonce")
 
@@ -46,6 +46,43 @@ class MiFitnessProtocolTest {
             ),
             actual.parameters,
         )
+    }
+
+    @Test
+    fun `official daily aggregate request matches APK snake case contract`() {
+        val request = MiFitnessProtocol.buildDailyAggregateRequest(
+            metric = "steps",
+            startEpochSeconds = 1_777_305_600L,
+            endEpochSecondsExclusive = 1_777_392_000L,
+            nextKey = "synthetic-next",
+        )
+        val payload = JSONObject(request.payloadJson)
+
+        assertEquals("GET", request.method)
+        assertEquals("/app/v1/data/get_aggregated_fitness_data_by_time", request.path)
+        assertEquals("daily_report", payload.getString("tag"))
+        assertEquals("steps", payload.getString("key"))
+        assertTrue(payload.getBoolean("reverse"))
+        assertEquals(100, payload.getInt("limit"))
+        assertEquals("synthetic-next", payload.getString("next_key"))
+        assertEquals(1_777_305_600L, payload.getLong("start_time"))
+        assertEquals(1_777_392_000L, payload.getLong("end_time"))
+        assertFalse(payload.has("startTime"))
+        assertFalse(payload.has("endTime"))
+        assertFalse(payload.has("nextKey"))
+    }
+
+    @Test
+    fun `sport record request uses verified read only endpoint`() {
+        val request = MiFitnessProtocol.buildSportRecordsRequest(100L, 200L)
+        val payload = JSONObject(request.payloadJson)
+
+        assertEquals("/app/v1/data/get_sport_records_by_time", request.path)
+        assertEquals("", payload.getString("category"))
+        assertEquals(100L, payload.getLong("start_time"))
+        assertEquals(200L, payload.getLong("end_time"))
+        assertEquals(50, payload.getInt("limit"))
+        assertTrue(payload.getBoolean("reverse"))
     }
 
     @Test
@@ -76,7 +113,7 @@ class MiFitnessProtocolTest {
             }
         }
         assertThrows(IllegalArgumentException::class.java) {
-            MiFitnessProtocol.buildReadRequest("sleep", 100L, 200L)
+            MiFitnessProtocol.buildDailyAggregateRequest("unknown", 100L, 200L)
         }
         listOf(
             "http://account.xiaomi.com/pass/serviceLogin",

@@ -48,7 +48,7 @@ class CaesarEvalScorerTest {
         val followUp = cases.first { it.id == "followup-01" }
         assertEquals(listOf("user", "assistant", "user"), followUp.conversationMessages().map { it.role })
         assertTrue(cases.first { it.id == "utf8-name-01" }.mustNotContain.contains("�"))
-        assertEquals("campusai_infinity_icon", cases.first { it.id == "vision-01" }.imageResource)
+        assertEquals("campusai_brand_mark", cases.first { it.id == "vision-01" }.imageResource)
         assertEquals("time.list_records", cases.first { it.id == "app-tool-01" }.expectedTool?.name)
         assertEquals("health.get_snapshot", cases.first { it.id == "health-tool-01" }.expectedTool?.name)
     }

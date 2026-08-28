@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- The mark owns no tile or background. Its 60dp silhouette stays inside the
+         adaptive-icon safe zone and can also sit directly on the SPECTRA field. -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M24,54 C24,33 43,29 54,49 C65,69 84,75 84,54 C84,33 65,29 54,49 C43,69 24,75 24,54"
+        android:strokeColor="#33162033"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="15" />
+
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M24,54 C24,33 43,29 54,49 C65,69 84,75 84,54 C84,33 65,29 54,49 C43,69 24,75 24,54"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="12.5">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:endX="84"
+                android:endY="76"
+                android:startX="24"
+                android:startY="32"
+                android:type="linear">
+                <item android:color="#FF4D789D" android:offset="0" />
+                <item android:color="#FFE6EEF3" android:offset="0.32" />
+                <item android:color="#FFAB755E" android:offset="0.55" />
+                <item android:color="#FFF2E9DF" android:offset="0.72" />
+                <item android:color="#FF31516C" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M24,51.8 C24.8,34.6 42.6,31.3 53.7,50.6 C64.8,69.9 82.5,73.1 84,56.2"
+        android:strokeColor="#B3FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="2.2" />
+</vector>

@@ -2,7 +2,7 @@ package com.campusai.core.ai
 
 import org.json.JSONObject
 
-/** Shared behavioral contract for local MNN and personal DeepSeek engines. */
+/** Shared behavioral contract for local MNN and personal BYOK cloud engines. */
 object AiSystemPolicy {
     fun instruction(structuredContextJson: String): String {
         val task = runCatching { JSONObject(structuredContextJson).optString("task") }

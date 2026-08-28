@@ -22,6 +22,8 @@ data class AiRequest(
     val sessionId: String = "",
     val ownerUserId: String = "",
     val userPrompt: String = "",
+    /** Default-deny cloud boundary; only a typed daily summary may be explicitly disclosed per turn. */
+    val cloudHealthDisclosure: CloudHealthDisclosure = CloudHealthDisclosure.Excluded,
 )
 
 sealed interface AiEvent {
@@ -41,6 +43,8 @@ sealed interface AiEvent {
         val elapsedMs: Long,
         val inputTokens: Long? = null,
         val outputTokens: Long? = null,
+        /** Provider-only continuation state; callers may keep it in memory but never persist, render or log it. */
+        val providerReasoningContent: String? = null,
     ) : AiEvent
     data class Error(val code: String, val message: String, val recoverable: Boolean = true) : AiEvent
 }

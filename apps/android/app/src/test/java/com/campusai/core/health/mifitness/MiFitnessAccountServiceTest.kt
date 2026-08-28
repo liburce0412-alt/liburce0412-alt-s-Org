@@ -1,5 +1,7 @@
 package com.campusai.core.health.mifitness
 
+import com.campusai.core.health.HealthMetricKey
+import com.campusai.core.health.HealthMetricStatus
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -55,20 +57,21 @@ class MiFitnessAccountServiceTest {
     }
 
     @Test
-    fun `valid credentials are saved when the cloud has no records without caching zero`() = runTest {
+    fun `valid credentials save an explicit empty metric snapshot without caching zero`() = runTest {
         val fixture = fixture()
         fixture.transport.response = emptyPage()
         fixture.storage.writes.clear()
 
-        val result = fixture.account.validateAndSave("22222", "candidate-token")
+        val summary = fixture.account.validateAndSave("22222", "candidate-token").getOrThrow()
 
-        assertEquals("no_cloud_data", (result.exceptionOrNull() as MiFitnessStepsSyncException).code)
+        assertNull(summary.steps)
+        assertEquals(HealthMetricStatus.EMPTY, summary.metricValues[HealthMetricKey.STEPS]?.status)
         val saved = checkNotNull(fixture.store.read())
         assertEquals("22222", saved.userId)
         assertEquals("refreshed-token", saved.passToken)
-        assertNull(fixture.cache.read(fixture.window.period, fixture.window.localDate, saved.accountScope))
-        assertEquals(1, fixture.storage.writes.size)
-        assertTrue(fixture.storage.writes.single().second.contains("\"passToken\":\"refreshed-token\""))
+        assertEquals(summary, fixture.cache.read(fixture.window.period, fixture.window.localDate, saved.accountScope))
+        assertEquals(2, fixture.storage.writes.size)
+        assertTrue(fixture.storage.writes.last().second.contains("\"passToken\":\"refreshed-token\""))
     }
 
     @Test
@@ -90,7 +93,7 @@ class MiFitnessAccountServiceTest {
                 checkNotNull(fixture.oldScope),
             )?.steps,
         )
-        assertEquals(1, fixture.storage.writes.size)
+        assertEquals(3, fixture.storage.writes.size)
     }
 
     @Test
@@ -140,7 +143,7 @@ class MiFitnessAccountServiceTest {
         val store = MiFitnessCredentialStore(storage)
         val cache = MiFitnessStepsCache(storage)
         val transport = AccountTransport()
-        val sync = MiFitnessStepsSyncService(store, transport, cache, FIXED_CLOCK)
+        val sync = MiFitnessStepsSyncService(store, transport, cache, FIXED_CLOCK, ZoneOffset.ofHours(8))
         val account = MiFitnessAccountService(store, cache, sync)
         val window = sync.todayWindow()
         var oldScope: String? = null
@@ -195,7 +198,7 @@ class MiFitnessAccountServiceTest {
         override suspend fun fetchSteps(
             session: MiFitnessSession,
             startEpochSeconds: Long,
-            endEpochSeconds: Long,
+            endEpochSecondsExclusive: Long,
             nextKey: String,
         ): String = response
     }
@@ -218,7 +221,7 @@ class MiFitnessAccountServiceTest {
     private companion object {
         val FIXED_CLOCK: Clock = Clock.fixed(Instant.parse("2026-08-27T04:00:00Z"), ZoneOffset.UTC)
         fun page(time: Long, steps: Long): String =
-            """{"code":0,"result":{"data_list":[{"time":$time,"key":"steps","value":"{\"steps\":$steps}"}],"has_more":false,"next_key":""}}"""
+            """{"code":0,"result":{"data_list":[{"tag":"daily_report","key":"steps","time":$time,"zone_offset":28800,"sid":"synthetic-aggregate","zone_name":"Asia/Shanghai","source_sid_list":["synthetic-source"],"value":"{\"steps\":$steps,\"distance\":${steps / 2},\"calories\":${steps / 20}}"}],"has_more":false,"next_key":""}}"""
 
         fun emptyPage(): String =
             """{"code":0,"result":{"data_list":[],"has_more":false,"next_key":""}}"""

@@ -6,7 +6,12 @@ import com.campusai.core.health.CacheFirstHealthGateway
 import com.campusai.core.health.HealthAvailability
 import com.campusai.core.health.HealthFreshness
 import com.campusai.core.health.HealthGatewayFactory
+import com.campusai.core.health.HealthMetricKey
+import com.campusai.core.health.HealthMetricStatus
+import com.campusai.core.health.HealthMetricTimeSeries
+import com.campusai.core.health.HealthMetricUnit
 import com.campusai.core.health.HealthPeriod
+import com.campusai.core.health.HealthTimeSeriesPoint
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -23,7 +28,7 @@ import java.time.ZoneOffset
 @Config(sdk = [25])
 class MiFitnessSummaryHealthGatewayTest {
     @Test
-    fun `API 25 reads matching Mi Fitness cache as a provisional steps-only snapshot`() = runTest {
+    fun `API 25 reads matching Mi Fitness vendor aggregate cache as typed snapshot`() = runTest {
         val fixture = fixture()
         val requested = fixture.period.copy(endEpochMillis = fixture.period.endEpochMillis + 5_000L)
 
@@ -35,9 +40,12 @@ class MiFitnessSummaryHealthGatewayTest {
         assertEquals(3_210L, snapshot.metrics.steps)
         assertNull(snapshot.metrics.distanceMeters)
         assertEquals(HealthFreshness.FRESH, snapshot.freshness)
-        assertEquals(MiFitnessSummaryHealthGateway.PROVISIONAL_CONFIDENCE, snapshot.confidence, 0.0)
+        assertEquals(MiFitnessSummaryHealthGateway.VENDOR_AGGREGATE_CONFIDENCE, snapshot.confidence, 0.0)
         assertTrue("steps" !in snapshot.missingFields)
-        assertTrue("sleep" in snapshot.missingFields)
+        assertTrue("sleep_minutes" in snapshot.missingFields)
+        val stepSeries = checkNotNull(snapshot.metricTimeSeries[HealthMetricKey.STEPS])
+        assertEquals(HealthMetricStatus.AVAILABLE, stepSeries.status)
+        assertEquals(listOf(40.0, 120.0), stepSeries.points.map { it.value })
     }
 
     @Test
@@ -151,6 +159,17 @@ class MiFitnessSummaryHealthGatewayTest {
                 recordCount = 4,
                 observedAt = now - 1_000L,
                 lastSyncAt = now - 60_000L,
+                metricTimeSeries = mapOf(
+                    HealthMetricKey.STEPS to HealthMetricTimeSeries(
+                        unit = HealthMetricUnit.COUNT,
+                        status = HealthMetricStatus.AVAILABLE,
+                        points = listOf(
+                            HealthTimeSeriesPoint(start + 1_800_000L, 40.0),
+                            HealthTimeSeriesPoint(start + 3_600_000L, 120.0),
+                        ),
+                        provenance = MiFitnessMetricRegistry.stepSeriesProvenance(2),
+                    ),
+                ),
             ),
         ).getOrThrow()
         return Fixture(

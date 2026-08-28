@@ -1,24 +1,64 @@
 package com.campusai.core.health.mifitness
 
 import android.content.Context
+import com.campusai.core.health.HealthMetricKey
+import com.campusai.core.health.HealthMetricStatus
+import com.campusai.core.health.HealthMetricTimeSeries
+import com.campusai.core.health.HealthMetricUnit
+import com.campusai.core.health.HealthMetricValue
 import com.campusai.core.health.HealthPeriod
+import com.campusai.core.health.HealthTimeSeriesPoint
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeout
 import java.time.Clock
 import java.time.LocalDate
-import java.time.ZoneOffset
+import java.time.ZoneId
 
 interface MiFitnessStepsTransport {
     suspend fun exchangePassToken(credential: MiFitnessCredential): MiFitnessSession
 
+    /** Authoritative daily_report/steps aggregate; despite the legacy name this is not a time bucket API. */
     suspend fun fetchSteps(
         session: MiFitnessSession,
         startEpochSeconds: Long,
-        endEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
         nextKey: String,
     ): String
+
+    suspend fun fetchDailyAggregate(
+        session: MiFitnessSession,
+        metric: String,
+        startEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
+        nextKey: String,
+    ): String = if (metric == "steps") {
+        fetchSteps(session, startEpochSeconds, endEpochSecondsExclusive, nextKey)
+    } else {
+        EMPTY_AGGREGATE_PAGE
+    }
+
+    suspend fun fetchStepSeries(
+        session: MiFitnessSession,
+        startEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
+        nextKey: String,
+    ): String = EMPTY_AGGREGATE_PAGE
+
+    suspend fun fetchSportRecords(
+        session: MiFitnessSession,
+        startEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
+        nextKey: String,
+    ): String = EMPTY_SPORT_PAGE
+
+    private companion object {
+        const val EMPTY_AGGREGATE_PAGE =
+            "{\"code\":0,\"result\":{\"data_list\":[],\"has_more\":false,\"next_key\":\"\"}}"
+        const val EMPTY_SPORT_PAGE =
+            "{\"code\":0,\"result\":{\"sport_records\":[],\"has_more\":false,\"next_key\":\"\"}}"
+    }
 }
 
 class MiFitnessReadOnlyTransportAdapter(
@@ -30,9 +70,37 @@ class MiFitnessReadOnlyTransportAdapter(
     override suspend fun fetchSteps(
         session: MiFitnessSession,
         startEpochSeconds: Long,
-        endEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
         nextKey: String,
-    ): String = client.fetchSteps(session, startEpochSeconds, endEpochSeconds, nextKey)
+    ): String = client.fetchSteps(session, startEpochSeconds, endEpochSecondsExclusive, nextKey)
+
+    override suspend fun fetchDailyAggregate(
+        session: MiFitnessSession,
+        metric: String,
+        startEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
+        nextKey: String,
+    ): String = client.fetchDailyAggregate(
+        session,
+        metric,
+        startEpochSeconds,
+        endEpochSecondsExclusive,
+        nextKey,
+    )
+
+    override suspend fun fetchStepSeries(
+        session: MiFitnessSession,
+        startEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
+        nextKey: String,
+    ): String = client.fetchStepSeries(session, startEpochSeconds, endEpochSecondsExclusive, nextKey)
+
+    override suspend fun fetchSportRecords(
+        session: MiFitnessSession,
+        startEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
+        nextKey: String,
+    ): String = client.fetchSportRecords(session, startEpochSeconds, endEpochSecondsExclusive, nextKey)
 }
 
 class MiFitnessStepsSyncException(
@@ -46,7 +114,7 @@ internal data class MiFitnessCnDayWindow(
     val localDate: LocalDate,
     val period: HealthPeriod,
     val startEpochSeconds: Long,
-    val endEpochSeconds: Long,
+    val endEpochSecondsExclusive: Long,
 )
 
 internal class MiFitnessStepsSyncOutcome(
@@ -56,17 +124,57 @@ internal class MiFitnessStepsSyncOutcome(
     override fun toString(): String = "MiFitnessStepsSyncOutcome(<redacted>)"
 }
 
+private class MiFitnessAuthenticatedSession(
+    credential: MiFitnessCredential,
+    private val transport: MiFitnessStepsTransport,
+) {
+    private var activeCredential = credential
+    private lateinit var current: MiFitnessSession
+    private var reauthenticationUsed = false
+    var refreshedPassToken: String? = null
+        private set
+
+    suspend fun open() {
+        current = exchange()
+    }
+
+    suspend fun <T> read(block: suspend (MiFitnessSession) -> T): T = try {
+        block(current)
+    } catch (authentication: MiFitnessAuthenticationException) {
+        if (reauthenticationUsed) throw authentication
+        reauthenticationUsed = true
+        current = exchange()
+        block(current)
+    }
+
+    private suspend fun exchange(): MiFitnessSession = transport.exchangePassToken(activeCredential).also { session ->
+        session.refreshedPassToken?.let { refreshed ->
+            refreshedPassToken = refreshed
+            activeCredential = MiFitnessCredential(activeCredential.userId, refreshed)
+        }
+    }
+}
+
 class MiFitnessStepsSyncService internal constructor(
     private val credentialStore: MiFitnessCredentialStore,
     private val transport: MiFitnessStepsTransport,
     private val cache: MiFitnessStepsCache,
     private val clock: Clock,
+    private val zoneId: ZoneId,
 ) {
+    internal constructor(
+        credentialStore: MiFitnessCredentialStore,
+        transport: MiFitnessStepsTransport,
+        cache: MiFitnessStepsCache,
+        clock: Clock,
+    ) : this(credentialStore, transport, cache, clock, ZoneId.systemDefault())
+
     constructor(context: Context) : this(
         credentialStore = MiFitnessCredentialStore(context),
         transport = MiFitnessReadOnlyTransportAdapter(),
         cache = MiFitnessStepsCache(context),
         clock = Clock.systemUTC(),
+        zoneId = ZoneId.systemDefault(),
     )
 
     suspend fun syncToday(): Result<MiFitnessStepsSummary> = serialized {
@@ -79,7 +187,7 @@ class MiFitnessStepsSyncService internal constructor(
         val oldSummary = try {
             cache.read(window.period, window.localDate, credential.accountScope)
         } catch (_: Exception) {
-            return@serialized failure("sync_failed", "小米运动健康步数同步失败。")
+            return@serialized failure("sync_failed", "小米运动健康数据同步失败。")
         }
         val outcome = syncTodayOutcomeLocked(credential, window).getOrElse { error ->
             return@serialized Result.failure(error)
@@ -97,23 +205,23 @@ class MiFitnessStepsSyncService internal constructor(
             }
         }
         val summary = outcome.summary
-            ?: return@serialized failure("no_cloud_data", "Mi Fitness 云端尚未返回今天的步数记录。")
+            ?: return@serialized failure("no_cloud_data", "Mi Fitness 云端尚未返回今天的官方日步数。")
         Result.success(summary)
     }
 
     internal fun todayWindow(): MiFitnessCnDayWindow {
-        val localDate = clock.instant().atOffset(CN_OFFSET).toLocalDate()
-        val startEpochSeconds = localDate.atStartOfDay().toEpochSecond(CN_OFFSET)
-        val endEpochSeconds = localDate.plusDays(1).atStartOfDay().toEpochSecond(CN_OFFSET) - 1L
+        val localDate = clock.instant().atZone(zoneId).toLocalDate()
+        val startEpochSeconds = localDate.atStartOfDay(zoneId).toEpochSecond()
+        val endEpochSecondsExclusive = localDate.plusDays(1).atStartOfDay(zoneId).toEpochSecond()
         return MiFitnessCnDayWindow(
             localDate = localDate,
             period = HealthPeriod(
                 startEpochMillis = startEpochSeconds * 1_000L,
-                endEpochMillis = (endEpochSeconds + 1L) * 1_000L - 1L,
+                endEpochMillis = endEpochSecondsExclusive * 1_000L - 1L,
                 key = "today",
             ),
             startEpochSeconds = startEpochSeconds,
-            endEpochSeconds = endEpochSeconds,
+            endEpochSecondsExclusive = endEpochSecondsExclusive,
         )
     }
 
@@ -122,73 +230,64 @@ class MiFitnessStepsSyncService internal constructor(
         window: MiFitnessCnDayWindow,
     ): Result<MiFitnessStepsSyncOutcome> = try {
         withTimeout(MAX_SYNC_DURATION_MILLIS) {
-            val session = transport.exchangePassToken(credential)
-            val records = ArrayList<MiFitnessStepRecord>()
-            val seenCursors = mutableSetOf("")
-            var cursor = ""
-            var pageCount = 0
-            var complete = false
+            val session = MiFitnessAuthenticatedSession(credential, transport)
+            session.open()
+            val stepDefinition = MiFitnessMetricRegistry.definition("steps")
+            val stepRecords = fetchAggregateRecords(session, stepDefinition, window)
+            val stepRecord = MiFitnessAggregateParser.selectDaily(
+                stepRecords,
+                window.startEpochSeconds,
+                window.endEpochSecondsExclusive,
+            ).getOrElse {
+                throw error("aggregate_conflict", "小米运动健康返回了冲突的官方日步数。")
+            }
 
-            while (pageCount < MAX_PAGES) {
-                val rawPage = transport.fetchSteps(
-                    session = session,
-                    startEpochSeconds = window.startEpochSeconds,
-                    endEpochSeconds = window.endEpochSeconds,
-                    nextKey = cursor,
+            val metricValues = linkedMapOf<HealthMetricKey, HealthMetricValue>()
+            metricValues += if (stepRecord == null) {
+                MiFitnessMetricRegistry.unavailableValues(
+                    stepDefinition,
+                    HealthMetricStatus.EMPTY,
+                    "no_cloud_data",
                 )
-                val page = MiFitnessStepsParser.parse(rawPage).getOrElse {
-                    throw error("response_invalid", "小米运动健康步数响应格式无效。")
+            } else {
+                MiFitnessAggregateParser.metricsFor(stepRecord).getOrElse {
+                    throw error("response_invalid", "小米运动健康官方日步数格式无效。")
                 }
-                pageCount += 1
-                if (page.records.any { it.epochSeconds !in window.startEpochSeconds..window.endEpochSeconds }) {
-                    throw error("record_out_of_window", "小米运动健康返回了日期范围外的步数。")
-                }
-                if (records.size + page.records.size > MAX_RECORDS) {
-                    throw error("record_limit", "本次步数记录超出安全上限。")
-                }
-                records += page.records
+            }
+            MiFitnessMetricRegistry.definitions.drop(1).forEach { definition ->
+                metricValues.mergeOptional(loadOptionalAggregate(session, definition, window))
+            }
+            metricValues += loadWorkouts(session, window)
+            val metricTimeSeries = mapOf(
+                HealthMetricKey.STEPS to loadStepSeries(session, window),
+            )
 
-                if (!page.hasMore) {
-                    complete = true
-                    break
-                }
-                val nextCursor = page.nextKey
-                    ?: throw error("cursor_missing", "小米运动健康分页响应缺少游标。")
-                if (nextCursor.length > MAX_CURSOR_CHARS) {
-                    throw error("cursor_limit", "小米运动健康分页游标超出安全上限。")
-                }
-                if (!seenCursors.add(nextCursor)) {
-                    throw error("cursor_repeated", "小米运动健康分页游标重复。")
-                }
-                cursor = nextCursor
-            }
-            if (!complete) {
-                throw error("page_limit", "本次步数分页超出安全上限。")
-            }
-            if (records.isEmpty()) {
-                return@withTimeout Result.success(
-                    MiFitnessStepsSyncOutcome(
-                        summary = null,
-                        refreshedPassToken = session.refreshedPassToken,
-                    ),
-                )
-            }
-
-            val aggregate = MiFitnessStepsAggregator.sumIncremental(records).getOrElse {
-                throw error("aggregation_invalid", "小米运动健康步数无法安全聚合。")
-            }
+            val steps = metricValues[HealthMetricKey.STEPS]
+                ?.takeIf { it.status == HealthMetricStatus.AVAILABLE }
+                ?.value
+                ?.toLong()
+            val recordCount = metricValues.values
+                .asSequence()
+                .filter { it.status == HealthMetricStatus.AVAILABLE }
+                .mapNotNull { it.provenance.vendorKey }
+                .distinct()
+                .count()
             val syncedAt = clock.millis()
             val summary = MiFitnessStepsSummary(
                 period = window.period,
                 localDate = window.localDate,
                 accountScope = credential.accountScope,
-                steps = aggregate.steps,
-                recordCount = aggregate.recordCount,
+                steps = steps,
+                recordCount = recordCount,
                 observedAt = syncedAt,
                 lastSyncAt = syncedAt,
+                metricValues = metricValues.toMap(),
+                metricTimeSeries = metricTimeSeries,
+                schemaProvisional = false,
+                aggregationProvisional = false,
             )
             if (cache.save(summary).isFailure) {
-                throw error("cache_write_failed", "系统安全存储不可用，步数摘要未缓存。")
+                throw error("cache_write_failed", "系统安全存储不可用，健康摘要未缓存。")
             }
             Result.success(MiFitnessStepsSyncOutcome(summary, session.refreshedPassToken))
         }
@@ -200,12 +299,281 @@ class MiFitnessStepsSyncService internal constructor(
         Result.failure(exception)
     } catch (_: MiFitnessAuthenticationException) {
         failure("authentication_failed", "小米运动健康身份验证失败。")
+    } catch (_: MiFitnessRateLimitException) {
+        failure("rate_limited", "小米运动健康请求受到限流。")
+    } catch (_: MiFitnessServerException) {
+        failure("server_unavailable", "小米运动健康服务暂时不可用。")
     } catch (_: MiFitnessNetworkException) {
         failure("network_failed", "小米运动健康网络请求失败。")
     } catch (_: MiFitnessProtocolException) {
-        failure("response_invalid", "小米运动健康步数响应格式无效。")
+        failure("response_invalid", "小米运动健康响应格式无效。")
     } catch (_: Exception) {
-        failure("sync_failed", "小米运动健康步数同步失败。")
+        failure("sync_failed", "小米运动健康数据同步失败。")
+    }
+
+    private suspend fun fetchAggregateRecords(
+        session: MiFitnessAuthenticatedSession,
+        definition: MiFitnessMetricDefinition,
+        window: MiFitnessCnDayWindow,
+    ): List<MiFitnessAggregateRecord> {
+        val records = ArrayList<MiFitnessAggregateRecord>()
+        val seenCursors = mutableSetOf("")
+        var cursor = ""
+        repeat(MAX_PAGES) {
+            val rawPage = if (definition.requestKey == "steps") {
+                session.read { active ->
+                    transport.fetchSteps(
+                        active,
+                        window.startEpochSeconds,
+                        window.endEpochSecondsExclusive,
+                        cursor,
+                    )
+                }
+            } else {
+                session.read { active ->
+                    transport.fetchDailyAggregate(
+                        active,
+                        definition.requestKey,
+                        window.startEpochSeconds,
+                        window.endEpochSecondsExclusive,
+                        cursor,
+                    )
+                }
+            }
+            val page = MiFitnessAggregateParser.parse(rawPage, definition.requestKey).getOrElse {
+                throw error("response_invalid", "小米运动健康日聚合响应格式无效。")
+            }
+            if (page.records.any { it.epochSeconds !in window.startEpochSeconds until window.endEpochSecondsExclusive }) {
+                throw error("record_out_of_window", "小米运动健康返回了日期范围外的数据。")
+            }
+            if (records.size + page.records.size > MAX_RECORDS) {
+                throw error("record_limit", "本次健康记录超出安全上限。")
+            }
+            records += page.records
+            if (!page.hasMore) return records
+            cursor = nextCursor(page.nextKey, seenCursors)
+        }
+        throw error("page_limit", "本次健康数据分页超出安全上限。")
+    }
+
+    private suspend fun loadOptionalAggregate(
+        session: MiFitnessAuthenticatedSession,
+        definition: MiFitnessMetricDefinition,
+        window: MiFitnessCnDayWindow,
+    ): Map<HealthMetricKey, HealthMetricValue> = try {
+        val records = fetchAggregateRecords(session, definition, window)
+        val selected = MiFitnessAggregateParser.selectDaily(
+            records,
+            window.startEpochSeconds,
+            window.endEpochSecondsExclusive,
+        ).getOrThrow()
+        if (selected == null) {
+            MiFitnessMetricRegistry.unavailableValues(definition, HealthMetricStatus.EMPTY, "no_cloud_data")
+        } else {
+            MiFitnessAggregateParser.metricsFor(selected).getOrThrow()
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (authentication: MiFitnessAuthenticationException) {
+        throw authentication
+    } catch (_: MiFitnessRateLimitException) {
+        MiFitnessMetricRegistry.unavailableValues(definition, HealthMetricStatus.ERROR, "rate_limited")
+    } catch (_: MiFitnessServerException) {
+        MiFitnessMetricRegistry.unavailableValues(definition, HealthMetricStatus.ERROR, "server_unavailable")
+    } catch (_: MiFitnessNetworkException) {
+        MiFitnessMetricRegistry.unavailableValues(definition, HealthMetricStatus.ERROR, "network_failed")
+    } catch (_: Exception) {
+        MiFitnessMetricRegistry.unavailableValues(definition, HealthMetricStatus.ERROR, "response_invalid")
+    }
+
+    private suspend fun loadWorkouts(
+        session: MiFitnessAuthenticatedSession,
+        window: MiFitnessCnDayWindow,
+    ): Map<HealthMetricKey, HealthMetricValue> = try {
+        val records = fetchSportRecords(session, window)
+        val completed = records
+            .asSequence()
+            .filterNot(MiFitnessSportRecord::deleted)
+            .distinctBy(MiFitnessSportRecord::idDigest)
+            .toList()
+        if (records.isEmpty()) {
+            MiFitnessMetricRegistry.unavailableValues(
+                MiFitnessMetricRegistry.workoutDefinition,
+                HealthMetricStatus.EMPTY,
+                "no_cloud_data",
+            )
+        } else {
+            mapOf(
+                HealthMetricKey.WORKOUT_COUNT to HealthMetricValue(
+                    value = completed.size.toDouble(),
+                    unit = checkNotNull(
+                        MiFitnessMetricRegistry.workoutDefinition.outputs[HealthMetricKey.WORKOUT_COUNT],
+                    ),
+                    status = HealthMetricStatus.AVAILABLE,
+                    provenance = MiFitnessMetricRegistry.provenance("sport_records", completed.size),
+                ),
+            )
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (authentication: MiFitnessAuthenticationException) {
+        throw authentication
+    } catch (_: MiFitnessRateLimitException) {
+        MiFitnessMetricRegistry.unavailableValues(
+            MiFitnessMetricRegistry.workoutDefinition,
+            HealthMetricStatus.ERROR,
+            "rate_limited",
+        )
+    } catch (_: MiFitnessServerException) {
+        MiFitnessMetricRegistry.unavailableValues(
+            MiFitnessMetricRegistry.workoutDefinition,
+            HealthMetricStatus.ERROR,
+            "server_unavailable",
+        )
+    } catch (_: MiFitnessNetworkException) {
+        MiFitnessMetricRegistry.unavailableValues(
+            MiFitnessMetricRegistry.workoutDefinition,
+            HealthMetricStatus.ERROR,
+            "network_failed",
+        )
+    } catch (_: Exception) {
+        MiFitnessMetricRegistry.unavailableValues(
+            MiFitnessMetricRegistry.workoutDefinition,
+            HealthMetricStatus.ERROR,
+            "response_invalid",
+        )
+    }
+
+    private suspend fun loadStepSeries(
+        session: MiFitnessAuthenticatedSession,
+        window: MiFitnessCnDayWindow,
+    ): HealthMetricTimeSeries {
+        val pointsByTime = linkedMapOf<Long, Long>()
+        return try {
+            val seenCursors = mutableSetOf("")
+            var cursor = ""
+            repeat(MAX_PAGES) {
+                val page = MiFitnessStepSeriesParser.parsePage(
+                    session.read { active ->
+                        transport.fetchStepSeries(
+                            active,
+                            window.startEpochSeconds,
+                            window.endEpochSecondsExclusive,
+                            cursor,
+                        )
+                    },
+                ).getOrElse { throw error("response_invalid", "小米运动健康步数趋势响应格式无效。") }
+                page.points.forEach { point ->
+                    if (point.epochSeconds !in window.startEpochSeconds until window.endEpochSecondsExclusive) {
+                        throw error("record_out_of_window", "小米运动健康返回了日期范围外的步数趋势。")
+                    }
+                    val previous = pointsByTime[point.epochSeconds]
+                    if (previous != null && previous != point.steps) {
+                        throw error("series_conflict", "小米运动健康返回了冲突的步数趋势。")
+                    }
+                    if (previous == null && pointsByTime.size >= MAX_RECORDS) {
+                        throw error("record_limit", "本次步数趋势记录超出安全上限。")
+                    }
+                    pointsByTime[point.epochSeconds] = point.steps
+                }
+                if (!page.hasMore) {
+                    return stepSeries(
+                        pointsByTime,
+                        if (pointsByTime.isEmpty()) HealthMetricStatus.EMPTY else HealthMetricStatus.AVAILABLE,
+                        if (pointsByTime.isEmpty()) "no_cloud_data" else null,
+                    )
+                }
+                cursor = nextCursor(page.nextKey, seenCursors)
+            }
+            throw error("page_limit", "本次步数趋势分页超出安全上限。")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: MiFitnessAuthenticationException) {
+            stepSeriesFailure(pointsByTime, "authentication_failed")
+        } catch (_: MiFitnessRateLimitException) {
+            stepSeriesFailure(pointsByTime, "rate_limited")
+        } catch (_: MiFitnessServerException) {
+            stepSeriesFailure(pointsByTime, "server_unavailable")
+        } catch (_: MiFitnessNetworkException) {
+            stepSeriesFailure(pointsByTime, "network_failed")
+        } catch (failure: MiFitnessStepsSyncException) {
+            stepSeriesFailure(pointsByTime, failure.code)
+        } catch (_: Exception) {
+            stepSeriesFailure(pointsByTime, "response_invalid")
+        }
+    }
+
+    private fun stepSeriesFailure(
+        pointsByTime: Map<Long, Long>,
+        reasonCode: String,
+    ): HealthMetricTimeSeries = stepSeries(
+        pointsByTime,
+        if (pointsByTime.isEmpty()) HealthMetricStatus.ERROR else HealthMetricStatus.PARTIAL,
+        reasonCode,
+    )
+
+    private fun stepSeries(
+        pointsByTime: Map<Long, Long>,
+        status: HealthMetricStatus,
+        reasonCode: String?,
+    ): HealthMetricTimeSeries {
+        val points = pointsByTime.entries
+            .sortedBy { it.key }
+            .map { (epochSeconds, steps) -> HealthTimeSeriesPoint(epochSeconds * 1_000L, steps.toDouble()) }
+        return HealthMetricTimeSeries(
+            unit = HealthMetricUnit.COUNT,
+            status = status,
+            points = points,
+            provenance = MiFitnessMetricRegistry.stepSeriesProvenance(points.size),
+            reasonCode = reasonCode,
+        )
+    }
+
+    private suspend fun fetchSportRecords(
+        session: MiFitnessAuthenticatedSession,
+        window: MiFitnessCnDayWindow,
+    ): List<MiFitnessSportRecord> {
+        val records = ArrayList<MiFitnessSportRecord>()
+        val seenCursors = mutableSetOf("")
+        var cursor = ""
+        repeat(MAX_PAGES) {
+            val page = MiFitnessSportParser.parse(
+                session.read { active ->
+                    transport.fetchSportRecords(
+                        active,
+                        window.startEpochSeconds,
+                        window.endEpochSecondsExclusive,
+                        cursor,
+                    )
+                },
+            ).getOrElse { throw error("response_invalid", "小米运动健康运动记录响应格式无效。") }
+            if (page.records.any { it.epochSeconds !in window.startEpochSeconds until window.endEpochSecondsExclusive }) {
+                throw error("record_out_of_window", "小米运动健康返回了日期范围外的运动记录。")
+            }
+            if (records.size + page.records.size > MAX_RECORDS) {
+                throw error("record_limit", "本次运动记录超出安全上限。")
+            }
+            records += page.records
+            if (!page.hasMore) return records
+            cursor = nextCursor(page.nextKey, seenCursors)
+        }
+        throw error("page_limit", "本次运动记录分页超出安全上限。")
+    }
+
+    private fun nextCursor(nextKey: String?, seen: MutableSet<String>): String {
+        val cursor = nextKey ?: throw error("cursor_missing", "小米运动健康分页响应缺少游标。")
+        if (cursor.length > MAX_CURSOR_CHARS) throw error("cursor_limit", "小米运动健康分页游标超出安全上限。")
+        if (!seen.add(cursor)) throw error("cursor_repeated", "小米运动健康分页游标重复。")
+        return cursor
+    }
+
+    private fun MutableMap<HealthMetricKey, HealthMetricValue>.mergeOptional(
+        incoming: Map<HealthMetricKey, HealthMetricValue>,
+    ) {
+        incoming.forEach { (key, value) ->
+            val current = this[key]
+            if (current == null || value.status == HealthMetricStatus.AVAILABLE) this[key] = value
+        }
     }
 
     private fun restoreCache(summary: MiFitnessStepsSummary?) {
@@ -217,7 +585,6 @@ class MiFitnessStepsSyncService internal constructor(
     }
 
     companion object {
-        private val CN_OFFSET = ZoneOffset.ofHours(8)
         private const val MAX_PAGES = 10
         private const val MAX_RECORDS = 10_000
         private const val MAX_CURSOR_CHARS = 4_096

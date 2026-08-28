@@ -20,13 +20,16 @@
     <uses-permission android:name="android.permission.health.READ_OXYGEN_SATURATION" />
     <uses-permission android:name="android.permission.health.READ_SLEEP" />
     <uses-permission android:name="android.permission.health.READ_EXERCISE" />
-    <uses-permission android:name="com.campusai.caesar.bandbridge.permission.READ_LIVE" />
-
     <queries>
         <package android:name="com.google.android.apps.healthdata" />
-        <package android:name="com.campusai.caesar.bandbridge" />
         <intent>
             <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+        <intent>
+            <action android:name="com.xiaomi.mibrain.action.RECOGNIZE_SPEECH" />
         </intent>
     </queries>
 

@@ -7,6 +7,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,13 +17,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -35,6 +38,7 @@ import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.EmojiEvents
@@ -54,8 +58,6 @@ import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
@@ -64,14 +66,13 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -86,26 +87,36 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.campusai.core.designsystem.BrandMark
 import com.campusai.core.designsystem.GlassPanel
 import com.campusai.core.designsystem.SpectraColors
 import com.campusai.core.designsystem.SlideConfirm
 import com.campusai.core.designsystem.SpectraPrimaryButton
+import com.campusai.core.designsystem.SpectraAlertDialog
+import com.campusai.core.designsystem.SpectraDialog
+import com.campusai.core.designsystem.SpectraModalBottomSheet
 import com.campusai.core.designsystem.SpectraTheme
 import com.campusai.core.designsystem.SpectraVisualStyle
 import com.campusai.core.designsystem.Tomorrow
 import com.campusai.core.auth.AuthState
 import com.campusai.core.model.MotionMode
+import com.campusai.core.model.AiMode
 import com.campusai.core.model.AiProvider
 import com.campusai.core.model.LocalModelState
 import com.campusai.core.model.RenderQuality
 import com.campusai.core.model.SpectraEnvironment
 import com.campusai.core.model.ThemeMode
 import com.campusai.core.model.TimeRecord
+import com.campusai.core.model.ContributionLevel
+import com.campusai.core.model.DailyContribution
+import com.campusai.core.model.DailyContributionCalculator
 import com.campusai.core.preferences.UserPreferences
 import com.campusai.core.preferences.UserPreferencesRepository
 import com.campusai.core.localai.LocalMnnAiEngine
@@ -115,18 +126,22 @@ import com.campusai.core.localai.LocalModelMode
 import com.campusai.core.profile.CampusProfile
 import com.campusai.core.profile.ProfileImageKind
 import com.campusai.core.profile.ProfileRepository
-import com.campusai.core.security.PersonalDeepSeekKeyStore
+import com.campusai.core.ai.CloudAiProvider
+import com.campusai.core.ai.CloudProviderConnection
+import com.campusai.core.ai.CloudProviderModel
+import com.campusai.core.security.PersonalAiProviderStore
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import androidx.compose.ui.window.Dialog
 import java.io.ByteArrayOutputStream
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
+import java.time.temporal.ChronoUnit
+import java.time.temporal.TemporalAdjusters
 import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(
     preferences: UserPreferences,
@@ -139,9 +154,11 @@ fun ProfileScreen(
     onOpenMessages: () -> Unit,
     localModelManager: LocalModelManager,
     localAiEngine: LocalMnnAiEngine,
-    personalDeepSeekKeyStore: PersonalDeepSeekKeyStore,
+    personalAiProviderStore: PersonalAiProviderStore,
     profileRepository: ProfileRepository,
     contentPadding: PaddingValues,
+    dailyTargetSnapshots: Map<LocalDate, Long> = emptyMap(),
+    onOpenTimeRecordsForDay: ((LocalDate) -> Unit)? = null,
     miFitnessConfigured: Boolean = false,
     miFitnessSyncing: Boolean = false,
     miFitnessLastSyncAtMillis: Long? = null,
@@ -150,6 +167,7 @@ fun ProfileScreen(
     onSaveMiFitnessCredentials: (userId: String, passToken: String) -> Unit = { _, _ -> },
     onRefreshMiFitnessSteps: () -> Unit = {},
     onDeleteMiFitnessCredentials: () -> Unit = {},
+    onTestCloudProviderConnection: (suspend (CloudAiProvider, String) -> Result<CloudProviderConnection>)? = null,
 ) {
     val scope = rememberCoroutineScope()
     val layout = SpectraTheme.layout
@@ -196,6 +214,13 @@ fun ProfileScreen(
             }
         }
         item {
+            AnnualContributionCard(
+                records = records,
+                targetSnapshots = dailyTargetSnapshots,
+                onOpenDay = onOpenTimeRecordsForDay,
+            )
+        }
+        item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("成就", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
                 TextButton(onClick = { sheet = ProfileSheet.ACHIEVEMENTS }) { Text("查看全部 ${achievements.count { it.unlocked }}/${achievements.size}") }
@@ -216,7 +241,7 @@ fun ProfileScreen(
                     DividerInset()
                     SettingLink(
                         Icons.Rounded.Cloud,
-                        "Mi Fitness 云同步",
+                        "Mi Fitness",
                         miFitnessEntrySubtitle(miFitnessConfigured, miFitnessSyncing, miFitnessLastSyncAtMillis, miFitnessStatus),
                     ) { sheet = ProfileSheet.MI_FITNESS }
                     DividerInset()
@@ -238,11 +263,8 @@ fun ProfileScreen(
 
     sheet?.let { selected ->
         val haptic = LocalHapticFeedback.current
-        ModalBottomSheet(
+        SpectraModalBottomSheet(
             onDismissRequest = { sheet = null; profileRepository.clearMessage() },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-            containerColor = MaterialTheme.colorScheme.surface.copy(.96f),
         ) {
             LazyColumn(
                 modifier = Modifier.fillMaxWidth(),
@@ -258,7 +280,7 @@ fun ProfileScreen(
                         when (selected) {
                             ProfileSheet.EDIT -> "编辑资料"
                             ProfileSheet.AI -> "AI 运行方式"
-                            ProfileSheet.MI_FITNESS -> "Mi Fitness 云同步"
+                            ProfileSheet.MI_FITNESS -> "Mi Fitness"
                             ProfileSheet.APPEARANCE -> "外观与体验"
                             ProfileSheet.ACHIEVEMENTS -> "全部成就"
                         },
@@ -270,7 +292,14 @@ fun ProfileScreen(
                         ProfileEditor(profileState.profile, profileState.saving, profileState.message, profileState.error, authState.userId, profileRepository)
                     }
                     ProfileSheet.AI -> item {
-                        LocalAiSettings(preferences, repository, localModelManager, localAiEngine, personalDeepSeekKeyStore)
+                        LocalAiSettings(
+                            preferences = preferences,
+                            repository = repository,
+                            manager = localModelManager,
+                            engine = localAiEngine,
+                            providerStore = personalAiProviderStore,
+                            onTestConnection = onTestCloudProviderConnection,
+                        )
                     }
                     ProfileSheet.MI_FITNESS -> item {
                         MiFitnessCloudSettings(
@@ -466,6 +495,7 @@ private fun AppearanceSettings(preferences: UserPreferences, repository: UserPre
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
+                    motionEnabled = preferences.motionMode == MotionMode.ON,
                 )
             }
             DividerInset()
@@ -476,7 +506,7 @@ private fun AppearanceSettings(preferences: UserPreferences, repository: UserPre
                 Text("样本会立即改变整页体积色场。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(.58f))
                 Spacer(Modifier.height(12.dp))
                 com.campusai.core.designsystem.CaesarSlidingSelector(
-                    options = SpectraEnvironment.entries.map(::environmentLabel),
+                    options = SpectraEnvironment.entries.map(::environmentSelectorLabel),
                     selectedIndex = SpectraEnvironment.entries.indexOf(preferences.environment),
                     onSelected = { index ->
                         SpectraEnvironment.entries.getOrNull(index)?.let { environment ->
@@ -485,6 +515,7 @@ private fun AppearanceSettings(preferences: UserPreferences, repository: UserPre
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
+                    motionEnabled = preferences.motionMode == MotionMode.ON,
                 )
                 Spacer(Modifier.height(10.dp))
                 EnvironmentSample(preferences.environment)
@@ -509,6 +540,259 @@ private fun EnvironmentSample(environment: SpectraEnvironment) {
         Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Color.White.copy(.54f), Color.Transparent)), RoundedCornerShape(44.dp)))
         Text(environmentLabel(environment), style = MaterialTheme.typography.labelMedium, color = SpectraColors.Ink)
     }
+}
+
+@Composable
+private fun AnnualContributionCard(
+    records: List<TimeRecord>,
+    targetSnapshots: Map<LocalDate, Long>,
+    onOpenDay: ((LocalDate) -> Unit)?,
+) {
+    val zone = ZoneId.systemDefault()
+    val today = LocalDate.now(zone)
+    val currentYear = today.year
+    val earliestYear = remember(records, zone, currentYear) {
+        records.asSequence()
+            .filter { it.durationMinutes > 0L && it.endTime > it.startTime }
+            .map { Instant.ofEpochMilli(it.endTime).atZone(zone).toLocalDate() }
+            .filterNot { it.isAfter(today) }
+            .map(LocalDate::getYear)
+            .minOrNull()
+            ?.coerceAtMost(currentYear)
+            ?: currentYear
+    }
+    val availableYears = remember(earliestYear, currentYear) { (earliestYear..currentYear).toList() }
+    var selectedYear by rememberSaveable { mutableStateOf(currentYear) }
+    var selectedDay by remember { mutableStateOf<DailyContribution?>(null) }
+    LaunchedEffect(availableYears) {
+        if (selectedYear !in availableYears) selectedYear = currentYear
+    }
+    LaunchedEffect(selectedYear) { selectedDay = null }
+
+    val contributions = remember(records, targetSnapshots, selectedYear, zone, today) {
+        DailyContributionCalculator.calculate(
+            year = selectedYear,
+            records = records,
+            targetSnapshots = targetSnapshots,
+            zoneId = zone,
+            today = today,
+        )
+    }
+    val contributionByDate = remember(contributions) { contributions.associateBy(DailyContribution::date) }
+    val first = LocalDate.of(selectedYear, 1, 1)
+    val last = LocalDate.of(selectedYear, 12, 31)
+    val gridStart = first.with(TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY))
+    val gridEnd = last.with(TemporalAdjusters.nextOrSame(java.time.DayOfWeek.SUNDAY))
+    val weekCount = ChronoUnit.WEEKS.between(gridStart, gridEnd).toInt() + 1
+    val weeks = remember(contributionByDate, selectedYear, gridStart, weekCount) {
+        List(weekCount) { weekIndex ->
+            List(7) { dayIndex ->
+                val date = gridStart.plusDays(weekIndex * 7L + dayIndex)
+                contributionByDate[date].takeIf { date.year == selectedYear }
+            }
+        }
+    }
+    val completedCount = contributions.sumOf(DailyContribution::completedCount)
+    val durationMinutes = contributions.sumOf(DailyContribution::durationMinutes)
+    val cardRadius = SpectraTheme.tokens.radii.card.value.roundToInt()
+
+    GlassPanel(
+        modifier = Modifier.fillMaxWidth(),
+        radius = cardRadius,
+        emphasized = true,
+        shadowed = !SpectraTheme.isFluid,
+        opticalPriority = 2,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 15.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("年度节奏", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "${formatContributionDuration(durationMinutes)} · $completedCount 条完成记录",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(.58f),
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = { selectedYear = (selectedYear - 1).coerceAtLeast(earliestYear) },
+                        enabled = selectedYear > earliestYear,
+                    ) {
+                        Icon(Icons.Rounded.ChevronLeft, "上一年")
+                    }
+                    Text(
+                        selectedYear.toString(),
+                        fontFamily = Tomorrow,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.requiredWidth(44.dp),
+                    )
+                    IconButton(
+                        onClick = { selectedYear = (selectedYear + 1).coerceAtMost(currentYear) },
+                        enabled = selectedYear < currentYear,
+                    ) {
+                        Icon(Icons.Rounded.ChevronRight, "下一年")
+                    }
+                }
+            }
+
+            ContributionGrid(
+                selectedYear = selectedYear,
+                gridStart = gridStart,
+                weeks = weeks,
+                today = today,
+                selectedDate = selectedDay?.date,
+                onSelect = { selectedDay = it },
+            )
+
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("较少", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(.54f))
+                Spacer(Modifier.width(6.dp))
+                ContributionLevel.entries.forEach { level ->
+                    Box(
+                        Modifier
+                            .padding(horizontal = 2.dp)
+                            .size(10.dp)
+                            .background(contributionColor(level), RoundedCornerShape(3.dp)),
+                    )
+                }
+                Spacer(Modifier.width(6.dp))
+                Text("更多", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(.54f))
+            }
+
+            selectedDay?.let { day ->
+                val percent = ((day.durationMinutes.toDouble() / day.targetMinutes.toDouble()) * 100.0)
+                    .roundToInt()
+                    .coerceAtLeast(0)
+                GlassPanel(Modifier.fillMaxWidth(), radius = 14, shadowed = false) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 13.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                "${day.date.year}年${day.date.monthValue}月${day.date.dayOfMonth}日",
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            Text(
+                                "${day.durationMinutes} 分钟 · ${day.completedCount} 条 · 目标完成 $percent%",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(.62f),
+                            )
+                        }
+                        if (onOpenDay != null && day.completedCount > 0) {
+                            TextButton(onClick = { onOpenDay(day.date) }) { Text("查看记录") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContributionGrid(
+    selectedYear: Int,
+    gridStart: LocalDate,
+    weeks: List<List<DailyContribution?>>,
+    today: LocalDate,
+    selectedDate: LocalDate?,
+    onSelect: (DailyContribution) -> Unit,
+) {
+    val cellSize = 13.dp
+    val gap = 3.dp
+    val step = cellSize + gap
+    val gridWidth = step * weeks.size - gap
+    val scrollState = rememberScrollState()
+    val maxScroll = scrollState.maxValue
+    LaunchedEffect(selectedYear, maxScroll) {
+        // The current year opens near today; past years start at January for predictable review.
+        if (selectedYear == today.year) scrollState.scrollTo(maxScroll) else scrollState.scrollTo(0)
+    }
+    Row(Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(top = 20.dp, end = 7.dp),
+            verticalArrangement = Arrangement.spacedBy(gap),
+        ) {
+            listOf("一", "", "三", "", "五", "", "日").forEach { label ->
+                Box(Modifier.size(cellSize), contentAlignment = Alignment.Center) {
+                    if (label.isNotEmpty()) Text(label, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurface.copy(.46f))
+                }
+            }
+        }
+        Column(Modifier.horizontalScroll(scrollState)) {
+            Box(Modifier.width(gridWidth).height(20.dp)) {
+                (1..12).forEach { month ->
+                    val monthStart = LocalDate.of(selectedYear, month, 1)
+                    val monthWeek = ChronoUnit.WEEKS.between(
+                        gridStart,
+                        monthStart.with(TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY)),
+                    ).toInt()
+                    Text(
+                        "$month 月",
+                        modifier = Modifier.offset(x = step * monthWeek).requiredWidth(30.dp),
+                        fontSize = 9.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(.50f),
+                        maxLines = 1,
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+                weeks.forEach { week ->
+                    Column(verticalArrangement = Arrangement.spacedBy(gap)) {
+                        week.forEach { day ->
+                            if (day == null) {
+                                Spacer(Modifier.size(cellSize))
+                            } else {
+                                val future = day.date.isAfter(today)
+                                val selected = day.date == selectedDate
+                                val description = if (future) {
+                                    "${day.date.monthValue}月${day.date.dayOfMonth}日，未来日期"
+                                } else {
+                                    "${day.date.monthValue}月${day.date.dayOfMonth}日，${day.durationMinutes}分钟，${day.completedCount}条记录"
+                                }
+                                var cellModifier = Modifier
+                                    .size(cellSize)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(
+                                        if (future) SpectraColors.Silver.copy(.16f)
+                                        else contributionColor(day.level),
+                                    )
+                                    .border(
+                                        width = if (selected) 1.5.dp else 1.dp,
+                                        color = if (selected) SpectraColors.Cyan else Color.White.copy(if (future) .18f else .52f),
+                                        shape = RoundedCornerShape(3.dp),
+                                    )
+                                    .semantics { contentDescription = description }
+                                if (!future) cellModifier = cellModifier.clickable { onSelect(day) }
+                                Box(cellModifier)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun contributionColor(level: ContributionLevel): Color = when (level) {
+    ContributionLevel.NONE -> SpectraColors.Silver.copy(.34f)
+    ContributionLevel.LOW -> SpectraColors.Cyan.copy(.24f)
+    ContributionLevel.MEDIUM -> SpectraColors.Cyan.copy(.44f)
+    ContributionLevel.HIGH -> SpectraColors.Focus.copy(.66f)
+    ContributionLevel.GOAL -> SpectraColors.Cyan.copy(.92f)
+}
+
+private fun formatContributionDuration(minutes: Long): String = when {
+    minutes < 60L -> "$minutes 分钟"
+    minutes % 60L == 0L -> "${minutes / 60L} 小时"
+    else -> "${minutes / 60L} 小时 ${minutes % 60L} 分钟"
 }
 
 private data class AchievementUi(val name: String, val description: String, val progress: Int, val target: Int, val colors: List<Color>) { val unlocked get() = progress >= target }
@@ -571,12 +855,36 @@ private fun OpticalBadge(colors: List<Color>, unlocked: Boolean, progress: Float
 @Composable private fun StatCell(value: String, label: String, modifier: Modifier) = Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) { Text(value, fontFamily = Tomorrow, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleLarge); Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(.58f)) }
 @Composable private fun VerticalRule() = Box(Modifier.width(1.dp).height(34.dp).background(SpectraColors.Silver.copy(.62f)))
 
-private fun aiProviderLabel(value: AiProvider) = when (value) { AiProvider.AUTO -> "自动 · 本地优先"; AiProvider.DEEPSEEK -> "DeepSeek · 我的 Key"; AiProvider.LOCAL -> "本地模型" }
+private fun aiProviderLabel(value: AiProvider) = when (value) {
+    AiProvider.AUTO -> "自动 · 本地优先"
+    AiProvider.DEEPSEEK -> "DeepSeek · 我的 Key"
+    AiProvider.GOOGLE_GEMINI -> "Gemini · 我的 Key"
+    AiProvider.LOCAL -> "本地模型"
+}
 private fun visualStyleLabel(value: SpectraVisualStyle) = when (value) { SpectraVisualStyle.CLASSIC -> "经典"; SpectraVisualStyle.FLUID -> "Strba Fluid" }
-private fun environmentLabel(value: SpectraEnvironment) = when (value) { SpectraEnvironment.ORIGINAL -> "Original 原生"; SpectraEnvironment.OCEAN -> "Ocean 海流"; SpectraEnvironment.ULTRAVIOLET -> "Ultraviolet 紫外"; SpectraEnvironment.EMBER -> "Ember 余烬" }
+private fun environmentSelectorLabel(value: SpectraEnvironment) = when (value) {
+    SpectraEnvironment.ORIGINAL -> "原生"
+    SpectraEnvironment.OCEAN -> "海流"
+    SpectraEnvironment.ULTRAVIOLET -> "紫外"
+    SpectraEnvironment.EMBER -> "余烬"
+    SpectraEnvironment.AURORA -> "森屿"
+}
+private fun environmentLabel(value: SpectraEnvironment) = when (value) {
+    SpectraEnvironment.ORIGINAL -> "Original 原生"
+    SpectraEnvironment.OCEAN -> "Ocean 海流"
+    SpectraEnvironment.ULTRAVIOLET -> "Ultraviolet 紫外"
+    SpectraEnvironment.EMBER -> "Ember 余烬"
+    SpectraEnvironment.AURORA -> "Aurora 森屿"
+}
 private fun themeLabel(value: ThemeMode) = when (value) { ThemeMode.SYSTEM -> "跟随系统"; ThemeMode.LIGHT -> "浅色"; ThemeMode.DARK -> "深色" }
 private fun qualityLabel(value: RenderQuality) = when (value) { RenderQuality.AUTO -> "自动"; RenderQuality.LOW -> "低"; RenderQuality.HIGH -> "高" }
-private fun environmentColors(value: SpectraEnvironment) = when (value) { SpectraEnvironment.ORIGINAL -> listOf(SpectraColors.Cyan, SpectraColors.Violet, SpectraColors.Warm, SpectraColors.Rose); SpectraEnvironment.OCEAN -> listOf(Color(0xFF0C8DBF), SpectraColors.Cyan, SpectraColors.Focus); SpectraEnvironment.ULTRAVIOLET -> listOf(Color(0xFF5138D7), SpectraColors.Violet, SpectraColors.Rose); SpectraEnvironment.EMBER -> listOf(Color(0xFFE04B32), SpectraColors.Warm, Color(0xFFFFC457)) }
+private fun environmentColors(value: SpectraEnvironment) = when (value) {
+    SpectraEnvironment.ORIGINAL -> listOf(SpectraColors.Cyan, SpectraColors.Violet, SpectraColors.Warm, SpectraColors.Rose)
+    SpectraEnvironment.OCEAN -> listOf(Color(0xFF0C8DBF), SpectraColors.Cyan, SpectraColors.Focus)
+    SpectraEnvironment.ULTRAVIOLET -> listOf(Color(0xFF5138D7), SpectraColors.Violet, SpectraColors.Rose)
+    SpectraEnvironment.EMBER -> listOf(Color(0xFFE04B32), SpectraColors.Warm, Color(0xFFFFC457))
+    SpectraEnvironment.AURORA -> listOf(Color(0xFF126B4B), SpectraColors.Aurora, SpectraColors.AuroraLight, Color(0xFFA6D86F))
+}
 
 private fun miFitnessEntrySubtitle(
     configured: Boolean,
@@ -586,21 +894,21 @@ private fun miFitnessEntrySubtitle(
 ): String = when {
     status == MiFitnessSettingsStatus.VALIDATING -> "正在验证并保存"
     status == MiFitnessSettingsStatus.DELETING -> "正在删除本地凭据与缓存"
-    syncing || status == MiFitnessSettingsStatus.REFRESHING -> "正在刷新今日步数"
+    syncing || status == MiFitnessSettingsStatus.REFRESHING -> "正在同步今日健康"
     configured && lastSyncAtMillis != null && lastSyncAtMillis > 0L -> "已配置 · 最近刷新 ${formatMiFitnessLastSync(lastSyncAtMillis)}"
     configured -> "已配置 · 尚未刷新"
-    else -> "中国区 · 仅读取当天步数"
+    else -> "同步今日健康"
 }
 
 internal fun miFitnessStatusText(status: MiFitnessSettingsStatus, configured: Boolean): String = when (status) {
     MiFitnessSettingsStatus.IDLE -> if (configured) "已配置，等待手动刷新。" else "尚未配置。"
     MiFitnessSettingsStatus.VALIDATING -> "正在验证并保存到系统安全存储。"
-    MiFitnessSettingsStatus.REFRESHING -> "正在读取 Mi Fitness 中国区的今日步数。"
-    MiFitnessSettingsStatus.DELETING -> "正在删除本机凭据与步数缓存。"
+    MiFitnessSettingsStatus.REFRESHING -> "正在同步 Mi Fitness 今日健康。"
+    MiFitnessSettingsStatus.DELETING -> "正在删除本机凭据与健康缓存。"
     MiFitnessSettingsStatus.SUCCESS -> "最近一次操作已完成。"
-    MiFitnessSettingsStatus.NO_DATA -> "Mi Fitness 云端暂未返回今天的步数记录；不会把空记录当成 0 步。"
+    MiFitnessSettingsStatus.NO_DATA -> "今天还没有同步到健康数据。"
     MiFitnessSettingsStatus.AUTH_ERROR -> "验证失败，请检查 userId 与 passToken。"
-    MiFitnessSettingsStatus.NETWORK_ERROR -> "网络或云端响应异常，请稍后重试。"
+    MiFitnessSettingsStatus.NETWORK_ERROR -> "网络异常，请稍后重试。"
     MiFitnessSettingsStatus.STORAGE_ERROR -> "系统安全存储暂不可用，请稍后重试。"
 }
 
@@ -653,7 +961,7 @@ private fun MiFitnessCloudSettings(
                 Icon(Icons.Rounded.Cloud, null)
                 Spacer(Modifier.size(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("中国区 · 当天步数", style = MaterialTheme.typography.titleMedium)
+                    Text("Mi Fitness", style = MaterialTheme.typography.titleMedium)
                     Text(
                         if (configured) "凭据已配置" else "尚未配置凭据",
                         style = MaterialTheme.typography.bodyMedium,
@@ -662,7 +970,7 @@ private fun MiFitnessCloudSettings(
                 }
             }
             Text(
-                "只有点击保存或更新凭据时才会验证账户；只有点击刷新时才会读取 Mi Fitness 中国区云端的当天步数。不会连接手环、不会启动 Gadgetbridge，也不需要 Health Connect 权限。",
+                "保存凭据后，只有你主动点击同步时才会更新今日健康。CampusAI 不连接手环，也不需要 Health Connect 权限。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(.66f),
             )
@@ -672,7 +980,7 @@ private fun MiFitnessCloudSettings(
                 color = MaterialTheme.colorScheme.onSurface.copy(.66f),
             )
             Text(
-                "首版把云端分桶步数暂定求和；首次成功后请与 Mi Fitness 当天总步数核对。",
+                "步数总览与分时趋势会在首页的 Mi Fitness 卡片中显示。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(.58f),
             )
@@ -727,7 +1035,7 @@ private fun MiFitnessCloudSettings(
             if (configured) {
                 HorizontalDivider(color = SpectraColors.Silver.copy(.68f))
                 SpectraPrimaryButton(
-                    text = if (displayStatus == MiFitnessSettingsStatus.REFRESHING) "正在刷新…" else "刷新今日步数",
+                    text = if (displayStatus == MiFitnessSettingsStatus.REFRESHING) "正在同步…" else "同步今日健康",
                     onClick = onRefreshSteps,
                     modifier = Modifier.fillMaxWidth(),
                     enabled = !busy,
@@ -746,23 +1054,16 @@ private fun MiFitnessCloudSettings(
         }
     }
 
-    if (confirmDelete && configured) AlertDialog(
+    if (confirmDelete && configured) SpectraAlertDialog(
         onDismissRequest = { confirmDelete = false },
-        title = { Text("删除 Mi Fitness 凭据？") },
-        text = {
-            Text(
-                (if (displayStatus == MiFitnessSettingsStatus.REFRESHING) "当前刷新会先取消。" else "") +
-                    "将从本机系统安全存储删除 userId、passToken 与已缓存的步数摘要。" +
-                    "之后需要重新保存，才能手动刷新今日步数。",
-            )
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { confirmDelete = false; onDeleteCredentials() },
-                enabled = canDelete,
-            ) { Text("确认删除", color = deleteColor) }
-        },
-        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("取消") } },
+        title = "删除 Mi Fitness 凭据？",
+        message = (if (displayStatus == MiFitnessSettingsStatus.REFRESHING) "当前刷新会先取消。" else "") +
+            "将从本机系统安全存储删除 userId、passToken 与已缓存的健康摘要。" +
+            "之后需要重新保存，才能同步今日健康。",
+        confirmLabel = "确认删除",
+        onConfirm = { if (canDelete) { confirmDelete = false; onDeleteCredentials() } },
+        dismissLabel = "取消",
+        destructive = true,
     )
 }
 
@@ -772,7 +1073,8 @@ private fun LocalAiSettings(
     repository: UserPreferencesRepository,
     manager: LocalModelManager,
     engine: LocalMnnAiEngine,
-    personalKeyStore: PersonalDeepSeekKeyStore,
+    providerStore: PersonalAiProviderStore,
+    onTestConnection: (suspend (CloudAiProvider, String) -> Result<CloudProviderConnection>)?,
 ) {
     val scope = rememberCoroutineScope()
     val modelStates by manager.states.collectAsState()
@@ -780,21 +1082,49 @@ private fun LocalAiSettings(
     var confirmMobile by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<LocalModelMode?>(null) }
     var confirmRedownload by remember { mutableStateOf<LocalModelMode?>(null) }
+    var cloudProvider by rememberSaveable {
+        mutableStateOf(CloudAiProvider.from(preferences.aiProvider) ?: CloudAiProvider.DEEPSEEK)
+    }
     var personalKey by remember { mutableStateOf("") }
     var personalKeyVisible by remember { mutableStateOf(false) }
-    var personalKeySaved by remember { mutableStateOf(personalKeyStore.hasKey()) }
     var personalKeyMessage by remember { mutableStateOf<String?>(null) }
+    var personalKeyMessageIsError by remember { mutableStateOf(false) }
+    var providerRevision by remember { mutableStateOf(0) }
+    var modelId by remember(cloudProvider, providerRevision) {
+        mutableStateOf(providerStore.selectedModel(cloudProvider))
+    }
+    var availableModels by remember(cloudProvider) { mutableStateOf<List<CloudProviderModel>>(emptyList()) }
+    var testingConnection by remember { mutableStateOf(false) }
+    val providerConfiguration = remember(cloudProvider, providerRevision) {
+        providerStore.configuration(cloudProvider)
+    }
+    LaunchedEffect(preferences.aiProvider) {
+        CloudAiProvider.from(preferences.aiProvider)?.let { selected ->
+            if (selected != cloudProvider) {
+                cloudProvider = selected
+                personalKey = ""
+                personalKeyMessage = null
+                availableModels = emptyList()
+            }
+        }
+    }
     val localModes = listOf(LocalModelMode.FAST, LocalModelMode.QUALITY)
     val largestDownload = localModes.maxOf { manager.manifestFor(it.modelId).totalBytes }
     GlassPanel(Modifier.fillMaxWidth(), radius = 16, emphasized = true) {
         Column {
             SettingSelector(Icons.Rounded.Cloud, "AI 运行方式", AiProvider.entries, preferences.aiProvider, {
-                when (it) { AiProvider.AUTO -> "自动"; AiProvider.DEEPSEEK -> "DeepSeek · 我的 Key"; AiProvider.LOCAL -> "本地模型" }
+                when (it) {
+                    AiProvider.AUTO -> "自动"
+                    AiProvider.DEEPSEEK -> "DeepSeek"
+                    AiProvider.GOOGLE_GEMINI -> "Gemini"
+                    AiProvider.LOCAL -> "本地模型"
+                }
             }) { scope.launch { repository.setAiProvider(it) } }
             Text(
                 when (preferences.aiProvider) {
-                    AiProvider.AUTO -> "优先使用当前本地档位；本地不可用时仅展示一次性 DeepSeek 升级选项，绝不会自动上传对话。"
+                    AiProvider.AUTO -> "优先使用当前本地档位；本地不可用时只展示已配置的云端选项，绝不会自动上传对话。"
                     AiProvider.DEEPSEEK -> "固定使用你自己的 DeepSeek Key，不会自动切换本地，也不会调用任何平台共享额度。"
+                    AiProvider.GOOGLE_GEMINI -> "固定使用你自己的 Google AI Studio Key，不会自动切换本地，也不会调用其他云端 Provider。"
                     AiProvider.LOCAL -> "提示词、学习统计、课程表与回复仅在本机处理；本地失败不会静默调用云端。"
                 },
                 Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
@@ -824,28 +1154,44 @@ private fun LocalAiSettings(
             )
             DividerInset()
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SettingSelector(
+                    icon = Icons.Rounded.Cloud,
+                    label = "云端 Provider 配置",
+                    values = CloudAiProvider.entries,
+                    selected = cloudProvider,
+                    text = { it.displayName },
+                ) { selected ->
+                    cloudProvider = selected
+                    personalKey = ""
+                    personalKeyMessage = null
+                    personalKeyMessageIsError = false
+                    availableModels = emptyList()
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Rounded.Key, null)
                     Spacer(Modifier.size(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("DeepSeek 个人 Key", style = MaterialTheme.typography.titleMedium)
+                        Text("${cloudProvider.displayName} 个人 Key", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            if (personalKeySaved) personalKeyStore.maskedLabel() else "尚未保存",
+                            if (providerConfiguration.hasCredential) providerConfiguration.maskedCredential else "尚未保存",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface.copy(.58f),
                         )
                     }
                 }
                 Text(
-                    "Key 使用 Android Keystore 加密保存，不参与备份；生成时只发送到 api.deepseek.com，不经过 Supabase。",
+                    when (cloudProvider) {
+                        CloudAiProvider.DEEPSEEK -> "Key 使用 Android Keystore 加密保存，不参与备份；生成时只发送到 api.deepseek.com，不经过 Supabase。"
+                        CloudAiProvider.GOOGLE_GEMINI -> "Key 使用 Android Keystore 加密保存，不参与备份；生成时只发送到 generativelanguage.googleapis.com，不经过 Supabase。"
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface.copy(.66f),
                 )
                 OutlinedTextField(
                     value = personalKey,
-                    onValueChange = { personalKey = it; personalKeyMessage = null },
+                    onValueChange = { personalKey = it; personalKeyMessage = null; personalKeyMessageIsError = false },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text(if (personalKeySaved) "粘贴新 Key 以替换" else "DeepSeek API Key") },
+                    label = { Text(if (providerConfiguration.hasCredential) "粘贴新 Key 以替换" else "${cloudProvider.displayName} API Key") },
                     singleLine = true,
                     visualTransformation = if (personalKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
                     trailingIcon = {
@@ -858,35 +1204,120 @@ private fun LocalAiSettings(
                     Text(
                         message,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = if (personalKeySaved) SpectraColors.Success else SpectraColors.Error,
+                        color = if (personalKeyMessageIsError) SpectraColors.Error else SpectraColors.Success,
                     )
                 }
                 SpectraPrimaryButton(
-                    text = if (personalKeySaved) "安全替换 Key" else "安全保存 Key",
+                    text = if (providerConfiguration.hasCredential) "安全替换 Key" else "安全保存 Key",
                     onClick = {
-                        personalKeyStore.save(personalKey).fold(
+                        providerStore.saveCredential(cloudProvider, personalKey).fold(
                             onSuccess = {
                                 personalKey = ""
-                                personalKeySaved = true
-                                personalKeyMessage = "已加密保存。下次云端生成将使用这个 Key。"
+                                providerRevision++
+                                personalKeyMessageIsError = false
+                                personalKeyMessage = "已加密保存。下次 ${cloudProvider.displayName} 生成将使用这个 Key。"
                             },
-                            onFailure = { personalKeyMessage = it.message ?: "Key 保存失败，请重试。" },
+                            onFailure = {
+                                personalKeyMessageIsError = true
+                                personalKeyMessage = it.message ?: "Key 保存失败，请重试。"
+                            },
                         )
                     },
                     icon = Icons.Rounded.Save,
                     enabled = personalKey.isNotBlank(),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                if (personalKeySaved) TextButton(
+
+                OutlinedTextField(
+                    value = modelId,
+                    onValueChange = { modelId = it; personalKeyMessage = null; personalKeyMessageIsError = false },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("模型 ID（留空使用默认）") },
+                    placeholder = { Text(cloudProvider.defaultModel(AiMode.FAST)) },
+                    singleLine = true,
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        onClick = {
+                            providerStore.saveSelectedModel(cloudProvider, modelId).fold(
+                                onSuccess = {
+                                    providerRevision++
+                                    personalKeyMessageIsError = false
+                                    personalKeyMessage = "模型选择已保存。"
+                                },
+                                onFailure = {
+                                    personalKeyMessageIsError = true
+                                    personalKeyMessage = it.message ?: "模型 ID 无效。"
+                                },
+                            )
+                        },
+                    ) { Text("保存模型") }
+                    if (onTestConnection != null) {
+                        TextButton(
+                            onClick = {
+                                testingConnection = true
+                                personalKeyMessage = null
+                                scope.launch {
+                                    onTestConnection(cloudProvider, modelId).fold(
+                                        onSuccess = { connection ->
+                                            availableModels = connection.models
+                                            modelId = connection.selectedModelId
+                                            providerStore.saveSelectedModel(cloudProvider, connection.selectedModelId)
+                                            providerRevision++
+                                            personalKeyMessageIsError = false
+                                            personalKeyMessage = "连接正常 · ${connection.latencyMs} ms · ${connection.models.size} 个可用模型"
+                                        },
+                                        onFailure = { error ->
+                                            personalKeyMessageIsError = true
+                                            personalKeyMessage = error.message ?: "连接测试失败。"
+                                        },
+                                    )
+                                    testingConnection = false
+                                }
+                            },
+                            enabled = providerConfiguration.hasCredential && !testingConnection,
+                        ) { Text(if (testingConnection) "测试中…" else "测试连接") }
+                    }
+                }
+                if (availableModels.isNotEmpty()) {
+                    Text("可用模型", style = MaterialTheme.typography.labelLarge)
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(availableModels.take(12), key = CloudProviderModel::id) { model ->
+                            GlassPanel(
+                                modifier = Modifier.height(38.dp),
+                                radius = 19,
+                                emphasized = model.id == modelId,
+                                shadowed = false,
+                                onClick = {
+                                    providerStore.saveSelectedModel(cloudProvider, model.id).onSuccess {
+                                        modelId = model.id
+                                        providerRevision++
+                                        personalKeyMessageIsError = false
+                                        personalKeyMessage = "已选择 ${model.displayName}。"
+                                    }
+                                },
+                            ) {
+                                Box(Modifier.padding(horizontal = 12.dp).fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text(model.displayName, maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                                }
+                            }
+                        }
+                    }
+                }
+                if (providerConfiguration.hasCredential) TextButton(
                     onClick = {
-                        if (personalKeyStore.delete()) {
+                        if (providerStore.deleteCredential(cloudProvider)) {
                             personalKey = ""
-                            personalKeySaved = false
-                            personalKeyMessage = "个人 Key 已从本机删除。"
-                        } else personalKeyMessage = "删除失败，请重试。"
+                            providerRevision++
+                            personalKeyMessageIsError = false
+                            personalKeyMessage = "${cloudProvider.displayName} Key 已从本机删除。"
+                        } else {
+                            personalKeyMessageIsError = true
+                            personalKeyMessage = "删除失败，请重试。"
+                        }
                     },
                     modifier = Modifier.align(Alignment.End),
-                ) { Text("删除个人 Key", color = SpectraColors.Error) }
+                ) { Text("删除 ${cloudProvider.displayName} Key", color = SpectraColors.Error) }
             }
             DividerInset()
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -929,45 +1360,42 @@ private fun LocalAiSettings(
             }
         }
     }
-    if (confirmMobile) AlertDialog(
+    if (confirmMobile) SpectraAlertDialog(
         onDismissRequest = { confirmMobile = false },
-        title = { Text("允许移动网络下载？") },
-        text = { Text("单个模型最大约 ${formatDownloadBytes(largestDownload)}，可能产生较大流量费用。确认后仅改变下载网络限制。") },
-        confirmButton = { TextButton(onClick = { confirmMobile = false; scope.launch { repository.setLocalModelWifiOnly(false) } }) { Text("确认允许") } },
-        dismissButton = { TextButton(onClick = { confirmMobile = false }) { Text("保持仅 Wi-Fi") } },
+        title = "允许移动网络下载？",
+        message = "单个模型最大约 ${formatDownloadBytes(largestDownload)}，可能产生较大流量费用。确认后仅改变下载网络限制。",
+        confirmLabel = "确认允许",
+        onConfirm = { confirmMobile = false; scope.launch { repository.setLocalModelWifiOnly(false) } },
+        dismissLabel = "保持仅 Wi-Fi",
     )
-    confirmDelete?.let { targetMode -> Dialog(onDismissRequest = { confirmDelete = null }) {
+    confirmDelete?.let { targetMode -> SpectraDialog(onDismissRequest = { confirmDelete = null }) {
         val targetManifest = manager.manifestFor(targetMode.modelId)
-        GlassPanel(Modifier.fillMaxWidth(), radius = 24, emphasized = true) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Text("删除 ${localModelModeLabel(targetMode)}", style = MaterialTheme.typography.titleLarge)
-                Text("只删除 ${targetManifest.displayName}，释放约 ${formatBytes(manager.runtimeFor(targetMode.modelId).storage.occupiedBytes())}；不会删除或暂停另一模型的下载。当前本地生成会先停止，聊天报告保留。", style = MaterialTheme.typography.bodyMedium)
-                SlideConfirm("滑动删除模型", onConfirm = {
-                    confirmDelete = null
-                    scope.launch {
-                        manager.deleteModel(targetMode) { engine.releaseAndWait() }
-                    }
-                })
-                TextButton(onClick = { confirmDelete = null }, modifier = Modifier.align(Alignment.End)) { Text("取消") }
-            }
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text("删除 ${localModelModeLabel(targetMode)}", style = MaterialTheme.typography.titleLarge)
+            Text("只删除 ${targetManifest.displayName}，释放约 ${formatBytes(manager.runtimeFor(targetMode.modelId).storage.occupiedBytes())}；不会删除或暂停另一模型的下载。当前本地生成会先停止，聊天报告保留。", style = MaterialTheme.typography.bodyMedium)
+            SlideConfirm("滑动删除模型", onConfirm = {
+                confirmDelete = null
+                scope.launch {
+                    manager.deleteModel(targetMode) { engine.releaseAndWait() }
+                }
+            })
+            TextButton(onClick = { confirmDelete = null }, modifier = Modifier.align(Alignment.End)) { Text("取消") }
         }
     } }
-    confirmRedownload?.let { targetMode -> Dialog(onDismissRequest = { confirmRedownload = null }) {
+    confirmRedownload?.let { targetMode -> SpectraDialog(onDismissRequest = { confirmRedownload = null }) {
         val targetManifest = manager.manifestFor(targetMode.modelId)
-        GlassPanel(Modifier.fillMaxWidth(), radius = 24, emphasized = true) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Text("重新下载 ${localModelModeLabel(targetMode)}", style = MaterialTheme.typography.titleLarge)
-                Text("只重下 ${targetManifest.displayName}；不会删除或暂停另一模型的下载。当前本地生成会先停止，然后按现有网络限制重新下载和校验。", style = MaterialTheme.typography.bodyMedium)
-                SlideConfirm("滑动重新下载", onConfirm = {
-                    confirmRedownload = null
-                    scope.launch {
-                        if (manager.deleteModel(targetMode) { engine.releaseAndWait() }) {
-                            manager.download(targetMode, preferences.localModelWifiOnly)
-                        }
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text("重新下载 ${localModelModeLabel(targetMode)}", style = MaterialTheme.typography.titleLarge)
+            Text("只重下 ${targetManifest.displayName}；不会删除或暂停另一模型的下载。当前本地生成会先停止，然后按现有网络限制重新下载和校验。", style = MaterialTheme.typography.bodyMedium)
+            SlideConfirm("滑动重新下载", onConfirm = {
+                confirmRedownload = null
+                scope.launch {
+                    if (manager.deleteModel(targetMode) { engine.releaseAndWait() }) {
+                        manager.download(targetMode, preferences.localModelWifiOnly)
                     }
-                })
-                TextButton(onClick = { confirmRedownload = null }, modifier = Modifier.align(Alignment.End)) { Text("取消") }
-            }
+                }
+            })
+            TextButton(onClick = { confirmRedownload = null }, modifier = Modifier.align(Alignment.End)) { Text("取消") }
         }
     } }
 }

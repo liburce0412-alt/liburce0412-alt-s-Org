@@ -2,6 +2,8 @@ package com.campusai
 
 import com.campusai.core.ai.AiEvent
 import com.campusai.core.ai.personalDeepSeekEventFlow
+import com.campusai.core.ai.CloudAiProvider
+import com.campusai.core.ai.personalCloudEventFlow
 import com.campusai.core.model.AiProvider
 import com.campusai.core.network.PersonalDeepSeekException
 import kotlinx.coroutines.Dispatchers
@@ -56,6 +58,18 @@ class PersonalDeepSeekFlowTest {
 
         assertEquals(
             listOf(AiEvent.Error("provider_unavailable", "无法连接 DeepSeek。请检查网络后重试。")),
+            events,
+        )
+    }
+
+    @Test
+    fun `generic flow reports the selected provider without exposing exception text`() = runTest {
+        val events = personalCloudEventFlow(CloudAiProvider.GOOGLE_GEMINI) {
+            throw IllegalStateException("Authorization: Bearer unit-secret-should-not-leak")
+        }.toList()
+
+        assertEquals(
+            listOf(AiEvent.Error("provider_unavailable", "无法连接 Google Gemini。请检查网络后重试。")),
             events,
         )
     }

@@ -80,4 +80,37 @@ class DatabaseMigrationRobolectricTest {
             }
         }
     }
+
+    @Test
+    fun `v6 to v7 backfills stable daily targets for active completed records`() {
+        val databaseName = "caesar-robolectric-migration-6-7"
+        helper.createDatabase(databaseName, 6).apply {
+            execSQL(
+                """
+                INSERT INTO time_records
+                (title,category,startTime,endTime,durationMinutes,remark,userId,clientId,remoteId,version,syncState,updatedAt,deletedAt)
+                VALUES('跨日专注','学习',1777000000000,1777003600000,60,'','local_user','active-record',NULL,1,'synced',1777003600000,NULL)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO time_records
+                (title,category,startTime,endTime,durationMinutes,remark,userId,clientId,remoteId,version,syncState,updatedAt,deletedAt)
+                VALUES('已删除','学习',1777100000000,1777103600000,60,'','local_user','deleted-record',NULL,1,'synced',1777103600000,1777103600000)
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(databaseName, 7, true, CampusDatabase.MIGRATION_6_7).use { database ->
+            database.query("SELECT userId,localDate,targetMinutes,createdAt FROM daily_goal_snapshots").use { cursor ->
+                assertEquals(true, cursor.moveToFirst())
+                assertEquals("local_user", cursor.getString(0))
+                assertEquals(10, cursor.getString(1).length)
+                assertEquals(240L, cursor.getLong(2))
+                assertEquals(1777003600000L, cursor.getLong(3))
+                assertEquals(false, cursor.moveToNext())
+            }
+        }
+    }
 }

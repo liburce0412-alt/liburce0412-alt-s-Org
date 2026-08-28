@@ -112,12 +112,12 @@ import com.campusai.features.ai.AiPostContext
 import com.campusai.features.ai.MiFitnessUiStatus
 import com.campusai.features.community.CampusViewModel
 import com.campusai.features.community.CampusRepository
-import com.campusai.core.health.BandBridgeIntents
 import com.campusai.core.sync.CampusSyncScheduler
 import com.campusai.core.localai.LocalMnnAiEngine
 import com.campusai.core.localai.LocalModelManager
 import com.campusai.core.agent.MnnAgentEngineFactory
-import com.campusai.core.security.PersonalDeepSeekKeyStore
+import com.campusai.core.network.PersonalCloudClient
+import com.campusai.core.security.PersonalAiProviderStore
 import com.campusai.core.profile.ProfileRepository
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -142,7 +142,7 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
     val agentLocalAiEngine = remember {
         MnnAgentEngineFactory.create(localAiEngine, localModelManager::manifestFor)
     }
-    val personalDeepSeekKeyStore = remember { PersonalDeepSeekKeyStore(context.applicationContext) }
+    val personalAiProviderStore = remember { PersonalAiProviderStore(context.applicationContext) }
     val profileRepository = remember { ProfileRepository() }
     val campusRepository = remember { CampusRepository() }
     val profileState by profileRepository.state.collectAsState()
@@ -156,7 +156,18 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
     val authState by authRepository.state.collectAsState()
     val preferences by preferencesRepository.preferences.collectAsState(initial = UserPreferences())
     val timeViewModel: TimeViewModel = viewModel(factory = TimeViewModelFactory(dao, context.applicationContext, authState.userId.takeIf { authState.signedIn }))
-    val aiViewModel: AiViewModel = viewModel(factory = AiViewModelFactory(dao, context.applicationContext, preferencesRepository, localModelManager, agentLocalAiEngine, personalDeepSeekKeyStore, campusRepository, profileRepository))
+    val aiViewModel: AiViewModel = viewModel(
+        factory = AiViewModelFactory(
+            dao,
+            context.applicationContext,
+            preferencesRepository,
+            localModelManager,
+            agentLocalAiEngine,
+            personalAiProviderStore,
+            campusRepository,
+            profileRepository,
+        ),
+    )
     val aiRuntimeState by aiViewModel.state.collectAsState()
     val healthState by aiViewModel.healthState.collectAsState()
     val campusViewModel: CampusViewModel = viewModel()
@@ -164,6 +175,7 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
     val announcementState by campusViewModel.announcements.collectAsState()
     val records by timeViewModel.timeRecords.collectAsState()
     val courses by timeViewModel.courses.collectAsState()
+    val dailyTargetSnapshots by timeViewModel.dailyTargetSnapshots.collectAsState()
     val dailyGreeting by aiViewModel.dailyGreeting.collectAsState()
     val contextPosts = when (val posts = campusState.posts) {
         is UiState.Data -> posts.value
@@ -239,7 +251,7 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
         SpectraVisualStyleController.set(preferences.visualStyle)
     }
 
-    CampusTheme(preferences.themeMode) {
+    CampusTheme(preferences.themeMode, preferences.environment) {
         val styledTokens = spectraTokensForStyle(DefaultSpectraTokens, preferences.visualStyle)
         ProvideSpectraExperience(preferences.visualStyle) {
         ProvideSpectraTokens(
@@ -310,15 +322,6 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
                                  healthState = healthState,
                                  onRefreshHealth = aiViewModel::refreshHealthStatus,
                                  onSyncMiFitnessSteps = aiViewModel::refreshMiFitnessSteps,
-                                 onStartBand = aiViewModel::startBandSession,
-                                 onStopBand = aiViewModel::stopBandSession,
-                                 onSyncBandHistory = aiViewModel::triggerBandHistorySync,
-                                 onBandDiagnostics = {
-                                     runCatching { context.startActivity(BandBridgeIntents.diagnostics()) }
-                                         .onFailure {
-                                             appScope.launch { snackbar.showSnackbar("CaesarBandBridge 诊断页不可用。") }
-                                         }
-                                 },
                                 contentPadding = padding,
                             )
                             MainDestination.TIME -> TimeScreen(
@@ -362,9 +365,11 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
                                 onOpenMessages = { showMessages = true },
                                 localModelManager = localModelManager,
                                 localAiEngine = localAiEngine,
-                                 personalDeepSeekKeyStore = personalDeepSeekKeyStore,
+                                 personalAiProviderStore = personalAiProviderStore,
                                  profileRepository = profileRepository,
                                  contentPadding = padding,
+                                 dailyTargetSnapshots = dailyTargetSnapshots,
+                                 onOpenTimeRecordsForDay = { destination = MainDestination.TIME },
                                  miFitnessConfigured = healthState.miFitnessConfigured,
                                  miFitnessSyncing = healthState.miFitnessSyncing,
                                  miFitnessLastSyncAtMillis = healthState.miFitnessLastSyncAt,
@@ -373,6 +378,12 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
                                  onSaveMiFitnessCredentials = aiViewModel::saveMiFitnessCredentials,
                                  onRefreshMiFitnessSteps = aiViewModel::refreshMiFitnessSteps,
                                  onDeleteMiFitnessCredentials = aiViewModel::deleteMiFitnessCredentials,
+                                 onTestCloudProviderConnection = { provider, modelId ->
+                                     runCatching {
+                                         PersonalCloudClient(provider, personalAiProviderStore)
+                                             .validateConnection(modelId)
+                                     }
+                                 },
                              )
                         }
                     }

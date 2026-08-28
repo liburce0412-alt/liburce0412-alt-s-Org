@@ -53,8 +53,6 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.campusai.core.designsystem.BrandMark
 import com.campusai.core.designsystem.PageMood
@@ -62,6 +60,7 @@ import com.campusai.core.designsystem.SlideConfirm
 import com.campusai.core.designsystem.SpectraAction
 import com.campusai.core.designsystem.SpectraColors
 import com.campusai.core.designsystem.SpectraIconAction
+import com.campusai.core.designsystem.SpectraModalBottomSheet
 import com.campusai.core.designsystem.SpectraPageScaffold
 import com.campusai.core.designsystem.SpectraStateKind
 import com.campusai.core.designsystem.SpectraStatePane
@@ -362,8 +361,8 @@ fun OrdersScreen(
     }
 
     pending?.let { (order, action) ->
-        Dialog(onDismissRequest = { if (!state.operationBusy) pending = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(.24f)).padding(20.dp), contentAlignment = Alignment.BottomCenter) {
+        SpectraModalBottomSheet(onDismissRequest = { if (!state.operationBusy) pending = null }) {
+            Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), contentAlignment = Alignment.BottomCenter) {
                 SpectraSurface(
                     modifier = Modifier.fillMaxWidth(),
                     mood = PageMood.COMMERCE,

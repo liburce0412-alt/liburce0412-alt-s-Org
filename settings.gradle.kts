@@ -25,5 +25,3 @@ dependencyResolutionManagement {
 rootProject.name = "CampusAI"
 
 include(":apps:android:app")
-include(":apps:android:band-contract")
-include(":apps:android:bandbridge")

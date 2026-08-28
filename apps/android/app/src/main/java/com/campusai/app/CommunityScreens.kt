@@ -45,7 +45,6 @@ import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Sell
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -77,14 +76,14 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.campusai.core.designsystem.BrandMark
 import com.campusai.core.designsystem.GlassPanel
 import com.campusai.core.designsystem.PageMood
 import com.campusai.core.designsystem.SpectraAction
 import com.campusai.core.designsystem.SpectraColors
+import com.campusai.core.designsystem.SpectraDialog
+import com.campusai.core.designsystem.SpectraFullScreenDialog
 import com.campusai.core.designsystem.SpectraIconAction
 import com.campusai.core.designsystem.SpectraPageScaffold
 import com.campusai.core.designsystem.SpectraPrimaryButton
@@ -307,19 +306,19 @@ private fun PostCard(post: CommunityPost, onLike: () -> Unit, onBookmark: () -> 
 private fun ReportDialog(targetLabel: String, busy: Boolean, onDismiss: () -> Unit, onSubmit: (String, String) -> Unit) {
     var reason by rememberSaveable { mutableStateOf("") }
     var details by rememberSaveable { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = { if (!busy) onDismiss() },
-        shape = RoundedCornerShape(24.dp),
-        title = { Text("举报内容") },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    SpectraDialog(onDismissRequest = { if (!busy) onDismiss() }) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("举报内容", style = MaterialTheme.typography.titleLarge)
             Text(targetLabel, maxLines = 2, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurface.copy(.58f))
             OutlinedTextField(reason, { reason = it.take(120) }, label = { Text("原因") }, singleLine = true, shape = RoundedCornerShape(12.dp))
             OutlinedTextField(details, { details = it.take(1000) }, label = { Text("补充说明") }, minLines = 3, shape = RoundedCornerShape(12.dp))
             Text("举报会进入审核队列，不会直接删除内容。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(.58f))
-        } },
-        confirmButton = { TextButton(enabled = reason.isNotBlank() && !busy, onClick = { onSubmit(reason, details) }) { Text(if (busy) "正在提交" else "提交举报") } },
-        dismissButton = { TextButton(enabled = !busy, onClick = onDismiss) { Text("取消") } },
-    )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(enabled = !busy, onClick = onDismiss) { Text("取消") }
+                TextButton(enabled = reason.isNotBlank() && !busy, onClick = { onSubmit(reason, details) }) { Text(if (busy) "正在提交" else "提交举报") }
+            }
+        }
+    }
 }
 
 @Composable
@@ -334,8 +333,8 @@ private fun PostDetails(
     onPublish: (String, () -> Unit) -> Unit,
 ) {
     var draft by rememberSaveable(post.id) { mutableStateOf("") }
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    SpectraFullScreenDialog(onDismissRequest = onDismiss, mood = PageMood.SOCIAL) {
+        Box(Modifier.fillMaxSize()) {
             SpectraPageScaffold(mood = PageMood.SOCIAL) {
                 Column(
                     Modifier
@@ -738,11 +737,10 @@ private fun ComposerDialog(
     onPrimary: () -> Unit,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    SpectraFullScreenDialog(onDismissRequest = onClose, mood = mood) {
         Box(
             Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background),
+                .fillMaxSize(),
         ) {
             SpectraPageScaffold(mood = mood) {
                 Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
@@ -899,8 +897,8 @@ private fun FullScreenDialog(
     mood: PageMood,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    SpectraFullScreenDialog(onDismissRequest = onClose, mood = mood) {
+        Box(Modifier.fillMaxSize()) {
             SpectraPageScaffold(mood = mood) {
                 Box(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
                     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {

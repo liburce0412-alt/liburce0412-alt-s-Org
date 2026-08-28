@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="spectra_window_start">#07101C</color>
+    <color name="spectra_window_center">#101328</color>
+    <color name="spectra_window_end">#071B1A</color>
+    <color name="spectra_splash_background">#091321</color>
+</resources>

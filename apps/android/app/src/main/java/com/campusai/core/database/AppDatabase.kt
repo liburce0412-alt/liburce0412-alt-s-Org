@@ -271,6 +271,14 @@ data class HealthSummaryCacheEntity(
     val lastSyncAt: Long?,
 )
 
+@Entity(tableName = "daily_goal_snapshots", primaryKeys = ["userId", "localDate"])
+data class DailyGoalSnapshotEntity(
+    val userId: String,
+    val localDate: String,
+    val targetMinutes: Long,
+    val createdAt: Long = System.currentTimeMillis(),
+)
+
 private fun String.toAiMode() = runCatching { AiMode.valueOf(this) }.getOrDefault(AiMode.FAST)
 private fun String.toAiProvider() = runCatching { AiProvider.valueOf(this) }.getOrDefault(AiProvider.AUTO)
 
@@ -470,6 +478,12 @@ interface CampusDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertHealthSummaryCache(entity: HealthSummaryCacheEntity)
+
+    @Query("SELECT * FROM daily_goal_snapshots WHERE userId = :activeUser OR (:includeLocal = 1 AND userId = 'local_user') ORDER BY localDate")
+    fun getDailyGoalSnapshotsFlow(activeUser: String, includeLocal: Boolean): Flow<List<DailyGoalSnapshotEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertDailyGoalSnapshots(entities: List<DailyGoalSnapshotEntity>): List<Long>
 }
 
 // ==========================================
@@ -490,8 +504,9 @@ interface CampusDao {
         AgentTraceEntity::class,
         AgentActionEntity::class,
         HealthSummaryCacheEntity::class,
+        DailyGoalSnapshotEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true
 )
 abstract class CampusDatabase : RoomDatabase() {
@@ -628,6 +643,37 @@ abstract class CampusDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `daily_goal_snapshots` (
+                      `userId` TEXT NOT NULL,
+                      `localDate` TEXT NOT NULL,
+                      `targetMinutes` INTEGER NOT NULL,
+                      `createdAt` INTEGER NOT NULL,
+                      PRIMARY KEY(`userId`, `localDate`)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    INSERT OR IGNORE INTO `daily_goal_snapshots` (`userId`, `localDate`, `targetMinutes`, `createdAt`)
+                    SELECT `userId`,
+                           strftime('%Y-%m-%d', `endTime` / 1000, 'unixepoch', 'localtime'),
+                           240,
+                           MIN(`endTime`)
+                    FROM `time_records`
+                    WHERE `deletedAt` IS NULL
+                      AND `durationMinutes` > 0
+                      AND `endTime` > `startTime`
+                      AND strftime('%Y-%m-%d', `endTime` / 1000, 'unixepoch', 'localtime') IS NOT NULL
+                    GROUP BY `userId`, strftime('%Y-%m-%d', `endTime` / 1000, 'unixepoch', 'localtime')
+                    """.trimIndent(),
+                )
+            }
+        }
+
         @Volatile
         private var INSTANCE: CampusDatabase? = null
 
@@ -638,7 +684,7 @@ abstract class CampusDatabase : RoomDatabase() {
                     CampusDatabase::class.java,
                     "campus_database"
                 )
-                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .build()
                 INSTANCE = instance
                 instance

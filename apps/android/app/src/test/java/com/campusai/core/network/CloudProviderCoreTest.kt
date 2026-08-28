@@ -1,0 +1,280 @@
+package com.campusai.core.network
+
+import com.campusai.core.ai.AiRequest
+import com.campusai.core.ai.CloudAiProvider
+import com.campusai.core.ai.CloudDailyHealthSummary
+import com.campusai.core.ai.CloudHealthDisclosure
+import com.campusai.core.model.AiConversationMessage
+import com.campusai.core.model.AiMode
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+
+@RunWith(RobolectricTestRunner::class)
+class CloudProviderCoreTest {
+    @Test
+    fun `providers use only official fixed endpoints and validate their own model namespace`() {
+        assertEquals("https://api.deepseek.com/chat/completions", CloudAiProvider.DEEPSEEK.chatCompletionsUrl)
+        assertEquals(
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            CloudAiProvider.GOOGLE_GEMINI.chatCompletionsUrl,
+        )
+        assertTrue(CloudAiProvider.DEEPSEEK.acceptsModelId("deepseek-v4-flash"))
+        assertFalse(CloudAiProvider.DEEPSEEK.acceptsModelId("gemini-3.7-flash"))
+        assertTrue(CloudAiProvider.GOOGLE_GEMINI.acceptsModelId("models/gemini-3.7-flash"))
+        assertFalse(CloudAiProvider.GOOGLE_GEMINI.acceptsModelId("gemini-embedding-001"))
+
+        val geminiPayload = OpenAiCompatibleRequestFactory.prepare(
+            CloudAiProvider.GOOGLE_GEMINI,
+            request(),
+            "gemini-3.7-flash",
+        ).payload
+        val deepSeekPayload = OpenAiCompatibleRequestFactory.prepare(
+            CloudAiProvider.DEEPSEEK,
+            request(),
+            "deepseek-v4-flash",
+        ).payload
+        assertFalse(geminiPayload.has("temperature"))
+        assertTrue(deepSeekPayload.has("temperature"))
+    }
+
+    @Test
+    fun `cloud boundary strips health identifiers and health tools by default`() {
+        val prepared = OpenAiCompatibleRequestFactory.prepare(
+            CloudAiProvider.DEEPSEEK,
+            request(
+                context = """{"task":"chat","study":{"minutes":20},"health":{"steps":9000},"dailyHealthSummary":{"sleep":999},"metrics":{"heartRate":70,"steps":888},"deviceId":"private-device"}""",
+                tools = """[
+                    {"name":"health.get_snapshot","description":"health","parameters":[]},
+                    {"name":"time.create_record","description":"record","parameters":[{"name":"minutes","type":"integer","required":true,"description":"duration"}]}
+                ]""",
+            ),
+            "deepseek-v4-flash",
+        )
+
+        val encoded = prepared.payload.toString()
+        assertTrue(encoded.contains("\\\"minutes\\\":20"))
+        assertFalse(encoded.contains("9000"))
+        assertFalse(encoded.contains("999"))
+        assertFalse(encoded.contains("888"))
+        assertFalse(encoded.contains("70"))
+        assertFalse(encoded.contains("private-device"))
+        assertFalse(encoded.contains("health_get_snapshot"))
+        assertTrue(encoded.contains("time_create_record"))
+        assertFalse(prepared.payload.has("tool_choice"))
+        assertEquals(mapOf("time_create_record" to "time.create_record"), prepared.originalToolNamesByWireName)
+    }
+
+    @Test
+    fun `health disclosure sends only typed daily aggregate when explicitly included`() {
+        val excluded = OpenAiCompatibleRequestFactory.prepare(
+            CloudAiProvider.GOOGLE_GEMINI,
+            request(),
+            "gemini-3.7-flash",
+        ).payload.toString()
+        assertFalse(excluded.contains("health_summary"))
+
+        val included = OpenAiCompatibleRequestFactory.prepare(
+            CloudAiProvider.GOOGLE_GEMINI,
+            request().copy(
+                cloudHealthDisclosure = CloudHealthDisclosure.Included(
+                    CloudDailyHealthSummary(
+                        localDate = "2026-08-28",
+                        steps = 974,
+                        sleepMinutes = 430,
+                        averageHeartRateBpm = 68.0,
+                        averageOxygenSaturationPercent = 101.0,
+                    ),
+                ),
+            ),
+            "gemini-3.7-flash",
+        ).payload.toString()
+
+        assertTrue(included.contains("health_summary"))
+        assertTrue(included.contains("974"))
+        assertTrue(included.contains("430"))
+        assertTrue(included.contains("68"))
+        assertFalse(included.contains("101"))
+        assertFalse(included.contains("originPackages"))
+    }
+
+    @Test
+    fun `stream parser assembles fragmented tool call and preserves Gemini thought signature`() {
+        val first = checkNotNull(
+            OpenAiCompatibleStreamParser.parse(
+                """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","extra_content":{"google":{"thought_signature":"signature-unit-value"}},"function":{"name":"time_create_record","arguments":"{\"min"}}]}}]}""",
+            ),
+        )
+        val second = checkNotNull(
+            OpenAiCompatibleStreamParser.parse(
+                """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"utes\":25}"}}]}}],"usage":{"prompt_tokens":12,"completion_tokens":8}}""",
+            ),
+        )
+        val accumulator = OpenAiToolCallAccumulator(
+            CloudAiProvider.GOOGLE_GEMINI,
+            mapOf("time_create_record" to "time.create_record"),
+        )
+        (first.toolCallFragments + second.toolCallFragments).forEach(accumulator::append)
+        val call = checkNotNull(accumulator.complete())
+
+        assertEquals("time.create_record", call.originalName)
+        assertEquals("{\"minutes\":25}", call.argumentsJson)
+        assertEquals("signature-unit-value", call.thoughtSignature)
+        assertEquals(12L, second.inputTokens)
+        assertEquals(8L, second.outputTokens)
+
+        val followUp = OpenAiCompatibleRequestFactory.prepare(
+            CloudAiProvider.GOOGLE_GEMINI,
+            request(
+                tools = """[{"name":"time.create_record","description":"record","parameters":[]}]""",
+                messages = listOf(
+                    AiConversationMessage("user", "记录 25 分钟"),
+                    AiConversationMessage("assistant", ProviderToolCallEnvelope.encode(call)),
+                    AiConversationMessage("tool", "{\"ok\":true}"),
+                ),
+            ),
+            "gemini-3.7-flash",
+        ).payload
+        val replayedCall = followUp.getJSONArray("messages").getJSONObject(2)
+            .getJSONArray("tool_calls").getJSONObject(0)
+        assertEquals("signature-unit-value", replayedCall.getJSONObject("extra_content").getJSONObject("google").getString("thought_signature"))
+        assertEquals("call-1", followUp.getJSONArray("messages").getJSONObject(3).getString("tool_call_id"))
+        assertEquals("auto", followUp.getString("tool_choice"))
+    }
+
+    @Test
+    fun `DeepSeek thinking tool continuation replays reasoning and non null assistant content`() {
+        val tools = """[
+            {"name":"time.create_record","description":"record","parameters":[{"name":"minutes","type":"integer","required":true,"description":"duration"}]}
+        ]"""
+        val prepared = OpenAiCompatibleRequestFactory.prepare(
+            CloudAiProvider.DEEPSEEK,
+            request(mode = AiMode.DEEP, tools = tools),
+            "deepseek-v4-pro",
+        )
+        assertTrue(prepared.payload.has("tools"))
+        assertFalse(prepared.payload.has("tool_choice"))
+
+        val chunk = checkNotNull(
+            OpenAiCompatibleStreamParser.parse(
+                """{"choices":[{"delta":{"reasoning_content":"需要先记录。","content":"我来记录。","tool_calls":[{"index":0,"id":"call-deep-1","type":"function","function":{"name":"time_create_record","arguments":"{\"minutes\":25}"}}]}}]}""",
+            ),
+        )
+        assertEquals("需要先记录。", chunk.reasoningContentDelta)
+        val accumulator = OpenAiToolCallAccumulator(
+            CloudAiProvider.DEEPSEEK,
+            mapOf("time_create_record" to "time.create_record"),
+        )
+        chunk.toolCallFragments.forEach(accumulator::append)
+        val call = checkNotNull(
+            accumulator.complete(
+                assistantContent = checkNotNull(chunk.delta),
+                reasoningContent = checkNotNull(chunk.reasoningContentDelta),
+            ),
+        )
+
+        val followUp = OpenAiCompatibleRequestFactory.prepare(
+            CloudAiProvider.DEEPSEEK,
+            request(
+                mode = AiMode.DEEP,
+                tools = tools,
+                messages = listOf(
+                    AiConversationMessage("user", "记录 25 分钟"),
+                    AiConversationMessage("assistant", ProviderToolCallEnvelope.encode(call)),
+                    AiConversationMessage("tool", "{\"ok\":true}"),
+                ),
+            ),
+            "deepseek-v4-pro",
+        ).payload
+        val replayedAssistant = followUp.getJSONArray("messages").getJSONObject(2)
+        assertEquals("我来记录。", replayedAssistant.getString("content"))
+        assertFalse(replayedAssistant.isNull("content"))
+        assertEquals("需要先记录。", replayedAssistant.getString("reasoning_content"))
+        assertEquals("call-deep-1", followUp.getJSONArray("messages").getJSONObject(3).getString("tool_call_id"))
+    }
+
+    @Test
+    fun `cloud history omits prior health disclosure turns and preserves DeepSeek continuation state`() {
+        val prepared = OpenAiCompatibleRequestFactory.prepare(
+            CloudAiProvider.DEEPSEEK,
+            request(
+                mode = AiMode.DEEP,
+                tools = """[{"name":"time.create_record","description":"record","parameters":[]}]""",
+                messages = listOf(
+                    AiConversationMessage("user", "普通问题"),
+                    AiConversationMessage(
+                        "assistant",
+                        "普通回答",
+                        providerReasoningContent = "普通回答的推理状态",
+                    ),
+                    AiConversationMessage("user", "敏感健康问题 974", cloudHealthSensitive = true),
+                    AiConversationMessage("assistant", "敏感健康回答 430", cloudHealthSensitive = true),
+                    AiConversationMessage("user", "下一轮"),
+                ),
+            ),
+            "deepseek-v4-pro",
+        ).payload.toString()
+
+        assertTrue(prepared.contains("普通问题"))
+        assertTrue(prepared.contains("普通回答的推理状态"))
+        assertTrue(prepared.contains("下一轮"))
+        assertFalse(prepared.contains("敏感健康问题"))
+        assertFalse(prepared.contains("敏感健康回答"))
+        assertFalse(prepared.contains("974"))
+        assertFalse(prepared.contains("430"))
+    }
+
+    @Test
+    fun `model parser filters non chat models and malformed responses`() {
+        val parsed = OpenAiCompatibleModelParser.parse(
+            CloudAiProvider.GOOGLE_GEMINI,
+            """{"data":[{"id":"models/gemini-3.7-flash"},{"id":"gemini-embedding-001"},{"id":"other-model"}]}""",
+        )
+        assertEquals(listOf("gemini-3.7-flash"), parsed.map { it.id })
+        assertTrue(OpenAiCompatibleModelParser.parse(CloudAiProvider.DEEPSEEK, "not-json").isEmpty())
+        assertNull(OpenAiCompatibleStreamParser.parse("[DONE]"))
+        assertTrue(OpenAiCompatibleStreamParser.containsProviderError("""{"error":{"message":"secret detail"}}"""))
+    }
+
+    @Test
+    fun `unprojected and parallel tool calls fail closed`() {
+        val unknown = OpenAiToolCallAccumulator(CloudAiProvider.DEEPSEEK, emptyMap())
+        unknown.append(OpenAiToolCallFragment(0, "call-1", "unknown_tool", "{}", null))
+        try {
+            unknown.complete()
+            fail("unprojected tool must fail")
+        } catch (error: CloudProviderException) {
+            assertEquals("tool_not_projected", error.code)
+        }
+
+        val parallel = OpenAiToolCallAccumulator(
+            CloudAiProvider.DEEPSEEK,
+            mapOf("time_one" to "time.one", "time_two" to "time.two"),
+        )
+        parallel.append(OpenAiToolCallFragment(0, "call-1", "time_one", "{}", null))
+        parallel.append(OpenAiToolCallFragment(1, "call-2", "time_two", "{}", null))
+        try {
+            parallel.complete()
+            fail("parallel tools must fail")
+        } catch (error: CloudProviderException) {
+            assertEquals("parallel_tool_calls_unsupported", error.code)
+        }
+    }
+
+    private fun request(
+        mode: AiMode = AiMode.FAST,
+        context: String = "{}",
+        tools: String = "[]",
+        messages: List<AiConversationMessage> = listOf(AiConversationMessage("user", "你好")),
+    ) = AiRequest(
+        mode = mode,
+        messages = messages,
+        structuredContextJson = context,
+        caesarToolsJson = tools,
+    )
+}

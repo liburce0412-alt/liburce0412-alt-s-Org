@@ -2,11 +2,11 @@ package com.campusai.debug
 
 import android.app.Activity
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.Gravity
 import android.widget.TextView
+import androidx.core.graphics.drawable.toBitmap
 import androidx.work.Configuration
 import androidx.work.WorkManager
 import com.campusai.R
@@ -260,13 +260,13 @@ class CaesarEvalActivity : Activity() {
     }
 
     private fun materializeImage(resourceName: String): File {
-        check(resourceName == "campusai_infinity_icon") { "Eval 图片不在固定白名单。" }
+        check(resourceName == "campusai_brand_mark") { "Eval 图片不在固定白名单。" }
         val directory = File(cacheDir, "caesar-eval-fixtures").apply { mkdirs() }
         val destination = File(directory, "$resourceName.png")
         if (!destination.exists() || destination.length() == 0L) {
-            val bitmap = requireNotNull(BitmapFactory.decodeResource(resources, R.drawable.campusai_infinity_icon)) {
+            val bitmap = requireNotNull(getDrawable(R.drawable.campusai_brand_mark)) {
                 "Eval 图片解码失败。"
-            }
+            }.toBitmap(width = 512, height = 512, config = Bitmap.Config.ARGB_8888)
             try {
                 destination.outputStream().use { output ->
                     check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) { "Eval 图片写入失败。" }

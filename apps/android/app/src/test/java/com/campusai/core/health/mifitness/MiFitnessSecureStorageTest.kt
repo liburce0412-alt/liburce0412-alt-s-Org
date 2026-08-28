@@ -1,5 +1,7 @@
 package com.campusai.core.health.mifitness
 
+import com.campusai.core.health.HealthMetricKey
+import com.campusai.core.health.HealthMetricStatus
 import com.campusai.core.health.HealthPeriod
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -105,6 +107,30 @@ class MiFitnessSecureStorageTest {
         assertNull(cache.read(period.copy(startEpochMillis = 999L), localDate, accountScope))
         assertNull(cache.read(period, localDate.plusDays(1), accountScope))
         assertNull(cache.read(period, localDate, "fedcba9876543210fedcba9876543210"))
+    }
+
+    @Test
+    fun `typed empty step state round trips without becoming zero`() {
+        val storage = MemorySecretStorage()
+        val cache = MiFitnessStepsCache(storage)
+        val period = HealthPeriod(1_000L, 2_000L, "today")
+        val localDate = LocalDate.of(2026, 8, 27)
+        val scope = "0123456789abcdef0123456789abcdef"
+        val summary = MiFitnessStepsSummary(
+            period = period,
+            localDate = localDate,
+            accountScope = scope,
+            steps = null,
+            recordCount = 0,
+            observedAt = 1_900L,
+            lastSyncAt = 1_900L,
+        )
+
+        assertTrue(cache.save(summary).isSuccess)
+        val restored = checkNotNull(cache.read(period, localDate, scope))
+        assertNull(restored.steps)
+        assertEquals(HealthMetricStatus.EMPTY, restored.metricValues[HealthMetricKey.STEPS]?.status)
+        assertFalse(storage.values.values.single().contains("\"steps\":0"))
     }
 
     @Test

@@ -41,10 +41,18 @@ class CaesarTurnAssemblyTest {
     fun `conversation codec preserves surfaces attachments and rejects malformed recovery`() {
         val original = listOf(
             AiConversationMessage("user", "查看图片", attachmentPaths = listOf("C:/cache/a.jpg")),
-            AiConversationMessage("assistant", "已读取", presentationJson = "{\"schema\":\"caesar.surface.v1\"}"),
+            AiConversationMessage(
+                "assistant",
+                "已读取",
+                presentationJson = "{\"schema\":\"caesar.surface.v1\"}",
+                providerReasoningContent = "hidden-provider-state",
+                cloudHealthSensitive = true,
+            ),
         )
 
-        assertEquals(original, AiConversationCodec.decode(AiConversationCodec.encode(original)))
+        val restored = AiConversationCodec.decode(AiConversationCodec.encode(original))
+        assertEquals(original.map { it.copy(providerReasoningContent = null) }, restored)
+        assertTrue(restored.last().cloudHealthSensitive)
         assertTrue(AiConversationCodec.decode("not-json").isEmpty())
         assertFalse(AiConversationCodec.decode("[{\"role\":\"root\",\"content\":\"hidden\"}]").any())
     }

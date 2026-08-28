@@ -1,5 +1,7 @@
 package com.campusai.core.health.mifitness
 
+import com.campusai.core.health.HealthMetricKey
+import com.campusai.core.health.HealthMetricStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -15,31 +17,35 @@ import kotlinx.coroutines.test.runTest
 @RunWith(RobolectricTestRunner::class)
 class MiFitnessStepsSyncServiceTest {
     @Test
-    fun `sync reads one CN day follows pages and stores only aggregate`() = runTest {
+    fun `sync reads one local day follows pages and stores only vendor aggregate`() = runTest {
         val storage = RecordingSecretStorage()
         val credentialStore = MiFitnessCredentialStore(storage)
         assertTrue(credentialStore.save("12345", "synthetic-pass-token").isSuccess)
         storage.writes.clear()
         val start = LocalDate.of(2026, 8, 27).atStartOfDay().toEpochSecond(ZoneOffset.ofHours(8))
         val transport = FakeTransport(
-            page(listOf(start to 100L), hasMore = true, nextKey = "cursor-one"),
-            page(listOf(start + 60L to 250L), hasMore = false),
+            page(emptyList(), hasMore = true, nextKey = "cursor-one"),
+            page(listOf(start to 3_210L), hasMore = false),
         )
         val cache = MiFitnessStepsCache(storage)
         val service = service(credentialStore, transport, cache)
 
         val summary = service.syncToday().getOrThrow()
 
-        assertEquals(350L, summary.steps)
-        assertEquals(2, summary.recordCount)
+        assertEquals(3_210L, summary.steps)
+        assertEquals(1, summary.recordCount)
         assertEquals(LocalDate.of(2026, 8, 27), summary.localDate)
         assertEquals(start * 1_000L, summary.period.startEpochMillis)
         assertEquals((start + 86_400L) * 1_000L - 1L, summary.period.endEpochMillis)
         assertEquals(listOf("", "cursor-one"), transport.calls.map(FetchCall::nextKey))
-        assertTrue(transport.calls.all { it.startEpochSeconds == start && it.endEpochSeconds == start + 86_399L })
+        assertTrue(
+            transport.calls.all {
+                it.startEpochSeconds == start && it.endEpochSecondsExclusive == start + 86_400L
+            },
+        )
         assertEquals(summary, cache.read(summary.period, summary.localDate, summary.accountScope))
         assertEquals(1, storage.writes.size)
-        assertTrue(storage.writes.single().second.contains("\"steps\":350"))
+        assertTrue(storage.writes.single().second.contains("\"steps\":3210"))
         assertFalse(storage.writes.single().second.contains("data_list"))
         assertFalse(storage.writes.single().second.contains("synthetic-pass-token"))
     }
@@ -65,6 +71,23 @@ class MiFitnessStepsSyncServiceTest {
         assertFalse(storage.writes[0].second.contains("rotated-pass-token"))
         assertTrue(storage.writes[1].second.contains("\"passToken\":\"rotated-pass-token\""))
         assertEquals(summary, cache.read(summary.period, summary.localDate, summary.accountScope))
+    }
+
+    @Test
+    fun `one read authentication failure reauthenticates and retries once`() = runTest {
+        val storage = RecordingSecretStorage()
+        val store = MiFitnessCredentialStore(storage)
+        store.save("12345", "synthetic-pass-token")
+        val start = LocalDate.of(2026, 8, 27).atStartOfDay().toEpochSecond(ZoneOffset.ofHours(8))
+        val transport = FakeTransport(page(listOf(start to 321L), hasMore = false)).apply {
+            authenticationFailuresRemaining = 1
+        }
+
+        val summary = service(store, transport, MiFitnessStepsCache(storage)).syncToday().getOrThrow()
+
+        assertEquals(321L, summary.steps)
+        assertEquals(2, transport.exchangeCount)
+        assertEquals(2, transport.calls.size)
     }
 
     @Test
@@ -138,7 +161,7 @@ class MiFitnessStepsSyncServiceTest {
     }
 
     @Test
-    fun `empty cloud result persists a refreshed token without replacing the previous cache`() = runTest {
+    fun `empty step aggregate persists explicit metric states and refreshed token`() = runTest {
         val storage = RecordingSecretStorage()
         val store = MiFitnessCredentialStore(storage)
         store.save("12345", "synthetic-pass-token")
@@ -161,17 +184,111 @@ class MiFitnessStepsSyncServiceTest {
         cache.save(oldSummary)
         storage.writes.clear()
 
-        val result = service.syncToday()
+        val summary = service.syncToday().getOrThrow()
 
-        assertEquals("no_cloud_data", (result.exceptionOrNull() as MiFitnessStepsSyncException).code)
+        assertEquals(null, summary.steps)
+        assertEquals(0, summary.recordCount)
+        assertEquals(HealthMetricStatus.EMPTY, summary.metricValues[HealthMetricKey.STEPS]?.status)
         assertEquals("rotated-pass-token", store.read()?.passToken)
-        assertEquals(oldSummary, cache.read(window.period, window.localDate, credential.accountScope))
-        assertEquals(1, storage.writes.size)
-        assertTrue(storage.writes.single().second.contains("\"passToken\":\"rotated-pass-token\""))
+        assertEquals(summary, cache.read(window.period, window.localDate, credential.accountScope))
+        assertEquals(2, storage.writes.size)
+        assertTrue(storage.writes.last().second.contains("\"passToken\":\"rotated-pass-token\""))
     }
 
     @Test
-    fun `empty cloud result and rejected refreshed token leave credentials and cache untouched`() = runTest {
+    fun `missing steps do not prevent other verified metrics from being cached`() = runTest {
+        val storage = RecordingSecretStorage()
+        val store = MiFitnessCredentialStore(storage)
+        store.save("12345", "synthetic-pass-token")
+        val cache = MiFitnessStepsCache(storage)
+        val start = LocalDate.of(2026, 8, 27).atStartOfDay().toEpochSecond(ZoneOffset.ofHours(8))
+        val transport = FakeTransport(page(emptyList(), hasMore = false)).apply {
+            aggregateResponses["sleep"] = aggregatePage(
+                key = "sleep",
+                time = start,
+                value = "{\"total_duration\":421}",
+            )
+        }
+
+        val summary = service(store, transport, cache).syncToday().getOrThrow()
+
+        assertEquals(null, summary.steps)
+        assertEquals(HealthMetricStatus.EMPTY, summary.metricValues[HealthMetricKey.STEPS]?.status)
+        assertEquals(421.0, summary.metricValues[HealthMetricKey.SLEEP_MINUTES]?.value ?: -1.0, 0.0)
+        assertEquals(HealthMetricStatus.AVAILABLE, summary.metricValues[HealthMetricKey.SLEEP_MINUTES]?.status)
+        assertTrue("sleep" in transport.aggregateCalls)
+    }
+
+    @Test
+    fun `step trend follows pages deduplicates identical points and stays separate from daily total`() = runTest {
+        val storage = RecordingSecretStorage()
+        val store = MiFitnessCredentialStore(storage)
+        store.save("12345", "synthetic-pass-token")
+        val cache = MiFitnessStepsCache(storage)
+        val start = LocalDate.of(2026, 8, 27).atStartOfDay().toEpochSecond(ZoneOffset.ofHours(8))
+        val transport = FakeTransport(page(listOf(start to 974L), hasMore = false)).apply {
+            seriesResponses.addLast(seriesPage(
+                listOf(start + 3_600L to 120L, start + 1_800L to 40L),
+                hasMore = true,
+                nextKey = "series-next",
+            ))
+            seriesResponses.addLast(seriesPage(
+                listOf(start + 3_600L to 120L, start + 7_200L to 16L),
+                hasMore = false,
+            ))
+        }
+
+        val summary = service(store, transport, cache).syncToday().getOrThrow()
+
+        assertEquals(974L, summary.steps)
+        val series = checkNotNull(summary.metricTimeSeries[HealthMetricKey.STEPS])
+        assertEquals(HealthMetricStatus.AVAILABLE, series.status)
+        assertEquals(listOf(40.0, 120.0, 16.0), series.points.map { it.value })
+        assertEquals(listOf("", "series-next"), transport.seriesCalls)
+        assertEquals(summary, cache.read(summary.period, summary.localDate, summary.accountScope))
+    }
+
+    @Test
+    fun `partial step trend never changes authoritative daily aggregate`() = runTest {
+        val storage = RecordingSecretStorage()
+        val store = MiFitnessCredentialStore(storage)
+        store.save("12345", "synthetic-pass-token")
+        val start = LocalDate.of(2026, 8, 27).atStartOfDay().toEpochSecond(ZoneOffset.ofHours(8))
+        val transport = FakeTransport(page(listOf(start to 974L), hasMore = false)).apply {
+            seriesResponses.addLast(seriesPage(listOf(start + 1_800L to 40L), true, "repeat"))
+            seriesResponses.addLast(seriesPage(listOf(start + 3_600L to 120L), true, "repeat"))
+        }
+
+        val summary = service(store, transport, MiFitnessStepsCache(storage)).syncToday().getOrThrow()
+
+        assertEquals(974L, summary.steps)
+        val series = checkNotNull(summary.metricTimeSeries[HealthMetricKey.STEPS])
+        assertEquals(HealthMetricStatus.PARTIAL, series.status)
+        assertEquals("cursor_repeated", series.reasonCode)
+        assertEquals(listOf(40.0, 120.0), series.points.map { it.value })
+    }
+
+    @Test
+    fun `out of window step trend is isolated as an error`() = runTest {
+        val storage = RecordingSecretStorage()
+        val store = MiFitnessCredentialStore(storage)
+        store.save("12345", "synthetic-pass-token")
+        val start = LocalDate.of(2026, 8, 27).atStartOfDay().toEpochSecond(ZoneOffset.ofHours(8))
+        val transport = FakeTransport(page(listOf(start to 974L), hasMore = false)).apply {
+            seriesResponses.addLast(seriesPage(listOf(start - 1L to 99L), hasMore = false))
+        }
+
+        val summary = service(store, transport, MiFitnessStepsCache(storage)).syncToday().getOrThrow()
+
+        assertEquals(974L, summary.steps)
+        val series = checkNotNull(summary.metricTimeSeries[HealthMetricKey.STEPS])
+        assertEquals(HealthMetricStatus.ERROR, series.status)
+        assertEquals("record_out_of_window", series.reasonCode)
+        assertTrue(series.points.isEmpty())
+    }
+
+    @Test
+    fun `empty metric snapshot and rejected refreshed token restore credentials and cache`() = runTest {
         val storage = RecordingSecretStorage()
         val store = MiFitnessCredentialStore(storage)
         store.save("12345", "synthetic-pass-token")
@@ -246,7 +363,7 @@ class MiFitnessStepsSyncServiceTest {
         store: MiFitnessCredentialStore,
         transport: MiFitnessStepsTransport,
         cache: MiFitnessStepsCache,
-    ) = MiFitnessStepsSyncService(store, transport, cache, FIXED_CLOCK)
+    ) = MiFitnessStepsSyncService(store, transport, cache, FIXED_CLOCK, ZoneOffset.ofHours(8))
 
     private data class Fixture(
         val storage: RecordingSecretStorage,
@@ -257,16 +374,21 @@ class MiFitnessStepsSyncServiceTest {
 
     private data class FetchCall(
         val startEpochSeconds: Long,
-        val endEpochSeconds: Long,
+        val endEpochSecondsExclusive: Long,
         val nextKey: String,
     )
 
     private class FakeTransport(vararg responses: String) : MiFitnessStepsTransport {
         private val responses = ArrayDeque(responses.toList())
         val calls = mutableListOf<FetchCall>()
+        val aggregateCalls = mutableListOf<String>()
+        val aggregateResponses = mutableMapOf<String, String>()
+        val seriesCalls = mutableListOf<String>()
+        val seriesResponses = ArrayDeque<String>()
         var exchangeCount = 0
         var exchangeFailure: RuntimeException? = null
         var refreshedPassToken: String? = null
+        var authenticationFailuresRemaining = 0
 
         override suspend fun exchangePassToken(credential: MiFitnessCredential): MiFitnessSession {
             exchangeCount += 1
@@ -285,11 +407,44 @@ class MiFitnessStepsSyncServiceTest {
         override suspend fun fetchSteps(
             session: MiFitnessSession,
             startEpochSeconds: Long,
-            endEpochSeconds: Long,
+            endEpochSecondsExclusive: Long,
             nextKey: String,
         ): String {
-            calls += FetchCall(startEpochSeconds, endEpochSeconds, nextKey)
+            calls += FetchCall(startEpochSeconds, endEpochSecondsExclusive, nextKey)
+            if (authenticationFailuresRemaining > 0) {
+                authenticationFailuresRemaining -= 1
+                throw MiFitnessAuthenticationException("synthetic expired session")
+            }
             return checkNotNull(responses.removeFirstOrNull()) { "Unexpected fetch" }
+        }
+
+        override suspend fun fetchDailyAggregate(
+            session: MiFitnessSession,
+            metric: String,
+            startEpochSeconds: Long,
+            endEpochSecondsExclusive: Long,
+            nextKey: String,
+        ): String {
+            if (metric == "steps") return fetchSteps(
+                session,
+                startEpochSeconds,
+                endEpochSecondsExclusive,
+                nextKey,
+            )
+            aggregateCalls += metric
+            return aggregateResponses[metric]
+                ?: "{\"code\":0,\"result\":{\"data_list\":[],\"has_more\":false,\"next_key\":\"\"}}"
+        }
+
+        override suspend fun fetchStepSeries(
+            session: MiFitnessSession,
+            startEpochSeconds: Long,
+            endEpochSecondsExclusive: Long,
+            nextKey: String,
+        ): String {
+            seriesCalls += nextKey
+            return seriesResponses.removeFirstOrNull()
+                ?: "{\"code\":0,\"result\":{\"data_list\":[],\"has_more\":false,\"next_key\":\"\"}}"
         }
     }
 
@@ -317,6 +472,20 @@ class MiFitnessStepsSyncServiceTest {
             nextKey: String = "",
         ): String {
             val items = records.joinToString(",") { (time, steps) ->
+                """{"tag":"daily_report","key":"steps","time":$time,"zone_offset":28800,"sid":"synthetic-aggregate","zone_name":"Asia/Shanghai","source_sid_list":["synthetic-source"],"value":"{\"steps\":$steps,\"distance\":${steps / 2},\"calories\":${steps / 20}}"}"""
+            }
+            return """{"code":0,"result":{"data_list":[$items],"has_more":$hasMore,"next_key":"$nextKey"}}"""
+        }
+
+        fun aggregatePage(key: String, time: Long, value: String): String =
+            """{"code":0,"result":{"data_list":[{"tag":"daily_report","key":"$key","time":$time,"zone_offset":28800,"source_sid_list":["synthetic-source"],"value":$value}],"has_more":false,"next_key":""}}"""
+
+        fun seriesPage(
+            points: List<Pair<Long, Long>>,
+            hasMore: Boolean,
+            nextKey: String = "",
+        ): String {
+            val items = points.joinToString(",") { (time, steps) ->
                 """{"time":$time,"key":"steps","value":"{\"steps\":$steps}"}"""
             }
             return """{"code":0,"result":{"data_list":[$items],"has_more":$hasMore,"next_key":"$nextKey"}}"""

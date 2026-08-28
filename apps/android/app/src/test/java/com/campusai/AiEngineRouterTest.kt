@@ -10,6 +10,7 @@ import com.campusai.core.ai.decideAiRoute
 import com.campusai.core.model.AiConversationMessage
 import com.campusai.core.model.AiMode
 import com.campusai.core.model.AiProvider
+import com.campusai.features.ai.selectedCloudProviderStatus
 import com.campusai.core.model.LocalModelState
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -25,11 +26,26 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AiEngineRouterTest {
+    @Test
+    fun `empty state labels the selected cloud provider without claiming a connection`() {
+        assertEquals("DEEPSEEK · 已选择", selectedCloudProviderStatus(AiProvider.DEEPSEEK))
+        assertEquals("GEMINI · 已选择", selectedCloudProviderStatus(AiProvider.GOOGLE_GEMINI))
+    }
+
     @Test fun `auto follows online and offline rules`() {
         assertEquals(AiRouteDecision.Use(AiRoute.LOCAL), decideAiRoute(AiProvider.AUTO, AiMode.FAST, true, true, true))
         val cloudConsent = decideAiRoute(AiProvider.AUTO, AiMode.FAST, true, false, true) as AiRouteDecision.Block
         assertEquals("local_model_not_ready", cloudConsent.code)
         assertTrue(cloudConsent.canUseCloudOnce)
+        val geminiConsent = decideAiRoute(
+            provider = AiProvider.AUTO,
+            mode = AiMode.FAST,
+            online = true,
+            localReady = false,
+            personalKeyAvailable = false,
+            geminiKeyAvailable = true,
+        ) as AiRouteDecision.Block
+        assertTrue(geminiConsent.canUseCloudOnce)
         assertEquals(AiRouteDecision.Use(AiRoute.LOCAL), decideAiRoute(AiProvider.AUTO, AiMode.FAST, false, true))
         assertEquals("offline_model_missing", (decideAiRoute(AiProvider.AUTO, AiMode.FAST, false, false) as AiRouteDecision.Block).code)
         assertEquals(AiRouteDecision.Use(AiRoute.LOCAL), decideAiRoute(AiProvider.AUTO, AiMode.DEEP, false, true))
@@ -37,9 +53,32 @@ class AiEngineRouterTest {
 
     @Test fun `explicit providers never silently fall back`() {
         assertEquals("deepseek_offline", (decideAiRoute(AiProvider.DEEPSEEK, AiMode.FAST, false, true) as AiRouteDecision.Block).code)
+        assertEquals("gemini_offline", (decideAiRoute(AiProvider.GOOGLE_GEMINI, AiMode.FAST, false, true) as AiRouteDecision.Block).code)
         assertEquals(AiRouteDecision.Use(AiRoute.LOCAL), decideAiRoute(AiProvider.LOCAL, AiMode.DEEP, true, true))
         val missing = decideAiRoute(AiProvider.LOCAL, AiMode.FAST, true, false) as AiRouteDecision.Block
         assertTrue(missing.canUseCloudOnce)
+    }
+
+    @Test fun `Gemini requires its own key and never borrows DeepSeek credentials`() {
+        val missing = decideAiRoute(
+            provider = AiProvider.GOOGLE_GEMINI,
+            mode = AiMode.FAST,
+            online = true,
+            localReady = true,
+            personalKeyAvailable = true,
+            geminiKeyAvailable = false,
+        ) as AiRouteDecision.Block
+        assertEquals("gemini_key_missing", missing.code)
+        assertEquals(
+            AiRouteDecision.Use(AiRoute.PERSONAL_GOOGLE_GEMINI),
+            decideAiRoute(
+                provider = AiProvider.GOOGLE_GEMINI,
+                mode = AiMode.DEEP,
+                online = true,
+                localReady = false,
+                geminiKeyAvailable = true,
+            ),
+        )
     }
 
     @Test fun `explicit cloud route requires the users own key`() {
@@ -80,6 +119,28 @@ class AiEngineRouterTest {
         )
         runCatching { router.stream(AiRequest(AiMode.FAST, listOf(AiConversationMessage("user", "test")))).toList() }
         assertEquals(0, personalDeepSeek.calls)
+        assertEquals(0, local.calls)
+    }
+
+    @Test fun `explicit Gemini route calls only the Gemini engine`() = runTest {
+        val deepSeek = FakeEngine()
+        val gemini = FakeEngine()
+        val local = FakeEngine()
+        val router = AiEngineRouter(
+            personalDeepSeek = deepSeek,
+            local = local,
+            provider = { AiProvider.GOOGLE_GEMINI },
+            personalKeyAvailable = { true },
+            isOnline = { true },
+            localState = { LocalModelState.Ready },
+            personalGoogleGemini = gemini,
+            geminiKeyAvailable = { true },
+        )
+
+        router.stream(AiRequest(AiMode.FAST, listOf(AiConversationMessage("user", "test")))).toList()
+
+        assertEquals(0, deepSeek.calls)
+        assertEquals(1, gemini.calls)
         assertEquals(0, local.calls)
     }
 

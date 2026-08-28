@@ -1,5 +1,15 @@
 package com.campusai.core.designsystem
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.graphics.RenderEffect
+import android.graphics.Shader
+import android.os.Build
+import android.view.View
+import android.view.Window
+import android.view.WindowManager
+import androidx.annotation.RequiresApi
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
@@ -19,6 +29,7 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.defaultMinSize
@@ -29,14 +40,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -61,6 +76,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -68,6 +84,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.semantics.Role
@@ -84,6 +102,9 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -92,6 +113,7 @@ import com.campusai.core.model.RenderQuality
 import com.campusai.core.model.SpectraEnvironment
 import com.campusai.R
 import kotlinx.coroutines.launch
+import java.util.WeakHashMap
 import kotlin.math.roundToInt
 
 @Composable
@@ -104,7 +126,13 @@ fun SpectraBackdrop(
     phase: SpectraPhase = SpectraPhase.AMBIENT,
 ) {
     if (motion == MotionMode.OFF) {
-        Box(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
+        val background = MaterialTheme.colorScheme.background
+        val darkMode = background.luminance() < .35f
+        Box(
+            modifier
+                .fillMaxSize()
+                .background(staticSpectraBackdropBrush(environment, darkMode, background)),
+        )
         return
     }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -142,12 +170,12 @@ fun SpectraBackdrop(
     LaunchedEffect(surface, active, lifecycleActive) {
         if (lifecycleActive) surface?.setSceneActive(active)
     }
-    LaunchedEffect(surface, quality, lifecycleActive, active) {
+    LaunchedEffect(surface, quality, phase, lifecycleActive, active) {
         if (!lifecycleActive || !active) return@LaunchedEffect
         val minFrameIntervalNanos = when (quality) {
             RenderQuality.LOW -> 48_000_000L
             RenderQuality.AUTO,
-            RenderQuality.HIGH -> 15_000_000L
+            RenderQuality.HIGH -> if (phase == SpectraPhase.AMBIENT) 32_000_000L else 15_000_000L
         }
         var lastRequestedAt = Long.MIN_VALUE
         while (lifecycleActive && active) {
@@ -163,6 +191,41 @@ fun SpectraBackdrop(
         }
     }
 }
+
+/** A motion-free environment identity; no renderer is mounted in reduced-motion mode. */
+private fun staticSpectraBackdropBrush(
+    environment: SpectraEnvironment,
+    darkMode: Boolean,
+    background: Color,
+): Brush = Brush.linearGradient(
+    colors = when (environment) {
+        SpectraEnvironment.ORIGINAL -> if (darkMode) {
+            listOf(background, Color(0xFF111D34), background)
+        } else {
+            listOf(background, Color(0xFFEEF1FB), background)
+        }
+        SpectraEnvironment.OCEAN -> if (darkMode) {
+            listOf(background, Color(0xFF0D2933), Color(0xFF10233B))
+        } else {
+            listOf(background, Color(0xFFDDF3F5), Color(0xFFEAF3FB))
+        }
+        SpectraEnvironment.ULTRAVIOLET -> if (darkMode) {
+            listOf(background, Color(0xFF241B3C), Color(0xFF151B35))
+        } else {
+            listOf(background, Color(0xFFF0E8FA), Color(0xFFF2F1FC))
+        }
+        SpectraEnvironment.EMBER -> if (darkMode) {
+            listOf(background, Color(0xFF352017), Color(0xFF251B25))
+        } else {
+            listOf(background, Color(0xFFF9E9DF), Color(0xFFFFF3E8))
+        }
+        SpectraEnvironment.AURORA -> if (darkMode) {
+            listOf(background, Color(0xFF103126), Color(0xFF173A2B), background)
+        } else {
+            listOf(background, Color(0xFFDDF3E5), Color(0xFFE8F5DC), background)
+        }
+    },
+)
 
 @Composable
 fun GlassPanel(
@@ -254,6 +317,370 @@ fun GlassPanel(
             .then(if (onClick != null) Modifier.clickable(source, null) { onClick() } else Modifier),
         content = content,
     )
+}
+
+/** App-owned modal surface. System permission and document-picker windows remain system styled. */
+@Composable
+fun SpectraDialog(
+    onDismissRequest: () -> Unit,
+    modifier: Modifier = Modifier,
+    properties: DialogProperties = DialogProperties(usePlatformDefaultWidth = false),
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val dark = MaterialTheme.colorScheme.background.luminance() < .35f
+    val scheme = MaterialTheme.colorScheme
+    val modalBase = spectraModalGlass(
+        dark = dark,
+        surface = scheme.surface,
+        accent = scheme.primary,
+        longForm = false,
+    )
+    val scrim = spectraModalMist(
+        dark = dark,
+        background = scheme.background,
+        surface = scheme.surface,
+        accent = scheme.primary,
+    )
+    Dialog(onDismissRequest = onDismissRequest, properties = properties) {
+        SpectraBackdropBlurEffect()
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(scrim)
+                .padding(horizontal = 24.dp, vertical = 20.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            GlassPanel(
+                modifier = modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 560.dp)
+                    .background(modalBase, RoundedCornerShape(24.dp)),
+                radius = 24,
+                emphasized = true,
+                shadowed = true,
+                // Dialogs are separate windows; keep the single activity renderer authoritative
+                // and use the layered Compose glass fallback inside the modal window.
+                optical = false,
+                content = content,
+            )
+        }
+    }
+}
+
+/** Full-window app-owned destination with a tinted fallback behind transparent page scaffolds. */
+@Composable
+fun SpectraFullScreenDialog(
+    onDismissRequest: () -> Unit,
+    mood: PageMood = PageMood.NEUTRAL,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val dark = MaterialTheme.colorScheme.background.luminance() < .35f
+    val base = if (dark) Color(0xC707101C) else Color(0xB8F2F6FB)
+    val accent = when (mood) {
+        PageMood.SOCIAL -> SpectraColors.Violet
+        PageMood.COMMERCE -> SpectraColors.Warm
+        PageMood.HEALTH -> SpectraColors.Cyan
+        PageMood.GROWTH -> SpectraColors.Success
+        PageMood.FOCUS -> SpectraColors.Focus
+        PageMood.PERSONAL -> SpectraColors.Rose
+        PageMood.CAESAR -> SpectraColors.Cyan
+        PageMood.NEUTRAL -> SpectraColors.Silver
+    }
+    Dialog(
+        onDismissRequest = onDismissRequest,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        SpectraBackdropBlurEffect(blurRadius = 32.dp)
+        Box(
+            modifier = Modifier.fillMaxSize().background(
+                Brush.linearGradient(
+                    listOf(base, accent.copy(alpha = if (dark) .12f else .16f), base),
+                ),
+            ),
+            content = content,
+        )
+    }
+}
+
+@Composable
+fun SpectraAlertDialog(
+    title: String,
+    message: String,
+    confirmLabel: String,
+    onConfirm: () -> Unit,
+    dismissLabel: String,
+    onDismissRequest: () -> Unit,
+    destructive: Boolean = false,
+) {
+    SpectraDialog(onDismissRequest = onDismissRequest) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text(title, style = MaterialTheme.typography.titleLarge)
+            Text(
+                message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(.72f),
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onDismissRequest) { Text(dismissLabel) }
+                TextButton(onClick = onConfirm) {
+                    Text(confirmLabel, color = if (destructive) SpectraColors.Warm else MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+    }
+}
+
+/** Shared glass shell for app-owned bottom sheets. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SpectraModalBottomSheet(
+    onDismissRequest: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val dark = MaterialTheme.colorScheme.background.luminance() < .35f
+    val scheme = MaterialTheme.colorScheme
+    val modalBase = spectraModalGlass(
+        dark = dark,
+        surface = scheme.surface,
+        accent = scheme.primary,
+        longForm = true,
+    )
+    val scrim = spectraModalMist(
+        dark = dark,
+        background = scheme.background,
+        surface = scheme.surface,
+        accent = scheme.primary,
+    )
+    ModalBottomSheet(
+        onDismissRequest = onDismissRequest,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = modalBase,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        scrimColor = scrim,
+        tonalElevation = 0.dp,
+        dragHandle = {
+            Box(
+                Modifier
+                    .padding(top = 10.dp, bottom = 8.dp)
+                    .size(width = 42.dp, height = 4.dp)
+                    .background(SpectraColors.Silver.copy(.82f), CircleShape),
+            )
+        },
+    ) {
+        SpectraBackdropBlurEffect(blurRadius = 30.dp)
+        GlassPanel(
+            modifier = modifier.fillMaxWidth(),
+            radius = 28,
+            emphasized = true,
+            shadowed = false,
+            optical = false,
+            content = content,
+        )
+    }
+}
+
+/** Material for DropdownMenu/Popup content without creating another renderer or opaque white card. */
+@Composable
+fun SpectraPopupSurface(
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val dark = MaterialTheme.colorScheme.background.luminance() < .35f
+    val popupBase = spectraModalGlass(
+        dark = dark,
+        surface = MaterialTheme.colorScheme.surface,
+        accent = MaterialTheme.colorScheme.primary,
+        longForm = false,
+    )
+    // Popups never add a full-screen scrim. On a separate popup window this only softens the
+    // activity behind it; on an unsupported host the translucent environment tint stands alone.
+    SpectraBackdropBlurEffect(blurRadius = 22.dp)
+    GlassPanel(
+        modifier = modifier.background(popupBase, RoundedCornerShape(18.dp)),
+        radius = 18,
+        emphasized = true,
+        shadowed = true,
+        optical = false,
+        content = content,
+    )
+}
+
+private fun spectraModalGlass(
+    dark: Boolean,
+    surface: Color,
+    accent: Color,
+    longForm: Boolean,
+): Color {
+    val environmentTint = lerp(surface, accent, if (dark) .10f else .075f)
+    val alpha = when {
+        dark && longForm -> .58f
+        dark -> .55f
+        longForm -> .56f
+        else -> .51f
+    }
+    return environmentTint.copy(alpha = alpha)
+}
+
+private fun spectraModalMist(
+    dark: Boolean,
+    background: Color,
+    surface: Color,
+    accent: Color,
+): Color {
+    val blurSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    val environmentMist = if (dark) {
+        lerp(background, lerp(surface, accent, .10f), .72f)
+    } else {
+        lerp(SpectraColors.Silver, accent, .09f)
+    }
+    val alpha = when {
+        blurSupported && dark -> .10f
+        blurSupported -> .075f
+        dark -> .19f
+        else -> .15f
+    }
+    return environmentMist.copy(alpha = alpha)
+}
+
+/**
+ * Blurs the app content underneath a modal without blurring its labels or controls. Android 12+
+ * uses compositor-level cross-window blur (which also catches the GLSurfaceView). Popup hosts
+ * without a Window fall back to a RenderEffect on the activity decor. Older Android versions keep
+ * a slightly stronger environment mist. We explicitly remove the platform DIM_BEHIND flag while
+ * acquired: depth comes from natural blur and translucent glass, never a black system curtain.
+ */
+@Composable
+private fun SpectraBackdropBlurEffect(
+    blurRadius: androidx.compose.ui.unit.Dp = 28.dp,
+) {
+    val localView = LocalView.current
+    val activity = LocalContext.current.findActivity()
+    val blurRadiusPx = with(LocalDensity.current) { blurRadius.roundToPx() }.coerceAtLeast(1)
+    DisposableEffect(localView, activity, blurRadiusPx) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val dialogWindow = (localView.parent as? DialogWindowProvider)?.window
+            when {
+                dialogWindow != null -> {
+                    SpectraWindowBlurController.acquire(dialogWindow, blurRadiusPx)
+                    onDispose { SpectraWindowBlurController.release(dialogWindow) }
+                }
+                activity != null -> {
+                    val decor = activity.window.decorView
+                    SpectraViewBlurController.acquire(decor, blurRadiusPx)
+                    onDispose { SpectraViewBlurController.release(decor) }
+                }
+                else -> onDispose { }
+            }
+        } else {
+            onDispose { }
+        }
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+@RequiresApi(Build.VERSION_CODES.S)
+private object SpectraWindowBlurController {
+    private data class WindowState(
+        var references: Int,
+        val originalFlags: Int,
+        val originalDimAmount: Float,
+        val originalBlurRadius: Int,
+    )
+
+    private val states = WeakHashMap<Window, WindowState>()
+
+    @Synchronized
+    fun acquire(window: Window, blurRadiusPx: Int) {
+        val existing = states[window]
+        if (existing != null) {
+            existing.references += 1
+        } else {
+            val original = window.attributes
+            states[window] = WindowState(
+                references = 1,
+                originalFlags = original.flags,
+                originalDimAmount = original.dimAmount,
+                originalBlurRadius = original.blurBehindRadius,
+            )
+        }
+        window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        val updated = window.attributes
+        updated.setBlurBehindRadius(maxOf(updated.blurBehindRadius, blurRadiusPx))
+        updated.dimAmount = 0f
+        window.attributes = updated
+    }
+
+    @Synchronized
+    fun release(window: Window) {
+        val state = states[window] ?: return
+        if (state.references > 1) {
+            state.references -= 1
+            return
+        }
+        states.remove(window)
+        val restored = window.attributes
+        restored.setBlurBehindRadius(state.originalBlurRadius)
+        restored.dimAmount = state.originalDimAmount
+        window.attributes = restored
+        if (state.originalFlags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND != 0) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+        }
+        if (state.originalFlags and WindowManager.LayoutParams.FLAG_DIM_BEHIND != 0) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        }
+    }
+}
+
+@RequiresApi(Build.VERSION_CODES.S)
+private object SpectraViewBlurController {
+    private data class ViewState(var references: Int)
+    private val states = WeakHashMap<View, ViewState>()
+
+    @Synchronized
+    fun acquire(view: View, blurRadiusPx: Int) {
+        val existing = states[view]
+        if (existing != null) {
+            existing.references += 1
+            return
+        }
+        states[view] = ViewState(references = 1)
+        view.setRenderEffect(
+            RenderEffect.createBlurEffect(
+                blurRadiusPx.toFloat(),
+                blurRadiusPx.toFloat(),
+                Shader.TileMode.MIRROR,
+            ),
+        )
+    }
+
+    @Synchronized
+    fun release(view: View) {
+        val state = states[view] ?: return
+        if (state.references > 1) {
+            state.references -= 1
+            return
+        }
+        states.remove(view)
+        view.setRenderEffect(null)
+    }
 }
 
 /**
@@ -564,7 +991,7 @@ fun BrandMark(
     contentDescription: String = "Caesar∞ 标识",
 ) {
     Image(
-        painter = painterResource(R.drawable.campusai_infinity_icon),
+        painter = painterResource(R.drawable.campusai_brand_mark),
         contentDescription = if (decorative) null else contentDescription,
         modifier = modifier,
         colorFilter = tint?.let { ColorFilter.tint(it) },

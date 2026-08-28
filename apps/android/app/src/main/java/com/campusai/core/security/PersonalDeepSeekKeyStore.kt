@@ -1,37 +1,30 @@
 package com.campusai.core.security
 
 import android.content.Context
+import com.campusai.core.ai.CloudAiProvider
 
 class PersonalDeepSeekKeyStore(context: Context) {
-    private val appContext = context.applicationContext
+    private val providers = PersonalAiProviderStore(context.applicationContext)
 
     fun save(rawKey: String): Result<Unit> {
-        val key = rawKey.trim()
-        if (!isValid(key)) {
-            return Result.failure(IllegalArgumentException("Key 格式无效：请粘贴完整的 DeepSeek API Key，且不要包含空格。"))
-        }
-        return if (SecurePreferences.encrypt(appContext, STORAGE_KEY, key)) {
-            Result.success(Unit)
-        } else {
-            Result.failure(IllegalStateException("系统安全存储不可用，Key 未保存。请确认设备已启用安全锁屏后重试。"))
-        }
+        return providers.saveCredential(CloudAiProvider.DEEPSEEK, rawKey)
     }
 
-    fun read(): String = SecurePreferences.decrypt(appContext, STORAGE_KEY)
+    fun read(): String = providers.readCredential(CloudAiProvider.DEEPSEEK)?.value.orEmpty()
 
-    fun hasKey(): Boolean = read().isNotBlank()
+    fun hasKey(): Boolean = providers.hasCredential(CloudAiProvider.DEEPSEEK)
 
-    fun delete(): Boolean = SecurePreferences.encrypt(appContext, STORAGE_KEY, "")
+    fun delete(): Boolean = providers.deleteCredential(CloudAiProvider.DEEPSEEK)
 
-    fun maskedLabel(): String {
-        val key = read()
-        return if (key.length >= 8) "${key.take(3)}••••${key.takeLast(4)}" else "已安全保存"
-    }
+    fun maskedLabel(): String = providers.configuration(CloudAiProvider.DEEPSEEK).maskedCredential
+
+    fun selectedModel(): String = providers.selectedModel(CloudAiProvider.DEEPSEEK)
+
+    fun saveSelectedModel(modelId: String): Result<Unit> =
+        providers.saveSelectedModel(CloudAiProvider.DEEPSEEK, modelId)
 
     companion object {
-        private const val STORAGE_KEY = "personal_deepseek_api_key"
-
         internal fun isValid(key: String): Boolean =
-            key.length >= 20 && key.none(Char::isWhitespace) && key.all { it.code in 33..126 }
+            PersonalAiProviderStore.credentialValidationError(CloudAiProvider.DEEPSEEK, key) == null
     }
 }

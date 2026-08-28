@@ -88,14 +88,12 @@ import androidx.compose.material.icons.rounded.Policy
 import androidx.compose.material.icons.rounded.Today
 import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
@@ -155,16 +153,15 @@ import com.campusai.core.designsystem.GlassPanel
 import com.campusai.core.designsystem.CaesarSlidingSelector
 import com.campusai.core.designsystem.PageMood
 import com.campusai.core.designsystem.SpectraAction
+import com.campusai.core.designsystem.SpectraAlertDialog
 import com.campusai.core.designsystem.SpectraColors
+import com.campusai.core.designsystem.SpectraDialog
+import com.campusai.core.designsystem.SpectraModalBottomSheet
 import com.campusai.core.designsystem.SpectraStatus
 import com.campusai.core.designsystem.SpectraStatusTone
 import com.campusai.core.designsystem.SpectraSurface
 import com.campusai.core.designsystem.SpectraTheme
 import com.campusai.core.designsystem.SpectraVisualStyle
-import com.campusai.caesar.bandcontract.BandBridgeContract
-import com.campusai.core.health.BandBridgeIntents
-import com.campusai.core.health.BandLiveSnapshot
-import com.campusai.core.health.BandLiveState
 import com.campusai.core.health.HealthAvailability
 import com.campusai.core.health.HealthFreshness
 import com.campusai.core.localai.LocalModelSelection
@@ -221,7 +218,7 @@ fun AiScreen(
     val localModel = state.lockedLocalModelId?.let(viewModel::localModelFor)?.let { locked ->
         locked.copy(state = localModelStates[locked.manifest.id] ?: locked.state)
     } ?: selectedLocalModel
-    val localRouteSelected = state.provider != AiProvider.DEEPSEEK
+    val localRouteSelected = state.provider == AiProvider.AUTO || state.provider == AiProvider.LOCAL
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> uri?.let(viewModel::attachImage) }
     var cameraUriValue by rememberSaveable { mutableStateOf<String?>(null) }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
@@ -239,6 +236,55 @@ fun AiScreen(
     var systemSpeechConsentGranted by rememberSaveable { mutableStateOf(false) }
     var showSystemSpeechConsent by rememberSaveable { mutableStateOf(false) }
     var showMicrophoneSettingsRecovery by rememberSaveable { mutableStateOf(false) }
+    var preferSystemSpeechActivity by rememberSaveable { mutableStateOf(false) }
+    var systemSpeechActivityInFlight by remember { mutableStateOf(false) }
+    var systemSpeechActivityRoute by remember { mutableStateOf(CaesarSpeechFallbackRoute.STANDARD_RECOGNITION_ACTIVITY) }
+    val xiaomiEnginePermissionRecoveryAvailable = remember(context) {
+        context.packageManager.resolveActivity(
+            Intent(XIAOMI_PUBLIC_SPEECH_ACTION),
+            PackageManager.MATCH_DEFAULT_ONLY,
+        ) != null
+    }
+    val systemSpeechActivityLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val completedRoute = systemSpeechActivityRoute
+        systemSpeechActivityRoute = CaesarSpeechFallbackRoute.STANDARD_RECOGNITION_ACTIVITY
+        systemSpeechActivityInFlight = false
+        listening = false
+        if (completedRoute == CaesarSpeechFallbackRoute.XIAOMI_ENGINE_PERMISSION_RECOVERY) {
+            scope.launch {
+                snackbarHost.showSnackbar("完成系统语音引擎的麦克风授权后，请返回并再点一次语音。")
+            }
+        } else if (result.resultCode == Activity.RESULT_OK) {
+            val transcript = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                ?.trim()
+                .orEmpty()
+            if (transcript.isNotEmpty()) prompt = transcript
+            else scope.launch { snackbarHost.showSnackbar("没有听清，请再说一次。") }
+        }
+    }
+    val launchSystemSpeechActivity: (CaesarSpeechFallbackRoute) -> Unit = { route ->
+        if (!systemSpeechActivityInFlight) {
+            systemSpeechActivityInFlight = true
+            systemSpeechActivityRoute = route
+            listening = true
+            runCatching {
+                val intent = caesarSpeechRecognitionIntent(preferOffline = false).apply {
+                    if (route == CaesarSpeechFallbackRoute.XIAOMI_ENGINE_PERMISSION_RECOVERY) {
+                        action = XIAOMI_PUBLIC_SPEECH_ACTION
+                    }
+                }
+                systemSpeechActivityLauncher.launch(intent)
+            }.onFailure { error ->
+                systemSpeechActivityInFlight = false
+                systemSpeechActivityRoute = CaesarSpeechFallbackRoute.STANDARD_RECOGNITION_ACTIVITY
+                listening = false
+                Log.w(SPEECH_LOG_TAG, "System recognition activity failed to start", error)
+                scope.launch { snackbarHost.showSnackbar("系统语音输入无法启动，请检查默认语音识别服务。") }
+            }
+        }
+    }
     val audioPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             voiceStartRequest += 1
@@ -264,13 +310,22 @@ fun AiScreen(
         systemAvailable = speechAvailability.second,
         systemConsentGranted = systemSpeechConsentGranted,
     )
-    val speechRecognizer = remember(context, speechPolicy.recognizerKind, speechPolicy.requiresSystemConsent) {
+    val speechRecognizer = remember(
+        context,
+        speechPolicy.recognizerKind,
+        speechPolicy.requiresSystemConsent,
+        preferSystemSpeechActivity,
+    ) {
         runCatching {
             when (speechPolicy.recognizerKind) {
                 CaesarSpeechRecognizerKind.ON_DEVICE -> if (Build.VERSION.SDK_INT >= 31) {
                     SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
                 } else null
-                CaesarSpeechRecognizerKind.SYSTEM -> if (speechPolicy.requiresSystemConsent) null else SpeechRecognizer.createSpeechRecognizer(context)
+                CaesarSpeechRecognizerKind.SYSTEM -> if (speechPolicy.requiresSystemConsent || preferSystemSpeechActivity) {
+                    null
+                } else {
+                    SpeechRecognizer.createSpeechRecognizer(context)
+                }
                 CaesarSpeechRecognizerKind.UNAVAILABLE -> null
             }
         }.onFailure { error ->
@@ -307,16 +362,32 @@ fun AiScreen(
                         SpeechRecognizer.ERROR_CLIENT,
                         SpeechRecognizer.ERROR_SERVER,
                     )
+                val fallbackRoute = caesarSpeechFallbackRoute(
+                    recognizerKind = speechPolicy.recognizerKind,
+                    errorCode = error,
+                    appMicrophonePermissionGranted = audioPermissionGranted,
+                    xiaomiEnginePermissionRecoveryAvailable = xiaomiEnginePermissionRecoveryAvailable,
+                )
+                val shouldFallbackToSystemActivity =
+                    fallbackRoute != CaesarSpeechFallbackRoute.NONE && !systemSpeechActivityInFlight
                 if (shouldFallbackFromOnDevice) {
                     onDeviceRecognizerFailed = true
                     if (systemSpeechConsentGranted) voiceStartRequest += 1
                     else showSystemSpeechConsent = true
+                }
+                if (shouldFallbackToSystemActivity) {
+                    preferSystemSpeechActivity = true
+                    launchSystemSpeechActivity(fallbackRoute)
                 }
                 if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS && !audioPermissionGranted) {
                     showMicrophoneSettingsRecovery = true
                 }
                 val message = when {
                     shouldFallbackFromOnDevice -> "端侧语音服务未能启动，已为你切换到系统语音识别。"
+                    shouldFallbackToSystemActivity &&
+                        fallbackRoute != CaesarSpeechFallbackRoute.XIAOMI_ENGINE_PERMISSION_RECOVERY ->
+                        "系统语音服务不接受直接麦克风访问，已切换到系统语音输入。"
+                    shouldFallbackToSystemActivity -> null
                     error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS && !audioPermissionGranted -> "麦克风权限已关闭，可前往系统设置恢复。"
                     error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "系统语音服务未能打开麦克风，请重试或检查系统语音识别服务。"
                     error == SpeechRecognizer.ERROR_NETWORK || error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "系统语音服务网络不可用。"
@@ -355,12 +426,7 @@ fun AiScreen(
         consumedVoiceStartRequest = voiceStartRequest
         listening = true
         runCatching {
-            recognizer.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                if (speechPolicy.preferOffline) putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            })
+            recognizer.startListening(caesarSpeechRecognitionIntent(speechPolicy.preferOffline))
         }.onFailure { error ->
             listening = false
             Log.w(SPEECH_LOG_TAG, "Recognizer start failed for ${speechPolicy.recognizerKind}", error)
@@ -480,7 +546,7 @@ fun AiScreen(
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     if (state.messages.none { it.content.isNotBlank() } && state.error == null && !state.streaming) {
                         QuietEmptyState(
-                            if (localRouteSelected) localModelStatus(localModel) else "DEEPSEEK · 已连接",
+                            if (localRouteSelected) localModelStatus(localModel) else selectedCloudProviderStatus(state.provider),
                             motionEnabled,
                             visualPreset,
                             Modifier.fillMaxSize(),
@@ -566,6 +632,9 @@ fun AiScreen(
                             snackbarHost.showSnackbar("当前设备没有可用的语音识别服务。")
                         }
                         else if (speechPolicy.requiresSystemConsent) showSystemSpeechConsent = true
+                        else if (speechPolicy.recognizerKind == CaesarSpeechRecognizerKind.SYSTEM && preferSystemSpeechActivity) {
+                            launchSystemSpeechActivity(CaesarSpeechFallbackRoute.STANDARD_RECOGNITION_ACTIVITY)
+                        }
                         else if (speechRecognizer == null) scope.launch {
                             snackbarHost.showSnackbar("系统语音识别器初始化失败，请稍后重试。")
                         }
@@ -586,54 +655,40 @@ fun AiScreen(
     }
 
     if (showSystemSpeechConsent) {
-        AlertDialog(
+        SpectraAlertDialog(
             onDismissRequest = { showSystemSpeechConsent = false },
-            title = { Text("使用系统语音识别？") },
-            text = {
-                Text(
-                    "这台设备没有可用的端侧识别器。继续后，录音可能由系统语音服务联网处理。" +
-                        "Caesar∞ 不会将录音写入记忆或 Trace；本次进入 AI 页期间只询问一次。",
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showSystemSpeechConsent = false
-                        systemSpeechConsentGranted = true
-                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                            voiceStartRequest += 1
-                        } else {
-                            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        }
-                    },
-                ) { Text("同意并继续") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showSystemSpeechConsent = false }) { Text("取消") }
+            title = "使用系统语音识别？",
+            message = "这台设备没有可用的端侧识别器。继续后，录音可能由系统语音服务联网处理。" +
+                "Caesar∞ 不会将录音写入记忆或 Trace；本次进入 AI 页期间只询问一次。",
+            confirmLabel = "同意并继续",
+            dismissLabel = "取消",
+            onConfirm = {
+                showSystemSpeechConsent = false
+                systemSpeechConsentGranted = true
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    voiceStartRequest += 1
+                } else {
+                    audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
             },
         )
     }
 
     if (showMicrophoneSettingsRecovery) {
-        AlertDialog(
+        SpectraAlertDialog(
             onDismissRequest = { showMicrophoneSettingsRecovery = false },
-            title = { Text("恢复麦克风权限") },
-            text = { Text("麦克风权限已被关闭且系统不再显示授权弹窗。请在应用设置中将“麦克风”改为允许，返回后再点击语音。") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showMicrophoneSettingsRecovery = false
-                        context.startActivity(
-                            Intent(
-                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                Uri.parse("package:${context.packageName}"),
-                            ),
-                        )
-                    },
-                ) { Text("打开设置") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showMicrophoneSettingsRecovery = false }) { Text("取消") }
+            title = "恢复麦克风权限",
+            message = "麦克风权限已被关闭且系统不再显示授权弹窗。请在应用设置中将“麦克风”改为允许，返回后再点击语音。",
+            confirmLabel = "打开设置",
+            dismissLabel = "取消",
+            onConfirm = {
+                showMicrophoneSettingsRecovery = false
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:${context.packageName}"),
+                    ),
+                )
             },
         )
     }
@@ -676,13 +731,6 @@ fun AiScreen(
                     scope.launch { snackbarHost.showSnackbar("此 Android 版本不支持 Health Connect。") }
                 }
             },
-            onStartBand = viewModel::startBandSession,
-            onStopBand = viewModel::stopBandSession,
-            onSyncBandHistory = viewModel::triggerBandHistorySync,
-            onOpenBandDiagnostics = {
-                runCatching { context.startActivity(BandBridgeIntents.diagnostics()) }
-                    .onFailure { scope.launch { snackbarHost.showSnackbar("尚未安装可打开的 CaesarBandBridge。") } }
-            },
             onDismiss = { showRuntime = false },
         )
     }
@@ -713,13 +761,6 @@ fun AiScreen(
             onForgetAllMemories = viewModel::forgetAllMemories,
             onRefreshHealth = viewModel::refreshHealthStatus,
             onSyncMiFitnessSteps = viewModel::refreshMiFitnessSteps,
-            onStartBand = viewModel::startBandSession,
-            onStopBand = viewModel::stopBandSession,
-            onSyncBandHistory = viewModel::triggerBandHistorySync,
-            onOpenBandDiagnostics = {
-                runCatching { context.startActivity(BandBridgeIntents.diagnostics()) }
-                    .onFailure { scope.launch { snackbarHost.showSnackbar("尚未安装可打开的 CaesarBandBridge。") } }
-            },
             onHealthPermissions = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     healthPermissionLauncher.launch(
@@ -747,19 +788,22 @@ private fun runtimeSummary(
     AiProvider.AUTO -> "自动 · ${localModel.mode.displayLabel()}优先"
     AiProvider.LOCAL -> "本机 · ${localModel.mode.displayLabel()}"
     AiProvider.DEEPSEEK -> "DeepSeek"
+    AiProvider.GOOGLE_GEMINI -> "Google Gemini"
 }
 
 private fun providerIndex(provider: AiProvider): Int = when (provider) {
     AiProvider.AUTO -> 0
     AiProvider.LOCAL -> 1
     AiProvider.DEEPSEEK -> 2
+    AiProvider.GOOGLE_GEMINI -> 3
 }
 
 private fun selectProvider(index: Int, viewModel: AiViewModel) {
     when (index) {
         0 -> viewModel.setProvider(AiProvider.AUTO)
         1 -> viewModel.setProvider(AiProvider.LOCAL)
-        else -> viewModel.setProvider(AiProvider.DEEPSEEK)
+        2 -> viewModel.setProvider(AiProvider.DEEPSEEK)
+        else -> viewModel.setProvider(AiProvider.GOOGLE_GEMINI)
     }
 }
 
@@ -887,7 +931,11 @@ private fun ClassicAiChrome(
             ) {
                 LiquidMetalOrb(active = false, motionEnabled = motionEnabled, size = 34.dp)
                 Text(
-                    if (provider == AiProvider.DEEPSEEK) "DEEPSEEK" else "${localModel.mode.displayLabel()} · 本机",
+                    when (provider) {
+                        AiProvider.DEEPSEEK -> "DEEPSEEK"
+                        AiProvider.GOOGLE_GEMINI -> "GEMINI"
+                        AiProvider.AUTO, AiProvider.LOCAL -> "${localModel.mode.displayLabel()} · 本机"
+                    },
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurface.copy(.68f),
                     maxLines = 1,
@@ -939,17 +987,9 @@ private fun AiRuntimeSheet(
     onRefreshHealth: () -> Unit,
     onSyncMiFitnessSteps: () -> Unit,
     onHealthPermissions: () -> Unit,
-    onStartBand: () -> Unit,
-    onStopBand: () -> Unit,
-    onSyncBandHistory: () -> Unit,
-    onOpenBandDiagnostics: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface.copy(.97f),
-        tonalElevation = 0.dp,
-    ) {
+    SpectraModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -972,26 +1012,22 @@ private fun AiRuntimeSheet(
                 onSelected = { onPresetSelected(AiVisualPreset.entries[it]) },
                 modifier = Modifier.fillMaxWidth(),
             )
-            HealthAndBandStatus(
+            HealthStatus(
                 state = healthState,
                 onRefresh = onRefreshHealth,
                 onCloudRefresh = onSyncMiFitnessSteps,
                 onPermissions = onHealthPermissions,
-                onStartBand = onStartBand,
-                onStopBand = onStopBand,
-                onSyncHistory = onSyncBandHistory,
-                onDiagnostics = onOpenBandDiagnostics,
             )
             Text("运行方式", style = MaterialTheme.typography.labelLarge)
             CaesarSlidingSelector(
-                options = listOf("自动", "本机", "DeepSeek"),
+                options = listOf("自动", "本机", "DeepSeek", "Gemini"),
                 selectedIndex = providerIndex(provider),
                 enabled = !streaming,
                 motionEnabled = motionEnabled,
                 onSelected = onProviderSelected,
                 modifier = Modifier.fillMaxWidth(),
             )
-            if (provider == AiProvider.DEEPSEEK) {
+            if (provider == AiProvider.DEEPSEEK || provider == AiProvider.GOOGLE_GEMINI) {
                 CaesarSlidingSelector(
                     options = listOf("快速", "深度"),
                     selectedIndex = if (mode == AiMode.FAST) 0 else 1,
@@ -1041,7 +1077,14 @@ private fun AiRuntimeSheet(
 private fun providerLabel(provider: AiProvider) = when (provider) {
     AiProvider.LOCAL -> "本地"
     AiProvider.DEEPSEEK -> "DeepSeek"
+    AiProvider.GOOGLE_GEMINI -> "Gemini"
     AiProvider.AUTO -> "自动"
+}
+
+internal fun selectedCloudProviderStatus(provider: AiProvider): String = when (provider) {
+    AiProvider.DEEPSEEK -> "DEEPSEEK · 已选择"
+    AiProvider.GOOGLE_GEMINI -> "GEMINI · 已选择"
+    AiProvider.LOCAL, AiProvider.AUTO -> "本机 · 已选择"
 }
 
 private fun localModelStatus(selection: LocalModelSelection): String = when (val state = selection.state) {
@@ -1153,10 +1196,6 @@ private fun AiContextSheet(
     onForgetAllMemories: () -> Unit,
     onRefreshHealth: () -> Unit,
     onSyncMiFitnessSteps: () -> Unit,
-    onStartBand: () -> Unit,
-    onStopBand: () -> Unit,
-    onSyncBandHistory: () -> Unit,
-    onOpenBandDiagnostics: () -> Unit,
     onHealthPermissions: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1164,11 +1203,7 @@ private fun AiContextSheet(
     var editedContent by remember { mutableStateOf("") }
     var deletingMemory by remember { mutableStateOf<CaesarMemoryUiItem?>(null) }
     var confirmForgetAll by remember { mutableStateOf(false) }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-        containerColor = MaterialTheme.colorScheme.surface.copy(.96f),
-    ) {
+    SpectraModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -1178,20 +1213,16 @@ private fun AiContextSheet(
             Text("本次对话依据", style = MaterialTheme.typography.headlineMedium)
             Text(
                 if (provider == AiProvider.LOCAL) "所选内容仅在本机处理，不会离开设备。"
-                else "所选的学习上下文可能发送给 DeepSeek；图片、健康和手环问题始终强制留在本机。",
+                else "所选的学习上下文可能发送给当前云端 Provider；健康摘要只有在本次请求明确勾选后才会附带。",
                 Modifier.padding(top = 5.dp, bottom = 12.dp),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(.62f),
             )
-            HealthAndBandStatus(
+            HealthStatus(
                 state = healthState,
                 onRefresh = onRefreshHealth,
                 onCloudRefresh = onSyncMiFitnessSteps,
                 onPermissions = onHealthPermissions,
-                onStartBand = onStartBand,
-                onStopBand = onStopBand,
-                onSyncHistory = onSyncBandHistory,
-                onDiagnostics = onOpenBandDiagnostics,
             )
             Spacer(Modifier.height(14.dp))
             GlassPanel(Modifier.fillMaxWidth(), radius = 16, shadowed = false) {
@@ -1203,6 +1234,10 @@ private fun AiContextSheet(
                     ContextToggle("我自己的相关动态", selection.ownPosts) { onChange(selection.copy(ownPosts = it)) }
                     HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(.08f))
                     ContextToggle("明确加入公共树洞动态", selection.publicPosts) { onChange(selection.copy(publicPosts = it)) }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(.08f))
+                    ContextToggle("本次附带今日健康摘要（发送后自动关闭）", selection.healthSummary) {
+                        onChange(selection.copy(healthSummary = it))
+                    }
                 }
             }
             Spacer(Modifier.height(14.dp))
@@ -1223,11 +1258,12 @@ private fun AiContextSheet(
     }
 
     editingMemory?.let { memory ->
-        AlertDialog(
-            onDismissRequest = { editingMemory = null },
-            title = { Text("编辑记忆") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        SpectraDialog(onDismissRequest = { editingMemory = null }) {
+            Column(
+                Modifier.fillMaxWidth().padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text("编辑记忆", style = MaterialTheme.typography.titleLarge)
                     Text(memoryTypeLabel(memory.type), style = MaterialTheme.typography.labelLarge, color = SpectraColors.Focus)
                     GlassPanel(Modifier.fillMaxWidth(), radius = 16, shadowed = false) {
                         BasicTextField(
@@ -1239,44 +1275,39 @@ private fun AiContextSheet(
                         )
                     }
                     Text("${editedContent.length}/1000", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(.5f))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { editingMemory = null }) { Text("取消") }
+                    TextButton(
+                        enabled = editedContent.isNotBlank(),
+                        onClick = {
+                            onUpdateMemory(memory.id, editedContent)
+                            editingMemory = null
+                        },
+                    ) { Text("保存") }
                 }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = editedContent.isNotBlank(),
-                    onClick = {
-                        onUpdateMemory(memory.id, editedContent)
-                        editingMemory = null
-                    },
-                ) { Text("保存") }
-            },
-            dismissButton = { TextButton(onClick = { editingMemory = null }) { Text("取消") } },
-        )
+            }
+        }
     }
     deletingMemory?.let { memory ->
-        AlertDialog(
+        SpectraAlertDialog(
             onDismissRequest = { deletingMemory = null },
-            title = { Text("删除这条记忆？") },
-            text = { Text(memory.content) },
-            confirmButton = {
-                TextButton(onClick = { onForgetMemory(memory.id); deletingMemory = null }) {
-                    Text("删除", color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = { TextButton(onClick = { deletingMemory = null }) { Text("取消") } },
+            title = "删除这条记忆？",
+            message = memory.content,
+            confirmLabel = "删除",
+            dismissLabel = "取消",
+            destructive = true,
+            onConfirm = { onForgetMemory(memory.id); deletingMemory = null },
         )
     }
     if (confirmForgetAll) {
-        AlertDialog(
+        SpectraAlertDialog(
             onDismissRequest = { confirmForgetAll = false },
-            title = { Text("清空全部长期记忆？") },
-            text = { Text("清空后 Caesar∞ 将不再使用这些已确认的偏好、事实、目标与习惯。") },
-            confirmButton = {
-                TextButton(onClick = { onForgetAllMemories(); confirmForgetAll = false }) {
-                    Text("全部删除", color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = { TextButton(onClick = { confirmForgetAll = false }) { Text("取消") } },
+            title = "清空全部长期记忆？",
+            message = "清空后 Caesar∞ 将不再使用这些已确认的偏好、事实、目标与习惯。",
+            confirmLabel = "全部删除",
+            dismissLabel = "取消",
+            destructive = true,
+            onConfirm = { onForgetAllMemories(); confirmForgetAll = false },
         )
     }
 }
@@ -1340,34 +1371,12 @@ private fun memoryTypeLabel(type: String): String = when (type) {
     else -> "记忆"
 }
 
-internal data class BandVisibleMetrics(
-    val heartRateBpm: Int? = null,
-    val stepDelta: Long? = null,
-    val batteryPercent: Int? = null,
-)
-
-internal fun visibleBandMetrics(snapshot: BandLiveSnapshot): BandVisibleMetrics = BandVisibleMetrics(
-    heartRateBpm = snapshot.heartRateBpm.takeIf {
-        snapshot.capabilityBits and BandBridgeContract.Capability.REALTIME_HEART_RATE != 0L
-    },
-    stepDelta = snapshot.stepDelta.takeIf {
-        snapshot.capabilityBits and BandBridgeContract.Capability.REALTIME_STEPS != 0L
-    },
-    batteryPercent = snapshot.batteryPercent.takeIf {
-        snapshot.capabilityBits and BandBridgeContract.Capability.BATTERY != 0L
-    },
-)
-
 @Composable
-private fun HealthAndBandStatus(
+private fun HealthStatus(
     state: CaesarHealthUiState,
     onRefresh: () -> Unit,
     onCloudRefresh: () -> Unit,
     onPermissions: () -> Unit,
-    onStartBand: () -> Unit,
-    onStopBand: () -> Unit,
-    onSyncHistory: () -> Unit,
-    onDiagnostics: () -> Unit,
 ) {
     if (state.miFitnessConfigured) {
         MiFitnessCloudStatus(state, onCloudRefresh)
@@ -1400,37 +1409,6 @@ private fun HealthAndBandStatus(
         HealthAvailability.NeedsProvider, HealthAvailability.Unsupported -> SpectraStatusTone.ERROR
         null -> SpectraStatusTone.INFO
     }
-    val band = state.band
-    val bandListening = band?.bridgeState == BandLiveState.LISTENING
-    val bandFresh = band?.isFresh() == true
-    val bandLabel = when (band?.bridgeState) {
-        BandLiveState.LISTENING -> if (bandFresh) "Bridge 监听中" else "Bridge 数据已过期"
-        BandLiveState.IDLE -> "Bridge 已就绪"
-        BandLiveState.ERROR -> "Bridge 需要处理"
-        BandLiveState.UNAVAILABLE, null -> "Bridge 不可用"
-    }
-    val bandTone = when {
-        bandListening && bandFresh -> SpectraStatusTone.SUCCESS
-        band?.bridgeState == BandLiveState.ERROR -> SpectraStatusTone.ERROR
-        band?.bridgeState == BandLiveState.IDLE -> SpectraStatusTone.INFO
-        else -> SpectraStatusTone.WARNING
-    }
-    val connectionLabel = when (band?.connected) {
-        true -> "手环已连接"
-        false -> "手环未连接"
-        null -> "连接状态不可用"
-    }
-    val liveMetrics = band?.let(::visibleBandMetrics)
-    val liveMetricLabels = buildList {
-        liveMetrics?.heartRateBpm?.let { add("${if (bandFresh) "实时" else "上次"}心率 $it bpm") }
-        liveMetrics?.stepDelta?.let { add("${if (bandFresh) "实时" else "上次"}步数增量 $it") }
-        liveMetrics?.batteryPercent?.let { add("电量 $it%") }
-    }
-    val unavailableLiveLabels = buildList {
-        if (liveMetrics?.heartRateBpm == null) add("心率")
-        if (liveMetrics?.stepDelta == null) add("步数")
-        if (liveMetrics?.batteryPercent == null) add("电量")
-    }
     SpectraSurface(
         modifier = Modifier.fillMaxWidth(),
         mood = PageMood.HEALTH,
@@ -1439,56 +1417,6 @@ private fun HealthAndBandStatus(
         contentPadding = PaddingValues(14.dp),
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("小米手环 9", style = MaterialTheme.typography.titleLarge)
-                    Text(
-                        band?.source ?: "CaesarBandBridge",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(.52f),
-                    )
-                }
-                SpectraStatus(bandLabel, tone = bandTone)
-            }
-            Text(
-                buildString {
-                    append(connectionLabel)
-                    band?.let {
-                        append(" · 快照 ${healthStatusTime(it.observedAt)}")
-                        append(if (bandFresh) " · 15 秒内" else " · 已过期")
-                    }
-                },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(.68f),
-            )
-            Text(
-                band?.statusMessage ?: state.bandError ?: "未读到 CaesarBandBridge；历史数据仍可通过 Health Connect 独立使用。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(.66f),
-            )
-            if (liveMetricLabels.isNotEmpty()) {
-                Text(liveMetricLabels.joinToString(" · "), style = MaterialTheme.typography.bodyMedium)
-            }
-            if (unavailableLiveLabels.isNotEmpty()) {
-                Text(
-                    "当前不可用：${unavailableLiveLabels.joinToString("、")}（Bridge 未声明能力或数据为空）",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(.54f),
-                )
-            }
-            state.actionMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = SpectraColors.Success) }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SpectraAction("同步历史", onSyncHistory, Modifier.weight(1f), mood = PageMood.HEALTH)
-                SpectraAction("桥接诊断", onDiagnostics, Modifier.weight(1f), mood = PageMood.HEALTH)
-            }
-            SpectraAction(
-                text = if (bandListening) "停止实时会话" else "启动实时会话",
-                onClick = if (bandListening) onStopBand else onStartBand,
-                modifier = Modifier.fillMaxWidth(),
-                selected = bandListening,
-                mood = PageMood.HEALTH,
-            )
-            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(.10f))
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("Health Connect", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 SpectraStatus(healthLabel, tone = healthTone)
@@ -1518,7 +1446,7 @@ private fun HealthAndBandStatus(
                 SpectraAction("授权", onPermissions, Modifier.weight(1f), mood = PageMood.HEALTH)
             }
             Text(
-                "历史数据以 Health Connect 为准；实时指标只在 Bridge 能力位与非空数据同时满足时显示，过期值会明确标为“上次”。",
+                "Health Connect 只读取用户已授权的历史健康记录；缺失指标保持为未知，不会回退显示为 0。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(.52f),
             )
@@ -1541,6 +1469,17 @@ private fun MiFitnessCloudStatus(
         MiFitnessUiStatus.NETWORK_ERROR,
         MiFitnessUiStatus.STORAGE_ERROR,
     )
+    val cloudMetricSummary = buildList {
+        cloudSnapshot?.metrics?.steps?.let { add("步数 $it 步") }
+        cloudSnapshot?.metrics?.distanceMeters?.let { add("距离 ${it.roundToInt()} 米") }
+        cloudSnapshot?.metrics?.activeCaloriesKcal?.let { add("消耗 ${it.roundToInt()} 千卡") }
+        cloudSnapshot?.metrics?.activityDurationMinutes?.let { add("活动 $it 分钟") }
+        cloudSnapshot?.metrics?.sleepMinutes?.let { add("睡眠 $it 分钟") }
+        cloudSnapshot?.metrics?.heartRateAverageBpm?.let { add("平均心率 $it bpm") }
+        cloudSnapshot?.metrics?.oxygenSaturationAveragePercent?.let { add("平均血氧 ${it.roundToInt()}%") }
+        cloudSnapshot?.metrics?.stressAverage?.let { add("平均压力 $it") }
+        cloudSnapshot?.metrics?.workoutCount?.let { add("训练 $it 次") }
+    }
     SpectraSurface(
         modifier = Modifier.fillMaxWidth(),
         mood = PageMood.HEALTH,
@@ -1551,21 +1490,21 @@ private fun MiFitnessCloudStatus(
         Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Mi Fitness 云端", style = MaterialTheme.typography.titleLarge)
+                    Text("Mi Fitness", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        "中国区 · 当天步数 · 手动只读",
+                        "今日健康",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface.copy(.52f),
                     )
                 }
                 SpectraStatus(
                     when {
-                        state.miFitnessSyncing -> "正在读取"
-                        state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> "云端暂无记录"
+                        state.miFitnessSyncing -> "正在同步"
+                        state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> "今天暂无记录"
                         failed && cloudSnapshot != null -> "缓存可用 · 刷新失败"
                         failed -> "刷新失败"
-                        cloudSnapshot != null -> "已缓存"
-                        else -> "待刷新"
+                        cloudSnapshot != null -> "已更新"
+                        else -> "待同步"
                     },
                     tone = when {
                         state.miFitnessStatus == MiFitnessUiStatus.NO_DATA -> SpectraStatusTone.WARNING
@@ -1575,16 +1514,16 @@ private fun MiFitnessCloudStatus(
                     },
                 )
             }
-            cloudSnapshot?.metrics?.steps?.let { steps ->
-                Text("今日 $steps 步", style = MaterialTheme.typography.titleMedium)
-            } ?: Text(
-                "本地尚无今日云端步数。",
+            if (cloudMetricSummary.isNotEmpty()) {
+                Text(cloudMetricSummary.joinToString(" · "), style = MaterialTheme.typography.titleMedium)
+            } else Text(
+                "今天还没有可显示的健康数据。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(.66f),
             )
             cloudSnapshot?.lastSyncAt?.let {
                 Text(
-                    "最后手动刷新 ${healthStatusTime(it)} · 当前聚合规则仍为 provisional",
+                    "更新 ${healthStatusTime(it)}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(.56f),
                 )
@@ -1592,9 +1531,9 @@ private fun MiFitnessCloudStatus(
             if (failed) {
                 Text(
                     when (state.miFitnessStatus) {
-                        MiFitnessUiStatus.NO_DATA -> "Mi Fitness 云端暂未返回今天的步数记录。"
+                        MiFitnessUiStatus.NO_DATA -> "今天还没有同步到健康数据。"
                         MiFitnessUiStatus.AUTH_ERROR -> "身份验证失败，请在个人页更新凭据。"
-                        MiFitnessUiStatus.NETWORK_ERROR -> "网络或云端响应异常，请稍后重试。"
+                        MiFitnessUiStatus.NETWORK_ERROR -> "网络异常，请稍后重试。"
                         MiFitnessUiStatus.STORAGE_ERROR -> "系统安全存储暂不可用。"
                         else -> "本次刷新未完成。"
                     },
@@ -1602,18 +1541,18 @@ private fun MiFitnessCloudStatus(
                     color = MaterialTheme.colorScheme.error,
                 )
             }
-            state.actionMessage?.let {
+            state.actionMessage?.takeUnless { failed }?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = SpectraColors.Success)
             }
             SpectraAction(
-                text = if (state.miFitnessSyncing) "正在读取" else "手动刷新今日步数",
+                text = if (state.miFitnessSyncing) "正在同步" else "同步今日健康",
                 onClick = onRefresh,
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !state.loading && !state.miFitnessSyncing,
                 mood = PageMood.HEALTH,
             )
             Text(
-                "该入口不会连接手环、启动 Gadgetbridge/CaesarBandBridge，也不需要 Health Connect 权限；Agent 只读取这里的本地加密缓存。",
+                "CampusAI 不连接手环，也不需要 Health Connect 权限。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(.52f),
             )
@@ -2420,7 +2359,7 @@ private fun ComposerLoaderEdge(motionEnabled: Boolean, modifier: Modifier = Modi
 }
 
 @Composable
-private fun AiErrorCard(state: AiUiState, error: String, onCloudOnce: () -> Unit) {
+private fun AiErrorCard(state: AiUiState, error: String, onCloudOnce: (AiProvider) -> Unit) {
     GlassPanel(Modifier.fillMaxWidth(), radius = 16) {
         Column(Modifier.padding(14.dp)) {
             Text("这次没有完成", style = MaterialTheme.typography.titleMedium, color = SpectraColors.Error)
@@ -2436,7 +2375,19 @@ private fun AiErrorCard(state: AiUiState, error: String, onCloudOnce: () -> Unit
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(.62f),
             )
-            if (state.canUseCloudOnce) TextButton(onClick = onCloudOnce) { Text("确认：本次使用我的 DeepSeek Key") }
+            if (state.canUseCloudOnce) {
+                state.cloudOnceProviders.forEach { provider ->
+                    TextButton(onClick = { onCloudOnce(provider) }) {
+                        Text(
+                            when (provider) {
+                                AiProvider.DEEPSEEK -> "确认：本次使用我的 DeepSeek Key"
+                                AiProvider.GOOGLE_GEMINI -> "确认：本次使用我的 Gemini Key"
+                                else -> ""
+                            },
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -2456,11 +2407,7 @@ private fun AiTaskSheet(promptAvailable: Boolean, onDismiss: () -> Unit, onSelec
             AiTaskOption(CampusAiTask.TIME_PARSE, "解析记录", "把输入框内容整理成时间记录", Icons.Rounded.AutoAwesome),
         )
     }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-        containerColor = MaterialTheme.colorScheme.surface.copy(.94f),
-    ) {
+    SpectraModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
             Text("快捷任务", style = MaterialTheme.typography.headlineMedium)
             Spacer(Modifier.size(12.dp))
@@ -2500,3 +2447,12 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 }
 
 private const val SPEECH_LOG_TAG = "CaesarSpeech"
+
+private fun caesarSpeechRecognitionIntent(preferOffline: Boolean): Intent =
+    Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.SIMPLIFIED_CHINESE.toLanguageTag())
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+        if (preferOffline) putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+    }

@@ -17,7 +17,13 @@ class MiFitnessAuthenticationException(message: String) : MiFitnessException(mes
 
 class MiFitnessProtocolException(message: String) : MiFitnessException(message)
 
-class MiFitnessNetworkException(message: String) : MiFitnessException(message)
+open class MiFitnessNetworkException(message: String) : MiFitnessException(message)
+
+class MiFitnessRateLimitException(
+    val retryAfterMillis: Long?,
+) : MiFitnessNetworkException("Xiaomi request was rate limited")
+
+class MiFitnessServerException : MiFitnessNetworkException("Xiaomi service is temporarily unavailable")
 
 class MiFitnessSession(
     val userId: String,
@@ -59,7 +65,9 @@ object MiFitnessProtocol {
     internal const val LOGIN_PREFIX = "&&&START&&&"
     internal const val LOGIN_URL = "https://account.xiaomi.com/pass/serviceLogin"
     internal const val SERVICE_SID = "miothealth"
-    internal const val FITNESS_PATH = "/app/v1/data/get_fitness_data_by_time"
+    internal const val FITNESS_BY_TIME_PATH = "/app/v1/data/get_fitness_data_by_time"
+    internal const val AGGREGATE_FITNESS_PATH = "/app/v1/data/get_aggregated_fitness_data_by_time"
+    internal const val SPORT_RECORDS_PATH = "/app/v1/data/get_sport_records_by_time"
     internal const val LOGIN_USER_AGENT =
         "Dalvik/2.1.0 (Linux; U; Android 16) APP/mi.health APPV/358000 CPN/com.mi.health PassportSDK/"
     internal const val API_USER_AGENT = "Android-16-3.58.0-CampusAI-ReadOnly-PoC"
@@ -81,24 +89,67 @@ object MiFitnessProtocol {
         return checkNotNull("https://hlth.io.mi.com".toHttpUrlOrNull())
     }
 
-    fun buildReadRequest(
+    fun buildTimeSeriesRequest(
         metric: String,
         startEpochSeconds: Long,
-        endEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
         nextKey: String = "",
     ): MiFitnessReadRequest {
         require(metric == STEPS_METRIC) { "Unsupported read-only Mi Fitness metric" }
-        require(startEpochSeconds <= endEpochSeconds) { "startEpochSeconds must not exceed endEpochSeconds" }
+        require(startEpochSeconds < endEpochSecondsExclusive) { "Mi Fitness time range must be non-empty" }
+        require(nextKey.length <= MAX_NEXT_KEY_CHARS) { "Mi Fitness pagination key is too long" }
         val payload = buildString {
             append("{\"key\":\"steps\",\"start_time\":")
             append(startEpochSeconds)
             append(",\"end_time\":")
-            append(endEpochSeconds)
+            append(endEpochSecondsExclusive)
             append(",\"reverse\":true,\"next_key\":")
             append(quoteJson(nextKey))
             append('}')
         }
-        return MiFitnessReadRequest("GET", FITNESS_PATH, payload)
+        return MiFitnessReadRequest("GET", FITNESS_BY_TIME_PATH, payload)
+    }
+
+    fun buildDailyAggregateRequest(
+        metric: String,
+        startEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
+        nextKey: String = "",
+    ): MiFitnessReadRequest {
+        MiFitnessMetricRegistry.definition(metric)
+        require(startEpochSeconds < endEpochSecondsExclusive) { "Mi Fitness day range must be non-empty" }
+        require(nextKey.length <= MAX_NEXT_KEY_CHARS) { "Mi Fitness pagination key is too long" }
+        val payload = buildString {
+            append("{\"tag\":\"daily_report\",\"key\":")
+            append(quoteJson(metric))
+            append(",\"reverse\":true,\"limit\":100,\"next_key\":")
+            append(quoteJson(nextKey))
+            append(",\"start_time\":")
+            append(startEpochSeconds)
+            append(",\"end_time\":")
+            append(endEpochSecondsExclusive)
+            append('}')
+        }
+        return MiFitnessReadRequest("GET", AGGREGATE_FITNESS_PATH, payload)
+    }
+
+    fun buildSportRecordsRequest(
+        startEpochSeconds: Long,
+        endEpochSecondsExclusive: Long,
+        nextKey: String = "",
+    ): MiFitnessReadRequest {
+        require(startEpochSeconds < endEpochSecondsExclusive) { "Mi Fitness day range must be non-empty" }
+        require(nextKey.length <= MAX_NEXT_KEY_CHARS) { "Mi Fitness pagination key is too long" }
+        val payload = buildString {
+            append("{\"category\":\"\",\"start_time\":")
+            append(startEpochSeconds)
+            append(",\"end_time\":")
+            append(endEpochSecondsExclusive)
+            append(",\"reverse\":true,\"next_key\":")
+            append(quoteJson(nextKey))
+            append(",\"limit\":50}")
+        }
+        return MiFitnessReadRequest("GET", SPORT_RECORDS_PATH, payload)
     }
 
     fun buildEncryptedForm(
@@ -106,7 +157,7 @@ object MiFitnessProtocol {
         ssecurityBase64: String,
         nonce: ByteArray = generateNonce(),
     ): MiFitnessEncryptedForm {
-        require(request.method == "GET" && request.path == FITNESS_PATH) {
+        require(request.method == "GET" && request.path in READ_ONLY_PATHS) {
             "Only the allowlisted read-only GET endpoint is permitted"
         }
         val security = decodeBase64(ssecurityBase64, "ssecurity")
@@ -386,4 +437,11 @@ object MiFitnessProtocol {
         this in 'A'..'Z' || this in 'a'..'z' || this in '0'..'9' || this == '+' || this == '/'
 
     private fun maxBase64Length(decodedBytes: Int): Int = ((decodedBytes + 2) / 3) * 4
+
+    private const val MAX_NEXT_KEY_CHARS = 4_096
+    private val READ_ONLY_PATHS = setOf(
+        FITNESS_BY_TIME_PATH,
+        AGGREGATE_FITNESS_PATH,
+        SPORT_RECORDS_PATH,
+    )
 }

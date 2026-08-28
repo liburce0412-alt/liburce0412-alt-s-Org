@@ -6,6 +6,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.campusai.core.database.CampusDao
 import com.campusai.core.database.TimeRecordEntity
+import com.campusai.core.database.DailyGoalSnapshotEntity
+import com.campusai.core.model.DailyContributionCalculator
 import com.campusai.core.model.TimeRecord
 import com.campusai.core.model.CourseSchedule
 import com.campusai.core.database.CourseScheduleEntity
@@ -15,10 +17,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.Calendar
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 import com.campusai.core.sync.CampusSyncScheduler
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -35,12 +41,44 @@ class TimeViewModel(private val dao: CampusDao, private val appContext: Context,
             initialValue = emptyList()
         )
 
+    val dailyTargetSnapshots: StateFlow<Map<LocalDate, Long>> = activeUser.flatMapLatest { userId ->
+        dao.getDailyGoalSnapshotsFlow(userId, userId != "local_user")
+    }.map { snapshots ->
+        // Local rows are shown alongside signed-in rows. Let the active account win if both own a
+        // snapshot for the same date; today they share the same 240-minute default, and this keeps
+        // the precedence deterministic once goals become configurable.
+        val currentUser = activeUser.value
+        buildMap {
+            snapshots.filter { it.userId == "local_user" }.forEach { snapshot ->
+                runCatching { LocalDate.parse(snapshot.localDate) }.getOrNull()?.let { date ->
+                    put(date, snapshot.targetMinutes)
+                }
+            }
+            snapshots.filter { it.userId == currentUser }.forEach { snapshot ->
+                runCatching { LocalDate.parse(snapshot.localDate) }.getOrNull()?.let { date ->
+                    put(date, snapshot.targetMinutes)
+                }
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
     val courses: StateFlow<List<CourseSchedule>> = activeUser.flatMapLatest { userId -> dao.getCourseSchedulesFlow(userId, userId != "local_user") }
         .map { list -> list.map { it.toDomain() } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _isInserting = MutableStateFlow(false)
     val isInserting: StateFlow<Boolean> = _isInserting.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            timeRecords.collectLatest { records ->
+                val snapshots = records.mapNotNull { it.dailyGoalSnapshot() }.distinctBy {
+                    it.userId to it.localDate
+                }
+                if (snapshots.isNotEmpty()) dao.insertDailyGoalSnapshots(snapshots)
+            }
+        }
+    }
 
     fun setActiveUser(userId: String?) {
         activeUser.value = userId?.takeIf { it.isNotBlank() } ?: "local_user"
@@ -70,6 +108,7 @@ class TimeViewModel(private val dao: CampusDao, private val appContext: Context,
                 remark = remark,
                 userId = activeUser.value,
             )
+            record.dailyGoalSnapshot()?.let { dao.insertDailyGoalSnapshots(listOf(it)) }
             dao.insertTimeRecord(TimeRecordEntity.fromDomain(record))
             CampusSyncScheduler.enqueue(appContext)
             _isInserting.value = false
@@ -201,6 +240,16 @@ class TimeViewModel(private val dao: CampusDao, private val appContext: Context,
         cal.set(Calendar.DAY_OF_MONTH, 1)
         return cal.timeInMillis
     }
+}
+
+private fun TimeRecord.dailyGoalSnapshot(zoneId: ZoneId = ZoneId.systemDefault()): DailyGoalSnapshotEntity? {
+    if (durationMinutes <= 0L || endTime <= startTime) return null
+    return DailyGoalSnapshotEntity(
+        userId = userId,
+        localDate = Instant.ofEpochMilli(endTime).atZone(zoneId).toLocalDate().toString(),
+        targetMinutes = DailyContributionCalculator.DEFAULT_TARGET_MINUTES,
+        createdAt = endTime,
+    )
 }
 
 class TimeViewModelFactory(private val dao: CampusDao, private val appContext: Context, private val initialUserId: String?) : ViewModelProvider.Factory {

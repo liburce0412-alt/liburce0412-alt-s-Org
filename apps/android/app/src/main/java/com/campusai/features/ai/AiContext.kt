@@ -32,6 +32,8 @@ data class AiContextSelection(
     val courses: Boolean = true,
     val ownPosts: Boolean = true,
     val publicPosts: Boolean = false,
+    /** One-shot consent. AiViewModel resets this immediately after constructing a request. */
+    val healthSummary: Boolean = false,
 )
 
 data class AiActionBlock(

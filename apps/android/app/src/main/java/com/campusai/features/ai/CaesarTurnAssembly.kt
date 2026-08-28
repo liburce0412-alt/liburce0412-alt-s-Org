@@ -50,6 +50,7 @@ internal object AiConversationCodec {
             .put("content", message.content)
             .put("presentation", message.presentationJson ?: JSONObject.NULL)
             .put("attachments", JSONArray(message.attachmentPaths))
+            .put("cloudHealthSensitive", message.cloudHealthSensitive)
     }).toString()
 
     fun decode(raw: String): List<AiConversationMessage> = runCatching {
@@ -70,6 +71,7 @@ internal object AiConversationCodec {
                                     attachments.optString(attachmentIndex).takeIf(String::isNotBlank)?.let(::add)
                                 }
                             },
+                            cloudHealthSensitive = row.optBoolean("cloudHealthSensitive", false),
                         ),
                     )
                 }
