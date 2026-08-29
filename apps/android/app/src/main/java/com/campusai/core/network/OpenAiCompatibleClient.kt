@@ -196,7 +196,7 @@ class PersonalCloudClient internal constructor(
                 if (!response.isSuccessful) throw providerError(provider, response.code)
                 val raw = response.body?.string()
                     ?: throw CloudProviderException("empty_response", "${provider.displayName} 没有返回模型列表。")
-                OpenAiCompatibleModelParser.parse(provider, raw)
+                parseLiveModelCatalog(provider, raw)
             }
         } catch (failure: IOException) {
             currentCoroutineContext().ensureActive()
@@ -778,6 +778,26 @@ internal object OpenAiCompatibleModelParser {
             }
         }.distinctBy(CloudProviderModel::id)
     }.getOrDefault(emptyList())
+}
+
+internal fun parseLiveModelCatalog(provider: CloudAiProvider, raw: String): List<CloudProviderModel> {
+    val payload = try {
+        JSONObject(raw)
+    } catch (_: Exception) {
+        throw CloudProviderException(
+            "provider_response_invalid",
+            "${provider.displayName} 返回了无法识别的模型列表。",
+            false,
+        )
+    }
+    if (payload.optJSONArray("data") == null) {
+        throw CloudProviderException(
+            "provider_response_invalid",
+            "${provider.displayName} 返回的模型列表结构无效。",
+            false,
+        )
+    }
+    return OpenAiCompatibleModelParser.parse(provider, raw)
 }
 
 private fun providerError(provider: CloudAiProvider, status: Int): CloudProviderException = when (status) {

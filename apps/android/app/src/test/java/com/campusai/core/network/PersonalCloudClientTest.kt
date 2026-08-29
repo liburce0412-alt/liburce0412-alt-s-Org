@@ -57,6 +57,43 @@ class PersonalCloudClientTest {
     }
 
     @Test
+    fun `DeepSeek model catalog uses its fixed endpoint and provider credential`() = runTest {
+        val requests = mutableListOf<okhttp3.Request>()
+        val key = "unit-deepseek-key-1234567890"
+        val client = PersonalCloudClient(
+            provider = CloudAiProvider.DEEPSEEK,
+            credential = { key },
+            selectedModel = { "deepseek-v4-flash" },
+            client = clientResponding(requests) {
+                """{"object":"list","data":[{"id":"deepseek-v4-flash"},{"id":"deepseek-v4-pro"}]}"""
+            },
+        )
+
+        val models = client.listModels()
+
+        assertEquals(listOf("deepseek-v4-flash", "deepseek-v4-pro"), models.map { it.id })
+        assertEquals("https://api.deepseek.com/models", requests.single().url.toString())
+        assertEquals("Bearer $key", requests.single().header("Authorization"))
+    }
+
+    @Test
+    fun `connection validation rejects a selected model missing from the live catalog`() = runTest {
+        val client = PersonalCloudClient(
+            provider = CloudAiProvider.DEEPSEEK,
+            credential = { "unit-deepseek-key-1234567890" },
+            selectedModel = { "deepseek-v4-pro" },
+            client = clientResponding(mutableListOf()) {
+                """{"object":"list","data":[{"id":"deepseek-v4-flash"}]}"""
+            },
+        )
+
+        val error = runCatching { client.validateConnection() }.exceptionOrNull() as CloudProviderException
+
+        assertEquals("model_unavailable", error.code)
+        assertFalse(error.recoverable)
+    }
+
+    @Test
     fun `DeepSeek streams provider metadata text and usage through shared client`() = runTest {
         val sse = """
             data: {"choices":[{"delta":{"reasoning_content":"礼貌回应。","content":"你"}}]}
@@ -156,6 +193,21 @@ class PersonalCloudClientTest {
         assertEquals("provider_rate_limited", error.code)
         assertTrue(error.recoverable)
         assertFalse(error.message.contains("account-private-quota-details"))
+    }
+
+    @Test
+    fun `malformed model catalogs fail as protocol errors instead of appearing empty`() = runTest {
+        val client = PersonalCloudClient(
+            provider = CloudAiProvider.GOOGLE_GEMINI,
+            credential = { "AIza${"x".repeat(30)}" },
+            selectedModel = { "gemini-3.7-flash" },
+            client = clientResponding(mutableListOf()) { "not-json" },
+        )
+
+        val error = runCatching { client.listModels() }.exceptionOrNull() as CloudProviderException
+
+        assertEquals("provider_response_invalid", error.code)
+        assertFalse(error.recoverable)
     }
 
     @Test

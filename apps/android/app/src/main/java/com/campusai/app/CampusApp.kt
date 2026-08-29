@@ -139,6 +139,7 @@ import com.campusai.core.ai.CloudAiProvider
 import com.campusai.core.security.PersonalAiProviderStore
 import com.campusai.core.profile.ProfileRepository
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -555,6 +556,17 @@ fun CampusApp(
                                      runCatching {
                                          PersonalCloudClient(provider, personalAiProviderStore)
                                              .validateConnection(modelId)
+                                     }
+                                 },
+                                 onListCloudProviderModels = { provider ->
+                                     try {
+                                         Result.success(
+                                             PersonalCloudClient(provider, personalAiProviderStore).listModels(),
+                                         )
+                                     } catch (cancelled: CancellationException) {
+                                         throw cancelled
+                                     } catch (error: Exception) {
+                                         Result.failure(error)
                                      }
                                  },
                                  healthAutomationConfig = healthAutomationConfig,

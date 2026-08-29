@@ -70,8 +70,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
@@ -104,6 +106,7 @@ import com.campusai.core.designsystem.SpectraDialog
 import com.campusai.core.designsystem.SpectraModalBottomSheet
 import com.campusai.core.designsystem.SpectraTheme
 import com.campusai.core.designsystem.SpectraVisualStyle
+import com.campusai.core.designsystem.TelemetryChip
 import com.campusai.core.designsystem.Tomorrow
 import com.campusai.core.auth.AuthState
 import com.campusai.core.model.MotionMode
@@ -123,6 +126,7 @@ import com.campusai.core.localai.LocalMnnAiEngine
 import com.campusai.core.localai.LocalModelManifest
 import com.campusai.core.localai.LocalModelManager
 import com.campusai.core.localai.LocalModelMode
+import com.campusai.core.network.CloudProviderException
 import com.campusai.core.profile.CampusProfile
 import com.campusai.core.profile.ProfileImageKind
 import com.campusai.core.profile.ProfileRepository
@@ -134,6 +138,8 @@ import com.campusai.core.automation.ScheduledTaskRunStatus
 import com.campusai.core.security.PersonalAiProviderStore
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -170,6 +176,7 @@ fun ProfileScreen(
     onRefreshMiFitnessSteps: () -> Unit = {},
     onDeleteMiFitnessCredentials: () -> Unit = {},
     onTestCloudProviderConnection: (suspend (CloudAiProvider, String) -> Result<CloudProviderConnection>)? = null,
+    onListCloudProviderModels: (suspend (CloudAiProvider) -> Result<List<CloudProviderModel>>)? = null,
     healthAutomationConfig: ScheduledTaskConfig? = null,
     healthAutomationSaving: Boolean = false,
     healthAutomationNotificationsEnabled: Boolean = true,
@@ -337,6 +344,7 @@ fun ProfileScreen(
                             message = healthAutomationMessage,
                             messageIsError = healthAutomationMessageIsError,
                             providerStore = personalAiProviderStore,
+                            onListModels = onListCloudProviderModels,
                             onSave = onSaveHealthAutomation,
                             onDisable = onDisableHealthAutomation,
                         )
@@ -1110,13 +1118,13 @@ private fun HealthAutomationSettings(
     message: String?,
     messageIsError: Boolean,
     providerStore: PersonalAiProviderStore,
+    onListModels: (suspend (CloudAiProvider) -> Result<List<CloudProviderModel>>)? = null,
     onSave: (CloudAiProvider, String, Int, Boolean) -> Unit,
     onDisable: () -> Unit,
 ) {
     val configuredProviders = CloudAiProvider.entries.filter(providerStore::hasCredential)
     // Runtime status changes (RUNNING -> UPDATED/UNCHANGED) must not reset an
-    // unsaved form. The task id identifies this editing session; provider changes
-    // below intentionally reset only the model field.
+    // unsaved form. Each Provider keeps its own draft model while this sheet is open.
     var provider by remember(config?.id) {
         mutableStateOf(
             config?.provider
@@ -1124,12 +1132,25 @@ private fun HealthAutomationSettings(
                 ?: CloudAiProvider.GOOGLE_GEMINI,
         )
     }
-    var modelId by remember(config?.id, provider) {
-        mutableStateOf(
-            config?.takeIf { it.provider == provider }?.modelId
-                ?: providerStore.selectedModel(provider),
-        )
+    val modelDrafts = remember(config?.id) {
+        mutableStateMapOf<CloudAiProvider, String>().apply {
+            CloudAiProvider.entries.forEach { candidate ->
+                put(
+                    candidate,
+                    config?.takeIf { it.provider == candidate }?.modelId
+                        ?: providerStore.selectedModel(candidate),
+                )
+            }
+        }
     }
+    val modelId = modelDrafts[provider].orEmpty()
+    var availableModels by remember(config?.id, provider) {
+        mutableStateOf<List<CloudProviderModel>>(emptyList())
+    }
+    var modelCatalogLoading by remember(config?.id, provider) { mutableStateOf(false) }
+    var modelCatalogLoaded by remember(config?.id, provider) { mutableStateOf(false) }
+    var modelCatalogError by remember(config?.id, provider) { mutableStateOf<String?>(null) }
+    var modelCatalogReload by remember(config?.id, provider) { mutableStateOf(0) }
     var intervalMinutes by remember(config?.id) {
         mutableStateOf(config?.intervalMinutes ?: ScheduledTaskConfig.DEFAULT_INTERVAL_MINUTES)
     }
@@ -1138,6 +1159,49 @@ private fun HealthAutomationSettings(
     }
     val active = config?.enabled == true
     val credentialAvailable = providerStore.hasCredential(provider)
+    val latestListModels by rememberUpdatedState(onListModels)
+    LaunchedEffect(provider, credentialAvailable, modelCatalogReload) {
+        val requestedProvider = provider
+        availableModels = emptyList()
+        modelCatalogError = null
+        modelCatalogLoaded = false
+        if (!credentialAvailable) {
+            modelCatalogLoading = false
+            return@LaunchedEffect
+        }
+        val loader = latestListModels
+        if (loader == null) {
+            modelCatalogLoading = false
+            modelCatalogLoaded = true
+            modelCatalogError = "当前版本无法读取实时模型列表。"
+            return@LaunchedEffect
+        }
+        modelCatalogLoading = true
+        val catalogResult = loader(requestedProvider)
+        currentCoroutineContext().ensureActive()
+        catalogResult.fold(
+            onSuccess = { models ->
+                val catalog = models
+                    .filter { requestedProvider.acceptsModelId(it.id) }
+                    .distinctBy { requestedProvider.normalizeModelId(it.id) }
+                val previousModelId = modelDrafts[requestedProvider].orEmpty()
+                val selected = selectHealthAutomationModel(
+                    provider = requestedProvider,
+                    currentModelId = previousModelId,
+                    availableModels = catalog,
+                )
+                availableModels = catalog
+                modelDrafts[requestedProvider] = selected
+                modelCatalogLoaded = true
+            },
+            onFailure = { error ->
+                modelCatalogError = healthAutomationCatalogError(error)
+                modelCatalogLoaded = true
+            },
+        )
+        modelCatalogLoading = false
+    }
+    val selectedModelAvailable = isHealthAutomationModelAvailable(provider, modelId, availableModels)
     val statusText = when (config?.lastStatus) {
         ScheduledTaskRunStatus.RUNNING -> "正在检查小米云"
         ScheduledTaskRunStatus.UPDATED -> "最近一次已发现新数据"
@@ -1184,22 +1248,102 @@ private fun HealthAutomationSettings(
                 selectedIndex = CloudAiProvider.entries.indexOf(provider).coerceAtLeast(0),
                 onSelected = { index -> CloudAiProvider.entries.getOrNull(index)?.let { provider = it } },
                 modifier = Modifier.fillMaxWidth(),
+                enabled = !saving,
             )
             Text(
                 if (credentialAvailable) "Key 已安全保存" else "请先在 AI 运行方式中保存这个 Provider 的 Key",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (credentialAvailable) SpectraColors.Success else SpectraColors.Warm,
             )
-            OutlinedTextField(
-                value = modelId,
-                onValueChange = { modelId = it },
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("锁定模型 ID") },
-                supportingText = { Text("启用时会从实时模型列表验证，之后不会静默切换。") },
-                singleLine = true,
-                enabled = !saving,
-                shape = RoundedCornerShape(12.dp),
-            )
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("锁定模型", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+                if (
+                    credentialAvailable &&
+                    !modelCatalogLoading &&
+                    modelCatalogLoaded &&
+                    modelCatalogError == null
+                ) {
+                    TextButton(
+                        onClick = { modelCatalogReload++ },
+                        enabled = !saving,
+                    ) { Text("刷新列表") }
+                }
+            }
+            if (
+                modelId.isNotBlank() &&
+                (!modelCatalogLoaded || modelCatalogError != null || availableModels.isEmpty())
+            ) {
+                Text(
+                    "已保留选择 $modelId，实时列表恢复前不会改动。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(.58f),
+                )
+            }
+            when {
+                !credentialAvailable -> Text(
+                    "保存 ${provider.displayName} Key 后才能读取可用模型。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = SpectraColors.Warm,
+                )
+                modelCatalogLoading -> {
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = SpectraColors.Focus,
+                        trackColor = SpectraColors.Silver.copy(.42f),
+                    )
+                    Text(
+                        "正在读取 ${provider.displayName} 实时模型列表…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(.58f),
+                    )
+                }
+                modelCatalogError != null -> {
+                    Text(
+                        modelCatalogError.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = SpectraColors.Error,
+                    )
+                    TextButton(
+                        onClick = { modelCatalogReload++ },
+                        enabled = !saving,
+                    ) { Text("重新加载") }
+                }
+                modelCatalogLoaded && availableModels.isEmpty() -> Text(
+                    "当前账户没有返回可用于文本对话的模型。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = SpectraColors.Warm,
+                )
+                availableModels.isNotEmpty() -> {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(availableModels, key = CloudProviderModel::id) { model ->
+                            val normalizedId = provider.normalizeModelId(model.id)
+                            TelemetryChip(
+                                text = model.displayName,
+                                selected = normalizedId == modelId,
+                                onClick = { modelDrafts[provider] = normalizedId },
+                                enabled = !saving,
+                            )
+                        }
+                    }
+                    val modelHint = when {
+                        selectedModelAvailable -> "已锁定 $modelId；启用时会再次实时验证，之后不会静默切换。"
+                        modelId.isNotBlank() -> "$modelId 已不在实时列表中，请重新选择。"
+                        else -> "请选择一个实时可用模型。"
+                    }
+                    Text(
+                        modelHint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (selectedModelAvailable) {
+                            MaterialTheme.colorScheme.onSurface.copy(.58f)
+                        } else {
+                            SpectraColors.Warm
+                        },
+                    )
+                }
+            }
             Text("检查间隔", style = MaterialTheme.typography.labelLarge)
             com.campusai.core.designsystem.CaesarSlidingSelector(
                 options = ScheduledTaskConfig.ALLOWED_INTERVAL_MINUTES.sorted().map { "$it 分钟" },
@@ -1208,11 +1352,13 @@ private fun HealthAutomationSettings(
                     ScheduledTaskConfig.ALLOWED_INTERVAL_MINUTES.sorted().getOrNull(index)?.let { intervalMinutes = it }
                 },
                 modifier = Modifier.fillMaxWidth(),
+                enabled = !saving,
             )
             SettingSwitch(
                 Icons.Rounded.PrivacyTip,
                 "附带必要的今日汇总",
                 includeHealthSummary,
+                enabled = !saving,
             ) { includeHealthSummary = it }
             Text(
                 "只发送日汇总，不发送分钟级数据、设备标识或小米认证信息。自动消息不会被带入之后的云端对话。",
@@ -1241,7 +1387,7 @@ private fun HealthAutomationSettings(
                 },
                 onClick = { onSave(provider, modelId.trim(), intervalMinutes, includeHealthSummary) },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !saving && credentialAvailable && modelId.isNotBlank() && includeHealthSummary,
+                enabled = !saving && credentialAvailable && selectedModelAvailable && includeHealthSummary,
                 icon = Icons.Rounded.Notifications,
             )
             if (active) {
@@ -1255,13 +1401,43 @@ private fun HealthAutomationSettings(
     }
 }
 
+internal fun selectHealthAutomationModel(
+    provider: CloudAiProvider,
+    currentModelId: String,
+    availableModels: List<CloudProviderModel>,
+): String {
+    val availableIds = availableModels
+        .map { provider.normalizeModelId(it.id) }
+        .toSet()
+    val current = provider.normalizeModelId(currentModelId)
+    if (current.isNotBlank()) return current
+    return provider.defaultModel(AiMode.FAST).takeIf(availableIds::contains).orEmpty()
+}
+
+internal fun isHealthAutomationModelAvailable(
+    provider: CloudAiProvider,
+    modelId: String,
+    availableModels: List<CloudProviderModel>,
+): Boolean {
+    val selected = provider.normalizeModelId(modelId)
+    return selected.isNotBlank() && availableModels.any {
+        provider.normalizeModelId(it.id) == selected
+    }
+}
+
+private fun healthAutomationCatalogError(error: Throwable): String =
+    (error as? CloudProviderException)?.message
+        ?: "模型列表加载失败，请检查网络或代理后重试。"
+
 private fun automationErrorText(code: String?): String = when (code) {
     "notification_permission_disabled" -> "通知权限未开启，任务仍会继续记录消息"
     "credentials_missing" -> "Mi Fitness 凭据尚未配置"
     "authentication_failed" -> "Mi Fitness 认证已失效"
     "rate_limited" -> "小米云请求暂时受限"
     "task_provider_key_missing" -> "任务锁定的 Provider Key 已不可用"
-    "task_model_unavailable", "task_model_invalid", "task_model_mismatch" -> "任务锁定的模型当前不可用"
+    "model_unavailable", "model_invalid", "task_model_unavailable", "task_model_invalid", "task_model_mismatch" ->
+        "任务锁定的模型当前不可用"
+    "provider_response_invalid" -> "AI Provider 返回的模型列表无法识别"
     else -> "最近一次检查没有完成"
 }
 
@@ -1738,8 +1914,19 @@ private fun <T> SettingSelector(icon: ImageVector, label: String, values: List<T
 }
 
 @Composable
-private fun SettingSwitch(icon: ImageVector, label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Icon(icon, null); Spacer(Modifier.size(12.dp)); Text(label, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f)); Switch(checked, onChecked) }
+private fun SettingSwitch(
+    icon: ImageVector,
+    label: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onChecked: (Boolean) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null)
+        Spacer(Modifier.size(12.dp))
+        Text(label, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+        Switch(checked, onChecked, enabled = enabled)
+    }
 }
 
 @Composable
