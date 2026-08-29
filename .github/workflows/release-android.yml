@@ -34,24 +34,46 @@ jobs:
             -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-      - name: Require signing configuration
+      - name: Require release configuration
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           missing=0
-          for name in KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+          for name in KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD SUPABASE_URL SUPABASE_ANON_KEY; do
             if [[ -z "${!name}" ]]; then
-              echo "::error::Required Android signing secret is missing: $name"
+              echo "::error::Required release secret is missing: $name"
               missing=1
             fi
           done
           if [[ "$missing" -ne 0 ]]; then
             exit 1
           fi
+          if [[ "$SUPABASE_URL" != https://* ]]; then
+            echo "::error::SUPABASE_URL must use HTTPS."
+            exit 1
+          fi
+          if [[ "$SUPABASE_ANON_KEY" == *replace-with* || "$SUPABASE_ANON_KEY" == *your_anon* || "$SUPABASE_ANON_KEY" == *placeholder* ]]; then
+            echo "::error::SUPABASE_ANON_KEY is still a placeholder."
+            exit 1
+          fi
+
+      - name: Restore public Supabase client configuration
+        shell: bash
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          umask 077
+          {
+            printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL"
+            printf 'SUPABASE_ANON_KEY=%s\n' "$SUPABASE_ANON_KEY"
+          } > .env
 
       - name: Verify release source
         shell: bash
@@ -78,6 +100,24 @@ jobs:
             :apps:android:app:lintRelease \
             --stacktrace
 
+      - name: Verify packaged client configuration
+        shell: bash
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          apk='apps/android/app/build/outputs/apk/release/app-release.apk'
+          unzip -p "$apk" 'classes*.dex' > "$RUNNER_TEMP/caesar-classes.dex"
+          grep -aFq "$SUPABASE_URL" "$RUNNER_TEMP/caesar-classes.dex" || {
+            echo "::error::Signed APK does not contain the configured Supabase URL."
+            exit 1
+          }
+          grep -aFq "$SUPABASE_ANON_KEY" "$RUNNER_TEMP/caesar-classes.dex" || {
+            echo "::error::Signed APK does not contain the configured Supabase client key."
+            exit 1
+          }
+          rm -f "$RUNNER_TEMP/caesar-classes.dex"
+
       - name: Stage signed artifacts
         shell: bash
         run: |
@@ -95,3 +135,8 @@ jobs:
           files: |
             dist/*.apk
             dist/SHA256SUMS.txt
+
+      - name: Remove restored client configuration
+        if: always()
+        shell: bash
+        run: rm -f .env "$RUNNER_TEMP/caesar-classes.dex"

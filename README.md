@@ -19,7 +19,7 @@
 </p>
 
 > [!IMPORTANT]
-> **`v2.0.0` 是 Caesar∞ 当前的源码与发布基线。** 当前重点适配 Xiaomi 15 Pro（Android 16、16 GB RAM）。模型权重、个人密钥、健康原始序列、设备日志和调试 APK 均不会进入仓库。请只从 [Releases](https://github.com/liburce0412-alt/Caesar-Infinity/releases) 下载同时提供 SHA-256 的正式 APK；如果某个版本没有 APK，表示发布签名尚未配置，请按源码构建，不要安装第三方重打包文件。
+> **`v2.0.1` 是 Caesar∞ 当前的源码与发布基线。** 当前重点适配 Xiaomi 15 Pro（Android 16、16 GB RAM）。模型权重、个人密钥、健康原始序列、设备日志和调试 APK 均不会进入仓库。请只从 [Releases](https://github.com/liburce0412-alt/Caesar-Infinity/releases) 下载同时提供 SHA-256 的正式 APK；如果某个版本没有 APK，表示发布签名尚未配置，请按源码构建，不要安装第三方重打包文件。
 
 ## V2 是什么
 
@@ -205,6 +205,7 @@ scripts/                     评测、设备测试与数据诊断脚本
 - [安全审计](docs/security-audit.md)
 - [上线接管](docs/live-cutover.md)
 - [SPECTRA / OpticalGlass 设计](design/caesar-adaptive-field-v1.md)
+- [v2.0.1 发布说明](docs/releases/v2.0.1.md)
 - [v2.0.0 发布说明](docs/releases/v2.0.0.md)
 - [v1.0.0 历史发布说明](docs/releases/v1.0.0.md)
 

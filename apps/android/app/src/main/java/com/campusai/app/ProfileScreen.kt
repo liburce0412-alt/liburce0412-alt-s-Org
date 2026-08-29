@@ -381,7 +381,9 @@ enum class MiFitnessSettingsStatus {
 
 @Composable
 private fun ProfileHero(profile: CampusProfile, fallbackName: String, level: Int, xp: Long, onEdit: () -> Unit) {
-    val hasCover = profile.coverUrl.isNotBlank()
+    val coverUrl = profile.coverUrl
+    var coverLoaded by remember(coverUrl) { mutableStateOf(false) }
+    val hasCover = coverUrl.isNotBlank() && coverLoaded
     val primary = if (hasCover) Color.White else MaterialTheme.colorScheme.onSurface
     val tokens = SpectraTheme.tokens
     val fluid = SpectraTheme.isFluid
@@ -393,8 +395,22 @@ private fun ProfileHero(profile: CampusProfile, fallbackName: String, level: Int
         onClick = onEdit,
     ) {
         Box(Modifier.fillMaxSize()) {
+            if (!hasCover) {
+                Box(Modifier.fillMaxSize().background(Color.White.copy(.06f)))
+                BrandMark(Modifier.align(Alignment.TopCenter).padding(top = 26.dp).size(100.dp))
+            }
+            if (coverUrl.isNotBlank()) {
+                AsyncImage(
+                    model = coverUrl,
+                    contentDescription = "个人背景",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                    onLoading = { coverLoaded = false },
+                    onSuccess = { coverLoaded = true },
+                    onError = { coverLoaded = false },
+                )
+            }
             if (hasCover) {
-                AsyncImage(profile.coverUrl, "个人背景", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                 Box(
                     Modifier.fillMaxSize().background(
                         Brush.verticalGradient(
@@ -406,9 +422,6 @@ private fun ProfileHero(profile: CampusProfile, fallbackName: String, level: Int
                         ),
                     ),
                 )
-            } else {
-                Box(Modifier.fillMaxSize().background(Color.White.copy(.06f)))
-                BrandMark(Modifier.align(Alignment.TopCenter).padding(top = 26.dp).size(100.dp))
             }
             Row(
                 Modifier
@@ -443,9 +456,10 @@ private fun ProfileHero(profile: CampusProfile, fallbackName: String, level: Int
                             drawArc(SpectraColors.Warm.copy(.62f), 344f, 24f, false, style = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round))
                         }
                     }
+                    BrandMark(Modifier.size(62.dp))
                     if (profile.avatarUrl.isNotBlank()) {
                         AsyncImage(profile.avatarUrl, "头像", Modifier.size(66.dp).clip(CircleShape), contentScale = ContentScale.Crop)
-                    } else BrandMark(Modifier.size(62.dp))
+                    }
                 }
                 Spacer(Modifier.size(12.dp))
                 Column(Modifier.weight(1f)) {

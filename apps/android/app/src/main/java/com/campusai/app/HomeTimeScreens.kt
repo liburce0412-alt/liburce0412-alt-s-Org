@@ -203,14 +203,17 @@ fun HomeScreen(
                     shadowed = false,
                     contentPadding = PaddingValues(0.dp),
                 ) {
-                    if (avatarUrl.isNotBlank()) {
-                        AsyncImage(
-                            model = avatarUrl,
-                            contentDescription = "头像",
-                            modifier = Modifier.fillMaxSize().padding(3.dp).clip(CircleShape),
-                            contentScale = ContentScale.Crop,
-                        )
-                    } else BrandMark(Modifier.fillMaxSize().padding(5.dp))
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        BrandMark(Modifier.fillMaxSize().padding(5.dp))
+                        if (avatarUrl.isNotBlank()) {
+                            AsyncImage(
+                                model = avatarUrl,
+                                contentDescription = "头像",
+                                modifier = Modifier.fillMaxSize().padding(3.dp).clip(CircleShape),
+                                contentScale = ContentScale.Crop,
+                            )
+                        }
+                    }
                 }
             }
         }

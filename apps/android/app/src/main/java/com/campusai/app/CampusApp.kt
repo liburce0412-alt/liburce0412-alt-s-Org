@@ -401,10 +401,15 @@ fun CampusApp(
 
     LaunchedEffect(authState.signedIn) {
         if (authState.signedIn) {
-            authRepository.refresh()
             while (true) {
                 delay(45 * 60 * 1_000L)
-                authRepository.refresh()
+                if (authRepository.refresh()) {
+                    val refreshed = authRepository.state.value
+                    profileRepository.load(
+                        userId = refreshed.userId,
+                        fallbackName = refreshed.email.substringBefore('@').ifBlank { "Caesar 用户" },
+                    )
+                }
             }
         }
     }
@@ -413,12 +418,14 @@ fun CampusApp(
         campusViewModel.setSession(authState.signedIn, authState.userId)
     }
     LaunchedEffect(authState.signedIn, authState.userId) {
-        timeViewModel.setActiveUser(authState.userId.takeIf { authState.signedIn })
+        if (authState.signedIn) authRepository.refresh()
+        val activeAuth = authRepository.state.value
+        timeViewModel.setActiveUser(activeAuth.userId.takeIf { activeAuth.signedIn })
         profileRepository.load(
-            userId = authState.userId.takeIf { authState.signedIn }.orEmpty(),
-            fallbackName = authState.email.substringBefore('@').ifBlank { "Caesar 用户" },
+            userId = activeAuth.userId.takeIf { activeAuth.signedIn }.orEmpty(),
+            fallbackName = activeAuth.email.substringBefore('@').ifBlank { "Caesar 用户" },
         )
-        if (authState.signedIn) CampusSyncScheduler.enqueue(context.applicationContext)
+        if (activeAuth.signedIn) CampusSyncScheduler.enqueue(context.applicationContext)
     }
     LaunchedEffect(aiSnapshot, authState.userId) { aiViewModel.ensureDailyGreeting(aiSnapshot) }
     LaunchedEffect(Unit) { aiViewModel.refreshHealthStatus() }
