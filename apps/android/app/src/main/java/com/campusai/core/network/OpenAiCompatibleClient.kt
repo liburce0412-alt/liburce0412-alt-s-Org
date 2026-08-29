@@ -1,24 +1,33 @@
 package com.campusai.core.network
 
 import com.campusai.core.ai.AiEvent
+import com.campusai.core.ai.AiExecutionEngine
 import com.campusai.core.ai.AiRequest
 import com.campusai.core.ai.AiSystemPolicy
 import com.campusai.core.ai.CloudAiProvider
 import com.campusai.core.ai.CloudHealthDisclosure
 import com.campusai.core.ai.CloudProviderConnection
 import com.campusai.core.ai.CloudProviderModel
+import com.campusai.core.ai.ResolvedExecution
 import com.campusai.core.model.AiConversationMessage
 import com.campusai.core.model.AiMode
 import com.campusai.core.security.PersonalAiProviderStore
 import java.security.MessageDigest
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -41,7 +50,11 @@ class PersonalCloudClient internal constructor(
 
     private val activeCall = AtomicReference<Call?>(null)
 
-    suspend fun stream(request: AiRequest, onEvent: suspend (AiEvent) -> Unit) = withContext(Dispatchers.IO) {
+    suspend fun stream(
+        request: AiRequest,
+        withSubmissionLease: suspend (submit: () -> Unit) -> Boolean = { submit -> submit(); true },
+        onEvent: suspend (AiEvent) -> Unit,
+    ) = withContext(Dispatchers.IO) {
         val apiKey = requireCredential()
         val model = try {
             provider.resolveModel(request.mode, selectedModel())
@@ -54,7 +67,13 @@ class PersonalCloudClient internal constructor(
             .build()
         val call = client.newCall(httpRequest)
         activeCall.set(call)
-        currentCoroutineContext().job.invokeOnCompletion { cause -> if (cause != null) call.cancel() }
+        val cancellationWatcher = launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                awaitCancellation()
+            } finally {
+                call.cancel()
+            }
+        }
         val started = System.currentTimeMillis()
         var inputTokens: Long? = null
         var outputTokens: Long? = null
@@ -62,18 +81,27 @@ class PersonalCloudClient internal constructor(
         val assistantContent = StringBuilder()
         val reasoningContent = StringBuilder()
         val toolCalls = OpenAiToolCallAccumulator(provider, prepared.originalToolNamesByWireName)
+        val outputGuard = CloudOutputIntegrityGuard(request.maxOutputTokens)
         try {
-            onEvent(AiEvent.Meta(model, provider.appProvider))
+            onEvent(
+                AiEvent.Meta(
+                    ResolvedExecution(
+                        provider = provider.appProvider,
+                        model = model,
+                        engine = AiExecutionEngine.CLOUD_OPENAI_COMPATIBLE,
+                        requestId = UUID.randomUUID().toString(),
+                    ),
+                ),
+            )
             onEvent(AiEvent.Status(if (request.mode == AiMode.DEEP) "planning" else "responding", 0))
-            call.execute().use { response ->
+            call.awaitResponse(withSubmissionLease).use { response ->
                 if (!response.isSuccessful) throw providerError(provider, response.code)
                 val source = response.body?.source()
                     ?: throw CloudProviderException("empty_response", "${provider.displayName} 没有返回数据流，请重试。")
-                while (!source.exhausted()) {
+                val events = SseEventReader(source)
+                while (true) {
                     currentCoroutineContext().ensureActive()
-                    val line = source.readUtf8Line() ?: break
-                    if (!line.startsWith("data:")) continue
-                    val data = line.substringAfter(':').trim()
+                    val data = events.next()?.data?.trim() ?: break
                     if (data == "[DONE]") {
                         streamCompleted = true
                         break
@@ -84,13 +112,17 @@ class PersonalCloudClient internal constructor(
                             "${provider.displayName} 数据流返回了错误，请重试。",
                         )
                     }
-                    val chunk = OpenAiCompatibleStreamParser.parse(data) ?: continue
+                    val chunk = OpenAiCompatibleStreamParser.parse(data)
+                        ?: throw CloudProviderException(
+                            "provider_stream_malformed",
+                            "${provider.displayName} 返回了损坏的数据流，请重试。",
+                        )
                     chunk.delta?.takeIf(String::isNotEmpty)?.let { delta ->
                         if (assistantContent.length + delta.length > MAX_PROVIDER_ASSISTANT_CHARS) {
                             throw CloudProviderException("provider_response_too_large", "${provider.displayName} 返回的回复过大，已安全停止。", false)
                         }
                         assistantContent.append(delta)
-                        onEvent(AiEvent.Delta(delta))
+                        outputGuard.accept(delta).forEach { visible -> onEvent(AiEvent.Delta(visible)) }
                     }
                     chunk.reasoningContentDelta?.takeIf(String::isNotEmpty)?.let { delta ->
                         if (reasoningContent.length + delta.length > MAX_PROVIDER_REASONING_CHARS) {
@@ -109,6 +141,7 @@ class PersonalCloudClient internal constructor(
                     "${provider.displayName} 数据流在完成前中断，请重试。",
                 )
             }
+            outputGuard.finish(outputTokens).forEach { visible -> onEvent(AiEvent.Delta(visible)) }
             val replayReasoning = reasoningContent.toString().takeIf(String::isNotBlank)
             val toolCall = toolCalls.complete(
                 assistantContent = assistantContent.toString(),
@@ -138,7 +171,11 @@ class PersonalCloudClient internal constructor(
                     ),
                 )
             }
+        } catch (failure: IOException) {
+            currentCoroutineContext().ensureActive()
+            throw failure
         } finally {
+            cancellationWatcher.cancel()
             activeCall.compareAndSet(call, null)
         }
     }
@@ -147,15 +184,25 @@ class PersonalCloudClient internal constructor(
         val apiKey = requireCredential()
         val call = client.newCall(authenticatedRequest(provider.modelsUrl, apiKey).get().build())
         activeCall.set(call)
-        currentCoroutineContext().job.invokeOnCompletion { cause -> if (cause != null) call.cancel() }
+        val cancellationWatcher = launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                awaitCancellation()
+            } finally {
+                call.cancel()
+            }
+        }
         try {
-            call.execute().use { response ->
+            call.awaitResponse().use { response ->
                 if (!response.isSuccessful) throw providerError(provider, response.code)
                 val raw = response.body?.string()
                     ?: throw CloudProviderException("empty_response", "${provider.displayName} 没有返回模型列表。")
                 OpenAiCompatibleModelParser.parse(provider, raw)
             }
+        } catch (failure: IOException) {
+            currentCoroutineContext().ensureActive()
+            throw failure
         } finally {
+            cancellationWatcher.cancel()
             activeCall.compareAndSet(call, null)
         }
     }
@@ -185,6 +232,49 @@ class PersonalCloudClient internal constructor(
         .url(url)
         .header("Authorization", "Bearer $apiKey")
         .header("Content-Type", "application/json")
+
+    /** Enqueue is the exact non-blocking submission boundary used by task leases. */
+    private suspend fun Call.awaitResponse(
+        withSubmissionLease: suspend (submit: () -> Unit) -> Boolean = { submit -> submit(); true },
+    ): okhttp3.Response {
+        val responseRef = AtomicReference<okhttp3.Response?>(null)
+        val deferred = CompletableDeferred<okhttp3.Response>()
+        val callback = object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                deferred.completeExceptionally(e)
+            }
+
+            override fun onResponse(call: Call, response: okhttp3.Response) {
+                responseRef.set(response)
+                if (!deferred.complete(response)) {
+                    responseRef.compareAndSet(response, null)
+                    response.close()
+                }
+            }
+        }
+        val submitted = try {
+            withSubmissionLease { enqueue(callback) }
+        } catch (failure: Throwable) {
+            deferred.cancel()
+            responseRef.getAndSet(null)?.close()
+            cancel()
+            throw failure
+        }
+        if (!submitted) {
+            deferred.cancel()
+            responseRef.getAndSet(null)?.close()
+            cancel()
+            throw CloudProviderException("request_superseded", "请求已被新的设置取消。", false)
+        }
+        return try {
+            deferred.await().also { responseRef.compareAndSet(it, null) }
+        } catch (cancelled: CancellationException) {
+            deferred.cancel(cancelled)
+            responseRef.getAndSet(null)?.close()
+            cancel()
+            throw cancelled
+        }
+    }
 
     private companion object {
         const val MAX_PROVIDER_ASSISTANT_CHARS = 65_536
@@ -350,6 +440,8 @@ internal object CloudRequestBoundary {
         "sourceids",
         "source",
         "sources",
+        "imageocr",
+        "ocrtext",
         "steps",
         "stepcount",
         "steptotal",

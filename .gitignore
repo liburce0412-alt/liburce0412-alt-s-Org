@@ -19,6 +19,7 @@ local.properties
 .env
 .env*.local
 debug.keystore
+/my-upload-key.jks
 apps/admin/node_modules/
 apps/admin/dist/
 apps/admin/*.tsbuildinfo

@@ -129,6 +129,8 @@ import com.campusai.core.profile.ProfileRepository
 import com.campusai.core.ai.CloudAiProvider
 import com.campusai.core.ai.CloudProviderConnection
 import com.campusai.core.ai.CloudProviderModel
+import com.campusai.core.automation.ScheduledTaskConfig
+import com.campusai.core.automation.ScheduledTaskRunStatus
 import com.campusai.core.security.PersonalAiProviderStore
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
@@ -168,6 +170,13 @@ fun ProfileScreen(
     onRefreshMiFitnessSteps: () -> Unit = {},
     onDeleteMiFitnessCredentials: () -> Unit = {},
     onTestCloudProviderConnection: (suspend (CloudAiProvider, String) -> Result<CloudProviderConnection>)? = null,
+    healthAutomationConfig: ScheduledTaskConfig? = null,
+    healthAutomationSaving: Boolean = false,
+    healthAutomationNotificationsEnabled: Boolean = true,
+    healthAutomationMessage: String? = null,
+    healthAutomationMessageIsError: Boolean = false,
+    onSaveHealthAutomation: (CloudAiProvider, String, Int, Boolean) -> Unit = { _, _, _, _ -> },
+    onDisableHealthAutomation: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val layout = SpectraTheme.layout
@@ -245,6 +254,12 @@ fun ProfileScreen(
                         miFitnessEntrySubtitle(miFitnessConfigured, miFitnessSyncing, miFitnessLastSyncAtMillis, miFitnessStatus),
                     ) { sheet = ProfileSheet.MI_FITNESS }
                     DividerInset()
+                    SettingLink(
+                        Icons.Rounded.Notifications,
+                        "健康自动化",
+                        healthAutomationEntrySubtitle(healthAutomationConfig),
+                    ) { sheet = ProfileSheet.HEALTH_AUTOMATION }
+                    DividerInset()
                     SettingLink(Icons.Rounded.Palette, "外观与体验", environmentLabel(preferences.environment)) { sheet = ProfileSheet.APPEARANCE }
                     DividerInset()
                     SettingLink(Icons.Rounded.Forum, if (unreadMessages > 0) "消息 · $unreadMessages 条未读" else "消息", onClick = if (authState.signedIn) onOpenMessages else onLogin)
@@ -281,6 +296,7 @@ fun ProfileScreen(
                             ProfileSheet.EDIT -> "编辑资料"
                             ProfileSheet.AI -> "AI 运行方式"
                             ProfileSheet.MI_FITNESS -> "Mi Fitness"
+                            ProfileSheet.HEALTH_AUTOMATION -> "健康自动化"
                             ProfileSheet.APPEARANCE -> "外观与体验"
                             ProfileSheet.ACHIEVEMENTS -> "全部成就"
                         },
@@ -313,6 +329,18 @@ fun ProfileScreen(
                             onDeleteCredentials = onDeleteMiFitnessCredentials,
                         )
                     }
+                    ProfileSheet.HEALTH_AUTOMATION -> item {
+                        HealthAutomationSettings(
+                            config = healthAutomationConfig,
+                            saving = healthAutomationSaving,
+                            notificationsEnabled = healthAutomationNotificationsEnabled,
+                            message = healthAutomationMessage,
+                            messageIsError = healthAutomationMessageIsError,
+                            providerStore = personalAiProviderStore,
+                            onSave = onSaveHealthAutomation,
+                            onDisable = onDisableHealthAutomation,
+                        )
+                    }
                     ProfileSheet.APPEARANCE -> item {
                         AppearanceSettings(preferences, repository) { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
                     }
@@ -328,7 +356,7 @@ fun ProfileScreen(
     }
 }
 
-private enum class ProfileSheet { EDIT, AI, MI_FITNESS, APPEARANCE, ACHIEVEMENTS }
+private enum class ProfileSheet { EDIT, AI, MI_FITNESS, HEALTH_AUTOMATION, APPEARANCE, ACHIEVEMENTS }
 
 /** Fixed presentation states keep credentials, responses, and raw errors out of the UI contract. */
 enum class MiFitnessSettingsStatus {
@@ -900,6 +928,13 @@ private fun miFitnessEntrySubtitle(
     else -> "同步今日健康"
 }
 
+private fun healthAutomationEntrySubtitle(config: ScheduledTaskConfig?): String =
+    if (config?.enabled == true) {
+        "每 ${config.intervalMinutes} 分钟 · ${config.provider.displayName}"
+    } else {
+        "未启用 · 仅前台运行"
+    }
+
 internal fun miFitnessStatusText(status: MiFitnessSettingsStatus, configured: Boolean): String = when (status) {
     MiFitnessSettingsStatus.IDLE -> if (configured) "已配置，等待手动刷新。" else "尚未配置。"
     MiFitnessSettingsStatus.VALIDATING -> "正在验证并保存到系统安全存储。"
@@ -1065,6 +1100,169 @@ private fun MiFitnessCloudSettings(
         dismissLabel = "取消",
         destructive = true,
     )
+}
+
+@Composable
+private fun HealthAutomationSettings(
+    config: ScheduledTaskConfig?,
+    saving: Boolean,
+    notificationsEnabled: Boolean,
+    message: String?,
+    messageIsError: Boolean,
+    providerStore: PersonalAiProviderStore,
+    onSave: (CloudAiProvider, String, Int, Boolean) -> Unit,
+    onDisable: () -> Unit,
+) {
+    val configuredProviders = CloudAiProvider.entries.filter(providerStore::hasCredential)
+    // Runtime status changes (RUNNING -> UPDATED/UNCHANGED) must not reset an
+    // unsaved form. The task id identifies this editing session; provider changes
+    // below intentionally reset only the model field.
+    var provider by remember(config?.id) {
+        mutableStateOf(
+            config?.provider
+                ?: configuredProviders.firstOrNull()
+                ?: CloudAiProvider.GOOGLE_GEMINI,
+        )
+    }
+    var modelId by remember(config?.id, provider) {
+        mutableStateOf(
+            config?.takeIf { it.provider == provider }?.modelId
+                ?: providerStore.selectedModel(provider),
+        )
+    }
+    var intervalMinutes by remember(config?.id) {
+        mutableStateOf(config?.intervalMinutes ?: ScheduledTaskConfig.DEFAULT_INTERVAL_MINUTES)
+    }
+    var includeHealthSummary by remember(config?.id) {
+        mutableStateOf(config?.includeHealthSummary ?: false)
+    }
+    val active = config?.enabled == true
+    val credentialAvailable = providerStore.hasCredential(provider)
+    val statusText = when (config?.lastStatus) {
+        ScheduledTaskRunStatus.RUNNING -> "正在检查小米云"
+        ScheduledTaskRunStatus.UPDATED -> "最近一次已发现新数据"
+        ScheduledTaskRunStatus.UNCHANGED -> "最近一次云端数据未变化"
+        ScheduledTaskRunStatus.ERROR -> automationErrorText(config.lastErrorCode)
+        ScheduledTaskRunStatus.IDLE, null -> if (active) "等待下一次检查" else "尚未启用"
+    }
+
+    GlassPanel(Modifier.fillMaxWidth(), radius = 16, emphasized = true) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Notifications, null)
+                Spacer(Modifier.size(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Caesar∞ 日常", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (active) "仅在 CampusAI 前台运行" else "定时任务未启用",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(.58f),
+                    )
+                }
+            }
+            Text(
+                "到时间后只读取 Mi Fitness 云端。数据变化时会生成 2–3 条短消息；没有变化时只发一条状态。不会连接手环或拉起 Mi Fitness。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(.66f),
+            )
+            Text(
+                statusText,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (config?.lastStatus == ScheduledTaskRunStatus.ERROR) SpectraColors.Error else MaterialTheme.colorScheme.onSurface.copy(.72f),
+            )
+            if (!notificationsEnabled) {
+                Text(
+                    "通知权限未开启，消息仍会写入 Caesar∞ 日常。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = SpectraColors.Warm,
+                )
+            }
+            HorizontalDivider(color = SpectraColors.Silver.copy(.68f))
+            Text("使用的 AI", style = MaterialTheme.typography.labelLarge)
+            com.campusai.core.designsystem.CaesarSlidingSelector(
+                options = CloudAiProvider.entries.map(CloudAiProvider::displayName),
+                selectedIndex = CloudAiProvider.entries.indexOf(provider).coerceAtLeast(0),
+                onSelected = { index -> CloudAiProvider.entries.getOrNull(index)?.let { provider = it } },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                if (credentialAvailable) "Key 已安全保存" else "请先在 AI 运行方式中保存这个 Provider 的 Key",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (credentialAvailable) SpectraColors.Success else SpectraColors.Warm,
+            )
+            OutlinedTextField(
+                value = modelId,
+                onValueChange = { modelId = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("锁定模型 ID") },
+                supportingText = { Text("启用时会从实时模型列表验证，之后不会静默切换。") },
+                singleLine = true,
+                enabled = !saving,
+                shape = RoundedCornerShape(12.dp),
+            )
+            Text("检查间隔", style = MaterialTheme.typography.labelLarge)
+            com.campusai.core.designsystem.CaesarSlidingSelector(
+                options = ScheduledTaskConfig.ALLOWED_INTERVAL_MINUTES.sorted().map { "$it 分钟" },
+                selectedIndex = ScheduledTaskConfig.ALLOWED_INTERVAL_MINUTES.sorted().indexOf(intervalMinutes).coerceAtLeast(0),
+                onSelected = { index ->
+                    ScheduledTaskConfig.ALLOWED_INTERVAL_MINUTES.sorted().getOrNull(index)?.let { intervalMinutes = it }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            SettingSwitch(
+                Icons.Rounded.PrivacyTip,
+                "附带必要的今日汇总",
+                includeHealthSummary,
+            ) { includeHealthSummary = it }
+            Text(
+                "只发送日汇总，不发送分钟级数据、设备标识或小米认证信息。自动消息不会被带入之后的云端对话。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(.58f),
+            )
+            if (saving) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = SpectraColors.Focus,
+                    trackColor = SpectraColors.Silver.copy(.42f),
+                )
+            }
+            message?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (messageIsError) SpectraColors.Error else SpectraColors.Success,
+                )
+            }
+            SpectraPrimaryButton(
+                text = when {
+                    saving -> "正在验证…"
+                    active -> "验证并保存设置"
+                    else -> "验证并启用"
+                },
+                onClick = { onSave(provider, modelId.trim(), intervalMinutes, includeHealthSummary) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !saving && credentialAvailable && modelId.isNotBlank() && includeHealthSummary,
+                icon = Icons.Rounded.Notifications,
+            )
+            if (active) {
+                TextButton(
+                    onClick = onDisable,
+                    enabled = !saving,
+                    modifier = Modifier.align(Alignment.End),
+                ) { Text("停用定时任务") }
+            }
+        }
+    }
+}
+
+private fun automationErrorText(code: String?): String = when (code) {
+    "notification_permission_disabled" -> "通知权限未开启，任务仍会继续记录消息"
+    "credentials_missing" -> "Mi Fitness 凭据尚未配置"
+    "authentication_failed" -> "Mi Fitness 认证已失效"
+    "rate_limited" -> "小米云请求暂时受限"
+    "task_provider_key_missing" -> "任务锁定的 Provider Key 已不可用"
+    "task_model_unavailable", "task_model_invalid", "task_model_mismatch" -> "任务锁定的模型当前不可用"
+    else -> "最近一次检查没有完成"
 }
 
 @Composable

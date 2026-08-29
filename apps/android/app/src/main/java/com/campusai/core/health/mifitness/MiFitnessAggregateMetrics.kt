@@ -415,6 +415,8 @@ internal data class MiFitnessSportRecord(
     val idDigest: String,
     val epochSeconds: Long,
     val deleted: Boolean,
+    /** Digest of the complete canonical record so edits are observable without retaining raw health data. */
+    val revisionDigest: String,
 )
 
 internal data class MiFitnessSportPage(
@@ -441,7 +443,7 @@ internal object MiFitnessSportParser {
                 require(time in 0..32_503_680_000L)
                 val deleted = item.get("deleted")
                 require(deleted is Boolean)
-                add(MiFitnessSportRecord(digest(sid), time, deleted))
+                add(MiFitnessSportRecord(digest(sid), time, deleted, digest(canonicalJson(item))))
             }
         }
         val hasMore = result.get("has_more")
@@ -456,6 +458,19 @@ internal object MiFitnessSportParser {
     private fun digest(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
+    private fun canonicalJson(value: Any?): String = when (value) {
+        null, JSONObject.NULL -> "null"
+        is JSONObject -> value.keys().asSequence().toList().sorted().joinToString(",", "{", "}") { key ->
+            "${JSONObject.quote(key)}:${canonicalJson(value.get(key))}"
+        }
+        is JSONArray -> (0 until value.length()).joinToString(",", "[", "]") { index ->
+            canonicalJson(value.get(index))
+        }
+        is String -> JSONObject.quote(value)
+        is Number, is Boolean -> value.toString()
+        else -> JSONObject.quote(value.toString())
+    }
 }
 
 internal data class MiFitnessStepSeriesPoint(val epochSeconds: Long, val steps: Long)

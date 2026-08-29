@@ -184,6 +184,8 @@ data class AiReportEntity(
     val provider: String,
     val mode: String,
     val model: String,
+    val executionEngine: String,
+    val requestId: String,
     val title: String,
     val summary: String,
     val messagesJson: String,
@@ -195,6 +197,8 @@ data class AiReportEntity(
         provider = provider.toAiProvider(),
         mode = mode.toAiMode(),
         model = model,
+        executionEngine = executionEngine,
+        requestId = requestId,
         title = title,
         summary = summary,
         messagesJson = messagesJson,
@@ -207,6 +211,8 @@ data class AiReportEntity(
             value.provider.name,
             value.mode.name,
             value.model,
+            value.executionEngine,
+            value.requestId,
             value.title,
             value.summary,
             value.messagesJson,
@@ -401,6 +407,9 @@ interface CampusDao {
     @Query("SELECT * FROM ai_reports ORDER BY updatedAt DESC")
     fun getAiReportsFlow(): Flow<List<AiReportEntity>>
 
+    @Query("SELECT * FROM ai_reports WHERE id = :id LIMIT 1")
+    suspend fun getAiReport(id: String): AiReportEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAiReport(entity: AiReportEntity)
 
@@ -506,7 +515,7 @@ interface CampusDao {
         HealthSummaryCacheEntity::class,
         DailyGoalSnapshotEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = true
 )
 abstract class CampusDatabase : RoomDatabase() {
@@ -674,6 +683,23 @@ abstract class CampusDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `ai_reports` ADD COLUMN `executionEngine` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `ai_reports` ADD COLUMN `requestId` TEXT NOT NULL DEFAULT ''")
+                db.execSQL(
+                    """
+                    UPDATE `ai_reports`
+                    SET `executionEngine` = CASE
+                        WHEN `provider` = 'LOCAL' THEN 'LOCAL_MNN'
+                        ELSE 'CLOUD_OPENAI_COMPATIBLE'
+                    END,
+                    `requestId` = 'legacy:' || `id`
+                    """.trimIndent(),
+                )
+            }
+        }
+
         @Volatile
         private var INSTANCE: CampusDatabase? = null
 
@@ -684,7 +710,14 @@ abstract class CampusDatabase : RoomDatabase() {
                     CampusDatabase::class.java,
                     "campus_database"
                 )
-                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5,
+                    MIGRATION_5_6,
+                    MIGRATION_6_7,
+                    MIGRATION_7_8,
+                )
                 .build()
                 INSTANCE = instance
                 instance

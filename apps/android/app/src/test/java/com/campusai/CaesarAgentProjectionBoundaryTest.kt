@@ -48,7 +48,7 @@ class CaesarAgentProjectionBoundaryTest {
         )
 
         val events = CaesarAgentEngine(delegate, registry)
-            .stream(request("查看健康概览"))
+            .stream(request("查看健康概览", requiresLocal = true))
             .toList()
 
         assertEquals(0, blockedCalls.get())
@@ -56,6 +56,29 @@ class CaesarAgentProjectionBoundaryTest {
         assertFalse(delegate.requests.first().caesarToolsJson.contains("profile.get_private"))
         assertEquals("tool_not_projected", delegate.lastToolFailureCode())
         assertTrue(events.any { it is AiEvent.ToolFinished && it.name == "profile.get_private" && !it.success })
+    }
+
+    @Test
+    fun `cloud-capable turn never projects or executes device health tools`() = runTest {
+        val healthCalls = AtomicInteger()
+        val delegate = UnprojectedToolDelegate("health.get_snapshot", "{}")
+        val registry = CaesarToolRegistry(
+            listOf(
+                readTool("health.get_snapshot", setOf("健康概览")) {
+                    healthCalls.incrementAndGet()
+                    CaesarToolResult.Success("{\"originPackages\":[\"private.source\"]}")
+                },
+            ),
+        )
+
+        val events = CaesarAgentEngine(delegate, registry)
+            .stream(request("查看健康概览", requiresLocal = false))
+            .toList()
+
+        assertEquals(0, healthCalls.get())
+        assertFalse(delegate.requests.first().caesarToolsJson.contains("health.get_snapshot"))
+        assertEquals("tool_not_projected", delegate.lastToolFailureCode())
+        assertTrue(events.any { it is AiEvent.ToolFinished && it.name == "health.get_snapshot" && !it.success })
     }
 
     @Test
@@ -118,12 +141,13 @@ class CaesarAgentProjectionBoundaryTest {
         ),
     ) { _, _ -> execute() }
 
-    private fun request(prompt: String) = AiRequest(
+    private fun request(prompt: String, requiresLocal: Boolean = false) = AiRequest(
         mode = AiMode.FAST,
         messages = listOf(AiConversationMessage("user", prompt)),
         sessionId = "projection-boundary-session",
         ownerUserId = "owner",
         userPrompt = prompt,
+        requiresLocal = requiresLocal,
     )
 
     private class UnprojectedToolDelegate(

@@ -1,5 +1,8 @@
 package com.campusai.core.localai
 
+import org.json.JSONArray
+import org.json.JSONObject
+
 /**
  * Only a unique top-level <final> envelope may stream. Plain text and all
  * structured output stay buffered so an inner marker can never open a stream.
@@ -20,6 +23,7 @@ internal class LocalOutputGuard {
 
     private val pending = StringBuilder()
     private val deferredFinal = StringBuilder()
+    private val integrityProbe = StringBuilder()
     private var phase = Phase.PROBING
     private var finalMode = FinalMode.UNDECIDED
     var hasVisibleOutput: Boolean = false
@@ -28,6 +32,7 @@ internal class LocalOutputGuard {
 
     fun accept(token: String): List<String> {
         if (token.isEmpty() || phase == Phase.CLOSED || phase == Phase.BLOCKED) return emptyList()
+        if (containsInvalidCodePoints(token)) return block()
         pending.append(token)
         return when (phase) {
             Phase.PROBING -> advanceProbe()
@@ -168,9 +173,11 @@ internal class LocalOutputGuard {
             phase = Phase.CLOSED
             return emptyList()
         }
+        val result = mutableListOf<String>()
+        emitVisible(visible, result)
+        if (blocked) return emptyList()
         phase = Phase.CLOSED
-        hasVisibleOutput = true
-        return chunkForUi(visible)
+        return result
     }
 
     private fun finishOpenFinal(): List<String> {
@@ -186,9 +193,11 @@ internal class LocalOutputGuard {
         }
         val visible = sanitize(candidate)
         if (visible.isBlank()) return block()
+        val result = mutableListOf<String>()
+        emitVisible(visible, result)
+        if (blocked) return emptyList()
         phase = Phase.CLOSED
-        hasVisibleOutput = true
-        return chunkForUi(visible)
+        return result
     }
 
     private fun finishBufferedPlain(): List<String> {
@@ -206,9 +215,11 @@ internal class LocalOutputGuard {
         }
         val visible = sanitize(candidate).trim()
         if (visible.isEmpty()) return block()
+        val result = mutableListOf<String>()
+        emitVisible(visible, result)
+        if (blocked) return emptyList()
         phase = Phase.CLOSED
-        hasVisibleOutput = true
-        return chunkForUi(visible)
+        return result
     }
 
     private fun startsBufferedFinal(value: String): Boolean =
@@ -233,8 +244,73 @@ internal class LocalOutputGuard {
     private fun emitVisible(value: String, target: MutableList<String>) {
         val visible = sanitize(value)
         if (visible.isEmpty()) return
+        integrityProbe.append(visible)
+        val candidate = integrityProbe.toString()
+        if (
+            containsInvalidCodePoints(candidate) ||
+            (!isStructuredOutput(candidate) && (looksLikeAsciiSymbolNoise(candidate) || looksGarbled(candidate)))
+        ) {
+            target.clear()
+            block()
+            return
+        }
         hasVisibleOutput = true
         target += visible
+    }
+
+    private fun containsInvalidCodePoints(value: String): Boolean = value.any { character ->
+        character == '\uFFFD' ||
+            (character.code in 0..31 && character !in "\n\r\t") ||
+            character.code == 127
+    }
+
+    private fun looksLikeAsciiSymbolNoise(value: String): Boolean {
+        val sample = value.filterNot(Char::isWhitespace)
+        if (sample.length < MIN_INTEGRITY_SAMPLE_CHARS) return false
+        val semanticRatio = sample.count(Char::isLetter).toDouble() / sample.length
+        val noisyRatio = sample.count { it in ASCII_NOISE }.toDouble() / sample.length
+        return semanticRatio < .10 && noisyRatio >= .18
+    }
+
+    private fun looksGarbled(value: String): Boolean {
+        val sample = value.filterNot(Char::isWhitespace)
+        if (sample.length < MIN_INTEGRITY_SAMPLE_CHARS) return false
+        val semantic = sample.count { it.isLetter() || it.code in CJK_RANGE }
+        val punctuation = sample.count(::isPunctuation)
+        val semanticRatio = semantic.toDouble() / sample.length
+        val punctuationRatio = punctuation.toDouble() / sample.length
+        return REPEATED_CHARACTER.containsMatchIn(sample) ||
+            REPEATED_FRAGMENT.containsMatchIn(sample) ||
+            (punctuationRatio >= PUNCTUATION_RATIO && semanticRatio <= MAX_SEMANTIC_RATIO)
+    }
+
+    private fun isStructuredOutput(value: String): Boolean {
+        val trimmed = value.trim()
+        if (trimmed.startsWith(CODE_FENCE) && trimmed.endsWith(CODE_FENCE)) return true
+        if (
+            trimmed.startsWith('{') && trimmed.endsWith('}') &&
+            runCatching { JSONObject(trimmed) }.isSuccess
+        ) return true
+        if (
+            trimmed.startsWith('[') && trimmed.endsWith(']') &&
+            runCatching { JSONArray(trimmed) }.isSuccess
+        ) return true
+        return MATH_MARKER.containsMatchIn(trimmed) && MATH_ALLOWED.matches(trimmed)
+    }
+
+    private fun isPunctuation(character: Char): Boolean = when (Character.getType(character)) {
+        Character.CONNECTOR_PUNCTUATION.toInt(),
+        Character.DASH_PUNCTUATION.toInt(),
+        Character.START_PUNCTUATION.toInt(),
+        Character.END_PUNCTUATION.toInt(),
+        Character.INITIAL_QUOTE_PUNCTUATION.toInt(),
+        Character.FINAL_QUOTE_PUNCTUATION.toInt(),
+        Character.OTHER_PUNCTUATION.toInt(),
+        Character.MATH_SYMBOL.toInt(),
+        Character.CURRENCY_SYMBOL.toInt(),
+        Character.MODIFIER_SYMBOL.toInt(),
+        Character.OTHER_SYMBOL.toInt(), -> true
+        else -> false
     }
 
     private fun block(): List<String> {
@@ -246,6 +322,7 @@ internal class LocalOutputGuard {
     private fun clearBuffers() {
         pending.clear()
         deferredFinal.clear()
+        integrityProbe.clear()
     }
 
     private fun sanitize(value: String): String = value
@@ -267,6 +344,15 @@ internal class LocalOutputGuard {
         private const val THINK_CLOSE = "</think>"
         private const val TOOL_OPEN = "<tool_call>"
         private const val CODE_FENCE = "```"
+        private const val MIN_INTEGRITY_SAMPLE_CHARS = 48
+        private val CJK_RANGE = 0x3400..0x9FFF
+        private const val PUNCTUATION_RATIO = .45
+        private const val MAX_SEMANTIC_RATIO = .24
+        private val REPEATED_CHARACTER = Regex("(.)\\1{15,}")
+        private val REPEATED_FRAGMENT = Regex("(.{2,12})\\1{6,}")
+        private val MATH_MARKER = Regex("(?:=|\\\\(?:frac|sqrt|sum|int)|[∑√∫])")
+        private val MATH_ALLOWED = Regex("[\\p{L}\\p{N}\\s=+\\-*/^_(){}\\[\\].,:%\\\\∑√∫]+")
+        private val ASCII_NOISE = setOf('#', '$', '%', '&', '!', '"', '\'', '@', '`', '~')
         private val TOP_LEVEL_OPENINGS = listOf(FINAL_OPEN, THINK_OPEN, THINK_CLOSE, TOOL_OPEN)
         private val SENTENCE_BOUNDARIES = setOf('。', '！', '？', '，', '；', '：', '!', '?', ',', ';', ':', '\n')
         private val COMPLETE_THINK_BLOCK = Regex("(?is)<think>.*?</think>")

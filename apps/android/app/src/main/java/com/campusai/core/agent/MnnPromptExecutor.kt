@@ -13,7 +13,9 @@ import ai.koog.prompt.message.ResponseMetaInfo
 import ai.koog.prompt.streaming.StreamFrame
 import com.campusai.core.ai.AiEngine
 import com.campusai.core.ai.AiEvent
+import com.campusai.core.ai.AiExecutionEngine
 import com.campusai.core.ai.AiRequest
+import com.campusai.core.ai.ResolvedExecution
 import com.campusai.core.localai.LocalModelManifest
 import com.campusai.core.model.AiConversationMessage
 import com.campusai.core.model.AiProvider
@@ -63,14 +65,17 @@ class MnnPromptExecutor(
     override fun executeStreaming(prompt: Prompt, model: LLModel, tools: List<ToolDescriptor>): Flow<StreamFrame> = flow {
         val base = checkNotNull(executionContexts.remove(prompt.id)) { "No local request is bound to prompt ${prompt.id}" }
         val request = base.copy(
-            messages = prompt.messages.mapNotNull(::toCampusMessage),
+            messages = mergeExecutionMessageMetadata(
+                converted = prompt.messages.mapNotNull(::toCampusMessage),
+                original = base.messages,
+            ),
         )
         engine.stream(request).collect { event ->
             when (event) {
                 is AiEvent.Delta -> emit(StreamFrame.TextDelta(event.text))
                 is AiEvent.ToolCallRequested -> emit(StreamFrame.ToolCallComplete(null, event.name, event.argumentsJson))
                 is AiEvent.Done -> emit(StreamFrame.End("stop", ResponseMetaInfo.Empty))
-                is AiEvent.Error -> error("${event.code}: ${event.message}")
+                is AiEvent.Error -> throw MnnTerminalEventException(event)
                 else -> Unit
             }
         }
@@ -105,6 +110,19 @@ class MnnPromptExecutor(
 
 }
 
+internal fun mergeExecutionMessageMetadata(
+    converted: List<AiConversationMessage>,
+    original: List<AiConversationMessage>,
+): List<AiConversationMessage> = converted.mapIndexed { index, message ->
+    val source = original.getOrNull(index) ?: return@mapIndexed message
+    message.copy(
+        attachmentPaths = source.attachmentPaths,
+        attachmentRefs = source.attachmentRefs,
+        missingAttachmentCount = source.missingAttachmentCount,
+        cloudHealthSensitive = source.cloudHealthSensitive,
+    )
+}
+
 /** Keeps the current AiEngine API while routing all local generations through Koog's executor contract. */
 class KoogMnnAiEngine(
     private val executor: MnnPromptExecutor,
@@ -117,7 +135,16 @@ class KoogMnnAiEngine(
         val prompt = Prompt(request.messages.map(::toKoogMessage), promptId)
         executor.bind(promptId, request)
         try {
-            emit(AiEvent.Meta("${manifest.displayName} · Koog/MNN", AiProvider.LOCAL))
+            emit(
+                AiEvent.Meta(
+                    ResolvedExecution(
+                        provider = AiProvider.LOCAL,
+                        model = "${manifest.displayName} · Koog/MNN",
+                        engine = AiExecutionEngine.LOCAL_MNN,
+                        requestId = UUID.randomUUID().toString(),
+                    ),
+                ),
+            )
             executor.executeStreaming(prompt, model, emptyList()).collect { frame ->
                 when (frame) {
                     is StreamFrame.TextDelta -> emit(AiEvent.Delta(frame.text))
@@ -127,6 +154,8 @@ class KoogMnnAiEngine(
                     else -> Unit
                 }
             }
+        } catch (terminal: MnnTerminalEventException) {
+            emit(terminal.event)
         } finally {
             executor.unbind(promptId)
         }
@@ -148,6 +177,10 @@ class KoogMnnAiEngine(
     }
 
 }
+
+private class MnnTerminalEventException(
+    val event: AiEvent.Error,
+) : RuntimeException(event.message)
 
 private fun LocalModelManifest.toKoogModel(): LLModel = LLModel(
     LLMProvider.Alibaba,

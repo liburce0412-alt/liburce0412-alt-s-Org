@@ -98,6 +98,13 @@ class AiEngineRouter(
     }
 
     fun streamCloudOnce(request: AiRequest, provider: AiProvider = AiProvider.DEEPSEEK): Flow<AiEvent> = flow {
+        if (
+            request.requiresLocal ||
+            request.imagePaths.isNotEmpty() ||
+            request.messages.any { it.attachmentPaths.isNotEmpty() || it.attachmentRefs.isNotEmpty() }
+        ) {
+            throw AiRoutingException("cloud_local_content_forbidden", "图片和其他仅限本机的内容不能发送到云端。")
+        }
         val cloudProvider = CloudAiProvider.from(provider)
             ?: throw AiRoutingException("cloud_provider_invalid", "本次云端请求未指定受支持的 Provider。")
         if (!isOnline()) {

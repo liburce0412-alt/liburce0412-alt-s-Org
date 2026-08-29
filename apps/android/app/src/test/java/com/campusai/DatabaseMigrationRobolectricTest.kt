@@ -113,4 +113,27 @@ class DatabaseMigrationRobolectricTest {
             }
         }
     }
+
+    @Test
+    fun `v7 to v8 backfills resolved execution identity`() {
+        val databaseName = "caesar-robolectric-migration-7-8"
+        helper.createDatabase(databaseName, 7).apply {
+            execSQL("INSERT INTO ai_reports(id,provider,mode,model,title,summary,messagesJson,createdAt,updatedAt) VALUES('local-session','LOCAL','FAST','Caesar local','会话','摘要','[]',100,200)")
+            execSQL("INSERT INTO ai_reports(id,provider,mode,model,title,summary,messagesJson,createdAt,updatedAt) VALUES('cloud-session','GOOGLE_GEMINI','FAST','gemini-test','会话','摘要','[]',100,200)")
+            close()
+        }
+
+        helper.runMigrationsAndValidate(databaseName, 8, true, CampusDatabase.MIGRATION_7_8).use { database ->
+            database.query("SELECT id,executionEngine,requestId FROM ai_reports ORDER BY id").use { cursor ->
+                assertEquals(true, cursor.moveToFirst())
+                assertEquals("cloud-session", cursor.getString(0))
+                assertEquals("CLOUD_OPENAI_COMPATIBLE", cursor.getString(1))
+                assertEquals("legacy:cloud-session", cursor.getString(2))
+                assertEquals(true, cursor.moveToNext())
+                assertEquals("local-session", cursor.getString(0))
+                assertEquals("LOCAL_MNN", cursor.getString(1))
+                assertEquals("legacy:local-session", cursor.getString(2))
+            }
+        }
+    }
 }

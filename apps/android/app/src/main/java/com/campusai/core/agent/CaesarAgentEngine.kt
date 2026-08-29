@@ -34,7 +34,12 @@ class CaesarAgentEngine(
     override fun stream(request: AiRequest): Flow<AiEvent> = flow {
         val sessionId = request.sessionId.ifBlank { UUID.randomUUID().toString() }
         val prompt = request.userPrompt.ifBlank { request.messages.lastOrNull { it.role == "user" }?.content.orEmpty() }
-        val projected = tools.project(prompt)
+        // Device health tools may expose source packages, timestamps and minute-level details.
+        // Only requests already forced onto the local engine may see them; cloud turns receive
+        // the separately typed, consented daily summary carried by CloudHealthDisclosure.
+        val projected = tools.project(prompt).filter { definition ->
+            request.requiresLocal || !definition.name.startsWith(HEALTH_TOOL_PREFIX)
+        }
         val projectedToolNames = projected.mapTo(linkedSetOf()) { it.name }
         val current = request.copy(
             sessionId = sessionId,
@@ -219,6 +224,10 @@ class CaesarAgentEngine(
             AiConversationMessage("assistant", call.rawContent) +
             AiConversationMessage("tool", JSONObject().put("ok", false).put("code", code).put("message", message).toString()),
     )
+
+    private companion object {
+        const val HEALTH_TOOL_PREFIX = "health."
+    }
 
     private fun AiRequest.forOutputRepair(): AiRequest {
         val lastUser = messages.indexOfLast { it.role == "user" }

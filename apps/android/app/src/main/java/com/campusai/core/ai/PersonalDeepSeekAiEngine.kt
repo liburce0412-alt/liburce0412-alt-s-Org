@@ -11,7 +11,7 @@ class PersonalDeepSeekAiEngine(
     private val client: PersonalDeepSeekClient,
 ) : AiEngine {
     override fun stream(request: AiRequest): Flow<AiEvent> = personalDeepSeekEventFlow { onEvent ->
-        client.stream(request, onEvent)
+        client.stream(request, onEvent = onEvent)
     }
 
     override fun cancel() = client.cancel()
@@ -21,7 +21,7 @@ class PersonalCloudAiEngine(
     private val client: PersonalCloudClient,
 ) : AiEngine {
     override fun stream(request: AiRequest): Flow<AiEvent> = personalCloudEventFlow(client.provider) { onEvent ->
-        client.stream(request, onEvent)
+        client.stream(request, onEvent = onEvent)
     }
 
     override fun cancel() = client.cancel()

@@ -55,7 +55,9 @@ class CaesarAgentClosedLoopTest {
             ),
         )
 
-        val events = CaesarAgentEngine(delegate, registry).stream(request("读取今天健康概览")).toList()
+        val events = CaesarAgentEngine(delegate, registry)
+            .stream(request("读取今天健康概览", requiresLocal = true))
+            .toList()
 
         assertEquals(1, useCase.calls.get())
         assertTrue(delegate.requests.first().caesarToolsJson.contains("health.get_snapshot"))
@@ -146,12 +148,13 @@ class CaesarAgentClosedLoopTest {
         assertTrue(repeated.single() is AiEvent.Error && (repeated.single() as AiEvent.Error).code == "confirmation_expired")
     }
 
-    private fun request(prompt: String) = AiRequest(
+    private fun request(prompt: String, requiresLocal: Boolean = false) = AiRequest(
         mode = AiMode.FAST,
         messages = listOf(AiConversationMessage("user", prompt)),
         sessionId = "closed-loop-session",
         ownerUserId = "owner",
         userPrompt = prompt,
+        requiresLocal = requiresLocal,
     )
 
     private class ScriptedToolDelegate(

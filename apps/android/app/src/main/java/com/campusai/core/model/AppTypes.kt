@@ -11,6 +11,16 @@ enum class SpectraEnvironment { ORIGINAL, OCEAN, ULTRAVIOLET, EMBER, AURORA }
 enum class AiMode { FAST, DEEP }
 enum class AiProvider { AUTO, DEEPSEEK, GOOGLE_GEMINI, LOCAL }
 
+data class LocalImageRef(
+    val assetId: String,
+    val relativePath: String,
+    val mimeType: String,
+    val width: Int,
+    val height: Int,
+    val byteSize: Long,
+    val sha256: String,
+)
+
 sealed interface LocalModelState {
     data object NotDownloaded : LocalModelState
     data object Checking : LocalModelState
@@ -42,6 +52,10 @@ data class AiConversationMessage(
     val content: String,
     val presentationJson: String? = null,
     val attachmentPaths: List<String> = emptyList(),
+    /** Stable references persisted with history; absolute paths are runtime-only compatibility data. */
+    val attachmentRefs: List<LocalImageRef> = emptyList(),
+    /** Runtime presentation state for legacy or deleted attachment files. */
+    val missingAttachmentCount: Int = 0,
     /** In-memory provider state needed to continue DeepSeek reasoning; never persisted or rendered. */
     val providerReasoningContent: String? = null,
     /** A one-turn health disclosure must never be replayed into a later cloud request. */
@@ -52,6 +66,9 @@ data class AiReport(
     val provider: AiProvider,
     val mode: AiMode,
     val model: String,
+    /** Persisted ResolvedExecution identity; kept as a stable enum name at the model boundary. */
+    val executionEngine: String = if (provider == AiProvider.LOCAL) "LOCAL_MNN" else "CLOUD_OPENAI_COMPATIBLE",
+    val requestId: String = "",
     val title: String,
     val summary: String,
     val messagesJson: String,

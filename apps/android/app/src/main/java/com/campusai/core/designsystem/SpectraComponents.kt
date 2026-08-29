@@ -67,6 +67,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.graphicsLayer
@@ -128,10 +129,70 @@ fun SpectraBackdrop(
     if (motion == MotionMode.OFF) {
         val background = MaterialTheme.colorScheme.background
         val darkMode = background.luminance() < .35f
+        val railProfile = checkNotNull(SilverRailTimeline.staticRailProfile(motionEnabled = false))
+        val railTint = staticSilverRailTint(environment)
         Box(
             modifier
                 .fillMaxSize()
-                .background(staticSpectraBackdropBrush(environment, darkMode, background)),
+                .background(staticSpectraBackdropBrush(environment, darkMode, background))
+                .drawWithCache {
+                    val railWidth = size.width * railProfile.lengthFraction
+                    val railLeft = (size.width - railWidth) / 2f
+                    val railCenterY = size.height * railProfile.centerYFraction
+                    val bodyHeight = (size.height * railProfile.bodyThicknessFraction).coerceAtLeast(8.dp.toPx())
+                    val glowHeight = (size.height * railProfile.glowThicknessFraction).coerceAtLeast(bodyHeight * 2.2f)
+                    val bodyTop = railCenterY - bodyHeight / 2f
+                    val glowTop = railCenterY - glowHeight / 2f
+                    val silver = if (darkMode) Color(0xFFBFC9D8) else Color(0xFFB5BFCD)
+                    val reflected = lerp(silver, railTint, if (darkMode) .20f else .14f)
+                    val bodyBrush = Brush.horizontalGradient(
+                        colors = listOf(
+                            silver.copy(alpha = if (darkMode) .20f else .26f),
+                            Color.White.copy(alpha = if (darkMode) .70f else .78f),
+                            reflected.copy(alpha = if (darkMode) .64f else .70f),
+                            Color.White.copy(alpha = if (darkMode) .76f else .84f),
+                            silver.copy(alpha = if (darkMode) .18f else .24f),
+                        ),
+                        startX = railLeft,
+                        endX = railLeft + railWidth,
+                    )
+                    val highlightBrush = Brush.horizontalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color.White.copy(alpha = if (darkMode) .38f else .50f),
+                            Color.White.copy(alpha = if (darkMode) .54f else .64f),
+                            Color.Transparent,
+                        ),
+                        startX = railLeft,
+                        endX = railLeft + railWidth,
+                    )
+                    onDrawBehind {
+                        drawRoundRect(
+                            color = reflected.copy(alpha = if (darkMode) .10f else .08f),
+                            topLeft = Offset(railLeft, glowTop),
+                            size = Size(railWidth, glowHeight),
+                            cornerRadius = CornerRadius(glowHeight / 2f),
+                        )
+                        drawRoundRect(
+                            color = Color.Black.copy(alpha = if (darkMode) .14f else .07f),
+                            topLeft = Offset(railLeft, bodyTop + bodyHeight * .22f),
+                            size = Size(railWidth, bodyHeight),
+                            cornerRadius = CornerRadius(bodyHeight / 2f),
+                        )
+                        drawRoundRect(
+                            brush = bodyBrush,
+                            topLeft = Offset(railLeft, bodyTop),
+                            size = Size(railWidth, bodyHeight),
+                            cornerRadius = CornerRadius(bodyHeight / 2f),
+                        )
+                        drawRoundRect(
+                            brush = highlightBrush,
+                            topLeft = Offset(railLeft + bodyHeight, bodyTop + bodyHeight * .16f),
+                            size = Size((railWidth - bodyHeight * 2f).coerceAtLeast(0f), bodyHeight * .28f),
+                            cornerRadius = CornerRadius(bodyHeight * .14f),
+                        )
+                    }
+                },
         )
         return
     }
@@ -153,7 +214,7 @@ fun SpectraBackdrop(
             }
         },
     )
-    DisposableEffect(lifecycleOwner, surface) {
+    DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> lifecycleActive = true
@@ -162,7 +223,10 @@ fun SpectraBackdrop(
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleActive = false; lifecycleOwner.lifecycle.removeObserver(observer); surface?.onPause() }
+        onDispose {
+            lifecycleActive = false
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
     LaunchedEffect(surface, lifecycleActive) {
         if (lifecycleActive) surface?.onResume() else surface?.onPause()
@@ -226,6 +290,14 @@ private fun staticSpectraBackdropBrush(
         }
     },
 )
+
+private fun staticSilverRailTint(environment: SpectraEnvironment): Color = when (environment) {
+    SpectraEnvironment.ORIGINAL -> Color(0xFFD9E5F5)
+    SpectraEnvironment.OCEAN -> Color(0xFFBFEAF0)
+    SpectraEnvironment.ULTRAVIOLET -> Color(0xFFDACCF2)
+    SpectraEnvironment.EMBER -> Color(0xFFF0D2C2)
+    SpectraEnvironment.AURORA -> Color(0xFFC7E8D3)
+}
 
 @Composable
 fun GlassPanel(

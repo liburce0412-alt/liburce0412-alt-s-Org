@@ -23,6 +23,8 @@ data class MiFitnessStepsSummary(
     val lastSyncAt: Long,
     val metricValues: Map<HealthMetricKey, HealthMetricValue> = defaultStepMetricValues(steps),
     val metricTimeSeries: Map<HealthMetricKey, HealthMetricTimeSeries> = emptyMap(),
+    /** Stable digest only; raw workout identifiers and records are never persisted. */
+    val workoutRevision: String? = null,
     /** Retained only for source compatibility with the v1 model; verified v2 summaries require false. */
     val schemaProvisional: Boolean = false,
     /** Retained only for source compatibility with the v1 model; verified v2 summaries require false. */
@@ -59,6 +61,7 @@ class MiFitnessStepsCache internal constructor(
             .put("aggregationProvisional", false)
             .put("metricValues", metrics)
             .put("metricTimeSeries", timeSeries)
+            .put("workoutRevision", summary.workoutRevision ?: JSONObject.NULL)
             .toString()
         return if (storage.write(STORAGE_KEY, payload)) {
             Result.success(Unit)
@@ -72,7 +75,8 @@ class MiFitnessStepsCache internal constructor(
         if (payload.isBlank()) return null
         return runCatching {
             val json = JSONObject(payload)
-            if (json.optInt("version") != FORMAT_VERSION) return@runCatching null
+            val version = json.optInt("version")
+            if (version !in READABLE_FORMAT_VERSIONS) return@runCatching null
             val cachedPeriod = HealthPeriod(
                 startEpochMillis = json.getLong("startEpochMillis"),
                 endEpochMillis = json.getLong("endEpochMillis"),
@@ -103,6 +107,13 @@ class MiFitnessStepsCache internal constructor(
                 lastSyncAt = json.getLong("lastSyncAt"),
                 metricValues = decodeMetrics(json.getJSONObject("metricValues")),
                 metricTimeSeries = decodeTimeSeriesMap(json.getJSONObject("metricTimeSeries")),
+                workoutRevision = if (
+                    version < FORMAT_VERSION || !json.has("workoutRevision") || json.isNull("workoutRevision")
+                ) {
+                    null
+                } else {
+                    json.getString("workoutRevision")
+                },
                 schemaProvisional = json.getBoolean("schemaProvisional"),
                 aggregationProvisional = json.getBoolean("aggregationProvisional"),
             )
@@ -113,7 +124,8 @@ class MiFitnessStepsCache internal constructor(
     fun delete(): Boolean = storage.write(STORAGE_KEY, "")
 
     companion object {
-        private const val FORMAT_VERSION = 3
+        private const val FORMAT_VERSION = 4
+        private val READABLE_FORMAT_VERSIONS = setOf(3, FORMAT_VERSION)
         private const val STORAGE_KEY = "mi_fitness_cn_health_summary_v2"
 
         private fun encodeMetric(metric: HealthMetricValue): JSONObject = JSONObject()
@@ -246,6 +258,8 @@ class MiFitnessStepsCache internal constructor(
                 summary.recordCount !in 0..MAX_RECORDS -> "缓存记录数无效。"
                 summary.steps != null && summary.recordCount == 0 -> "缓存步数记录数无效。"
                 summary.observedAt < 0 || summary.lastSyncAt < 0 -> "缓存同步时间无效。"
+                summary.workoutRevision != null && !SHA256_PATTERN.matches(summary.workoutRevision) ->
+                    "缓存运动修订值无效。"
                 summary.schemaProvisional || summary.aggregationProvisional -> "缓存版本标记无效。"
                 summary.metricValues.isEmpty() || summary.metricValues.size > HealthMetricKey.entries.size ->
                     "缓存指标集合无效。"
@@ -261,6 +275,8 @@ class MiFitnessStepsCache internal constructor(
                 else -> null
             }
         }
+
+        private val SHA256_PATTERN = Regex("[0-9a-f]{64}")
 
         private fun stepMetricMatchesSummary(metric: HealthMetricValue, steps: Long?): Boolean = if (steps == null) {
             metric.value == null && metric.status in setOf(

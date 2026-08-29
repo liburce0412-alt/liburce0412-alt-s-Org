@@ -1,16 +1,15 @@
 package com.campusai.core.designsystem
 
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.composed
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.node.GlobalPositionAwareModifierNode
+import androidx.compose.ui.node.ModifierNodeElement
+import androidx.compose.ui.node.requireDensity
+import androidx.compose.ui.platform.InspectorInfo
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -32,31 +31,125 @@ internal data class OpticalGlassRegion(
     val area: Float get() = boundsInWindow.width * boundsInWindow.height
 }
 
-/** Process-local bridge between Compose layout and the single GLSurfaceView renderer. */
+/** Identifies both the renderer that owns the scene texture and one atomic route generation. */
+internal data class OpticalGlassScope(
+    val rendererOwnerId: Long,
+    val routeGeneration: Long,
+    /** Changes only when navigation enters a different route, including A -> B -> A. */
+    val routeVisitGeneration: Long,
+    val routeKey: String,
+)
+
+internal fun compatibleOpticalScope(
+    previous: OpticalGlassScope?,
+    active: OpticalGlassScope,
+): OpticalGlassScope? = when {
+    previous == null || previous == active -> active
+    previous.routeKey == active.routeKey &&
+        previous.routeVisitGeneration == active.routeVisitGeneration -> active
+    else -> null
+}
+
+/**
+ * Process-local bridge between Compose layout and the single GLSurfaceView renderer.
+ *
+ * Region updates are accepted only for the exact active owner/generation pair. Switching a
+ * full-screen route clears the old generation atomically, so an `onGloballyPositioned` callback
+ * arriving from a leaving route cannot put its glass back over the new page.
+ */
 internal object OpticalGlassRegistry {
     private const val MAX_HIGH_QUALITY_REGIONS = 3
-    private val nextId = AtomicLong(1L)
-    private val regions = ConcurrentHashMap<Long, OpticalGlassRegion>()
+    private const val INITIAL_ROUTE = "app:boot"
+    private val ids = AtomicLong(1L)
+    private val lock = Any()
+    private val regions = LinkedHashMap<Long, ScopedOpticalGlassRegion>()
+    private var rendererOwnerId: Long? = null
+    private var routeGeneration = 0L
+    private var routeVisitGeneration = 0L
+    private var routeKey = INITIAL_ROUTE
 
-    fun nextId(): Long = nextId.getAndIncrement()
+    private data class ScopedOpticalGlassRegion(
+        val scope: OpticalGlassScope,
+        val region: OpticalGlassRegion,
+    )
 
-    fun update(region: OpticalGlassRegion) {
-        if (region.boundsInWindow.width < 2f || region.boundsInWindow.height < 2f) {
-            regions.remove(region.id)
-        } else {
-            regions[region.id] = region
+    fun nextId(): Long = ids.getAndIncrement()
+
+    fun nextRendererOwnerId(): Long = ids.getAndIncrement()
+
+    fun claimRenderer(ownerId: Long): OpticalGlassScope = synchronized(lock) {
+        if (rendererOwnerId != ownerId) {
+            rendererOwnerId = ownerId
+            routeGeneration += 1L
+            regions.clear()
+        }
+        currentScopeLocked()!!
+    }
+
+    fun releaseRenderer(ownerId: Long) = synchronized(lock) {
+        if (rendererOwnerId == ownerId) {
+            regions.clear()
+            rendererOwnerId = null
+            routeGeneration += 1L
         }
     }
 
-    fun remove(id: Long) {
-        regions.remove(id)
+    /** Starts a new Compose/Activity host even when it restores the same logical route key. */
+    fun beginRouteHost(newRouteKey: String): OpticalGlassScope? = synchronized(lock) {
+        require(newRouteKey.isNotBlank()) { "Optical route key must not be blank" }
+        routeKey = newRouteKey
+        routeGeneration += 1L
+        routeVisitGeneration += 1L
+        regions.clear()
+        currentScopeLocked()
     }
 
-    fun snapshot(viewLeft: Float, viewTop: Float, viewWidth: Float, viewHeight: Float): List<OpticalGlassRegion> {
+    /** Returns a new scope only when the logical route actually changes. */
+    fun switchRouteScope(newRouteKey: String): OpticalGlassScope? = synchronized(lock) {
+        require(newRouteKey.isNotBlank()) { "Optical route key must not be blank" }
+        if (routeKey != newRouteKey) {
+            routeKey = newRouteKey
+            routeGeneration += 1L
+            routeVisitGeneration += 1L
+            regions.clear()
+        }
+        currentScopeLocked()
+    }
+
+    fun currentScope(): OpticalGlassScope? = synchronized(lock) { currentScopeLocked() }
+
+    fun update(scope: OpticalGlassScope, region: OpticalGlassRegion): Boolean = synchronized(lock) {
+        if (scope != currentScopeLocked()) return@synchronized false
+        if (region.boundsInWindow.width < 2f || region.boundsInWindow.height < 2f) {
+            regions.remove(region.id)
+        } else {
+            regions[region.id] = ScopedOpticalGlassRegion(scope, region)
+        }
+        true
+    }
+
+    fun remove(id: Long): Unit = synchronized(lock) {
+        regions.remove(id)
+        Unit
+    }
+
+    fun snapshot(
+        rendererOwnerId: Long,
+        viewLeft: Float,
+        viewTop: Float,
+        viewWidth: Float,
+        viewHeight: Float,
+    ): List<OpticalGlassRegion> = synchronized(lock) {
+        val activeScope = currentScopeLocked()
+        if (activeScope == null || activeScope.rendererOwnerId != rendererOwnerId) {
+            return@synchronized emptyList()
+        }
         val viewRight = viewLeft + viewWidth
         val viewBottom = viewTop + viewHeight
-        return regions.values
+        regions.values
             .asSequence()
+            .filter { it.scope == activeScope }
+            .map { it.region }
             .filter { region ->
                 region.boundsInWindow.right > viewLeft &&
                     region.boundsInWindow.left < viewRight &&
@@ -71,14 +164,22 @@ internal object OpticalGlassRegistry {
             .take(MAX_HIGH_QUALITY_REGIONS)
             .toList()
     }
+
+    private fun currentScopeLocked(): OpticalGlassScope? = rendererOwnerId?.let { ownerId ->
+        OpticalGlassScope(
+            rendererOwnerId = ownerId,
+            routeGeneration = routeGeneration,
+            routeVisitGeneration = routeVisitGeneration,
+            routeKey = routeKey,
+        )
+    }
 }
 
 /**
  * Registers this Compose surface with the shared SPECTRA refraction pass.
  *
- * Keep this on a small number of meaningful glass surfaces. The renderer deliberately caps the
- * expensive path at three visible regions and falls back to the normal Compose material on low
- * render quality, motion-off, or framebuffer failure.
+ * Registration is a Modifier node rather than a composition effect. `onDetach` is therefore the
+ * final lifecycle authority even when a route leaves during animation or layout callbacks race.
  */
 fun Modifier.opticalGlassRegion(
     enabled: Boolean = true,
@@ -88,39 +189,124 @@ fun Modifier.opticalGlassRegion(
     dispersion: Dp = 1.1.dp,
     flow: Dp = 1.8.dp,
     bodyOpacity: Float = .12f,
-): Modifier = composed {
-    val id = remember { OpticalGlassRegistry.nextId() }
-    val density = LocalDensity.current
-    val radiusPx = with(density) { radius.toPx() }
-    val refractionPx = with(density) { refraction.toPx() }
-    val dispersionPx = with(density) { dispersion.toPx() }
-    val flowPx = with(density) { flow.toPx() }
+): Modifier = this.then(
+    OpticalGlassElement(
+        enabled = enabled,
+        radius = radius,
+        priority = priority,
+        refraction = refraction,
+        dispersion = dispersion,
+        flow = flow,
+        bodyOpacity = bodyOpacity.coerceIn(.06f, .30f),
+    ),
+)
 
-    DisposableEffect(id, enabled) {
-        if (!enabled) OpticalGlassRegistry.remove(id)
-        onDispose { OpticalGlassRegistry.remove(id) }
+private data class OpticalGlassElement(
+    val enabled: Boolean,
+    val radius: Dp,
+    val priority: Int,
+    val refraction: Dp,
+    val dispersion: Dp,
+    val flow: Dp,
+    val bodyOpacity: Float,
+) : ModifierNodeElement<OpticalGlassModifierNode>() {
+    override fun create(): OpticalGlassModifierNode = OpticalGlassModifierNode(
+        scope = OpticalGlassRegistry.currentScope(),
+        enabled = enabled,
+        radius = radius,
+        priority = priority,
+        refraction = refraction,
+        dispersion = dispersion,
+        flow = flow,
+        bodyOpacity = bodyOpacity,
+    )
+
+    override fun update(node: OpticalGlassModifierNode) {
+        node.updateParameters(enabled, radius, priority, refraction, dispersion, flow, bodyOpacity)
     }
 
-    if (!enabled) {
-        this
-    } else {
-        onGloballyPositioned { coordinates ->
-            if (!coordinates.isAttached) {
-                OpticalGlassRegistry.remove(id)
-                return@onGloballyPositioned
-            }
-            OpticalGlassRegistry.update(
-                OpticalGlassRegion(
-                    id = id,
-                    boundsInWindow = coordinates.boundsInWindow(),
-                    cornerRadiusPx = radiusPx,
-                    refractionPx = refractionPx,
-                    dispersionPx = dispersionPx,
-                    flowPx = flowPx,
-                    bodyOpacity = bodyOpacity.coerceIn(.06f, .30f),
-                    priority = priority,
-                ),
-            )
+    override fun InspectorInfo.inspectableProperties() {
+        name = "opticalGlassRegion"
+        properties["enabled"] = enabled
+        properties["radius"] = radius
+        properties["priority"] = priority
+        properties["refraction"] = refraction
+        properties["dispersion"] = dispersion
+        properties["flow"] = flow
+        properties["bodyOpacity"] = bodyOpacity
+    }
+}
+
+private class OpticalGlassModifierNode(
+    private var scope: OpticalGlassScope?,
+    private var enabled: Boolean,
+    private var radius: Dp,
+    private var priority: Int,
+    private var refraction: Dp,
+    private var dispersion: Dp,
+    private var flow: Dp,
+    private var bodyOpacity: Float,
+) : Modifier.Node(), GlobalPositionAwareModifierNode {
+    private val id = OpticalGlassRegistry.nextId()
+    private var coordinates: LayoutCoordinates? = null
+
+    override fun onAttach() {
+        if (scope == null) scope = OpticalGlassRegistry.currentScope()
+    }
+
+    override fun onGloballyPositioned(coordinates: LayoutCoordinates) {
+        this.coordinates = coordinates
+        updateRegion()
+    }
+
+    override fun onDetach() {
+        OpticalGlassRegistry.remove(id)
+        coordinates = null
+        scope = null
+    }
+
+    fun updateParameters(
+        enabled: Boolean,
+        radius: Dp,
+        priority: Int,
+        refraction: Dp,
+        dispersion: Dp,
+        flow: Dp,
+        bodyOpacity: Float,
+    ) {
+        this.enabled = enabled
+        this.radius = radius
+        this.priority = priority
+        this.refraction = refraction
+        this.dispersion = dispersion
+        this.flow = flow
+        this.bodyOpacity = bodyOpacity
+        if (isAttached) updateRegion()
+    }
+
+    private fun updateRegion() {
+        val layoutCoordinates = coordinates
+        if (!enabled || layoutCoordinates == null || !layoutCoordinates.isAttached) {
+            OpticalGlassRegistry.remove(id)
+            return
         }
+        // A renderer recreation on the same logical route gets a fresh owner/generation. Adopt it
+        // so OFF→ON keeps glass alive, while refusing late callbacks from a different route.
+        val activeScope = OpticalGlassRegistry.currentScope() ?: return
+        val pinnedScope = compatibleOpticalScope(scope, activeScope)?.also { scope = it } ?: return
+        val density = requireDensity()
+        OpticalGlassRegistry.update(
+            pinnedScope,
+            OpticalGlassRegion(
+                id = id,
+                boundsInWindow = layoutCoordinates.boundsInWindow(),
+                cornerRadiusPx = with(density) { radius.toPx() },
+                refractionPx = with(density) { refraction.toPx() },
+                dispersionPx = with(density) { dispersion.toPx() },
+                flowPx = with(density) { flow.toPx() },
+                bodyOpacity = bodyOpacity,
+                priority = priority,
+            ),
+        )
     }
 }

@@ -7,6 +7,7 @@ import com.campusai.core.model.AiConversationMessage
 import com.campusai.core.model.AiMode
 import com.campusai.core.model.AiProvider
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -17,7 +18,13 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
+import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
+import okio.BufferedSource
+import okio.Source
+import okio.Timeout
+import okio.buffer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -70,17 +77,41 @@ class PersonalCloudClientTest {
         val events = mutableListOf<AiEvent>()
 
         client.stream(
-            AiRequest(AiMode.DEEP, listOf(AiConversationMessage("user", "你好"))),
-            events::add,
+            request = AiRequest(AiMode.DEEP, listOf(AiConversationMessage("user", "你好"))),
+            onEvent = events::add,
         )
 
-        assertEquals(AiEvent.Meta("deepseek-v4-flash", AiProvider.DEEPSEEK), events[0])
-        assertTrue(events.contains(AiEvent.Delta("你")))
-        assertTrue(events.contains(AiEvent.Delta("好")))
+        val meta = events[0] as AiEvent.Meta
+        assertEquals("deepseek-v4-flash", meta.execution.model)
+        assertEquals(AiProvider.DEEPSEEK, meta.execution.provider)
+        assertTrue(meta.execution.requestId.isNotBlank())
+        assertEquals("你好", events.filterIsInstance<AiEvent.Delta>().joinToString("") { it.text })
         val done = events.last() as AiEvent.Done
         assertEquals(7L, done.inputTokens)
         assertEquals(2L, done.outputTokens)
         assertEquals("礼貌回应。", done.providerReasoningContent)
+    }
+
+    @Test
+    fun `rejected submission lease never executes the provider request`() = runTest {
+        val requests = mutableListOf<okhttp3.Request>()
+        val client = PersonalCloudClient(
+            provider = CloudAiProvider.DEEPSEEK,
+            credential = { "unit-deepseek-key-1234567890" },
+            selectedModel = { "deepseek-v4-flash" },
+            client = clientResponding(requests) { "data: [DONE]\n\n" },
+        )
+
+        val failure = runCatching {
+            client.stream(
+                request = AiRequest(AiMode.FAST, listOf(AiConversationMessage("user", "test"))),
+                withSubmissionLease = { false },
+                onEvent = {},
+            )
+        }.exceptionOrNull() as CloudProviderException
+
+        assertEquals("request_superseded", failure.code)
+        assertTrue(requests.isEmpty())
     }
 
     @Test
@@ -129,16 +160,25 @@ class PersonalCloudClientTest {
 
     @Test
     fun `truncated streams and in-band provider errors fail explicitly without leaking details`() = runTest {
+        val partialOutput = mutableListOf<String>()
+        // Use non-repeating semantic text so this fixture exercises the missing SSE
+        // terminator, rather than correctly tripping the repetition/garble guard first.
+        val validVisiblePrefix = buildString {
+            repeat(220) { offset -> append((0x4E00 + offset).toChar()) }
+        }
         val interrupted = cloudClientWithBody(
             """
-                data: {"choices":[{"delta":{"content":"partial"}}]}
+                data: {"choices":[{"delta":{"content":"$validVisiblePrefix"}}]}
 
             """.trimIndent(),
         )
         val interruption = runCatching {
-            interrupted.stream(AiRequest(AiMode.FAST, listOf(AiConversationMessage("user", "test")))) { }
+            interrupted.stream(AiRequest(AiMode.FAST, listOf(AiConversationMessage("user", "test")))) { event ->
+                if (event is AiEvent.Delta) partialOutput += event.text
+            }
         }.exceptionOrNull() as CloudProviderException
         assertEquals("provider_stream_interrupted", interruption.code)
+        assertTrue(partialOutput.joinToString("").isNotEmpty())
 
         val secret = "provider-internal-secret"
         val inBandError = cloudClientWithBody("data: {\"error\":{\"message\":\"$secret\"}}\n\ndata: [DONE]\n\n")
@@ -183,6 +223,72 @@ class PersonalCloudClientTest {
         assertTrue(streaming.isCompleted)
     }
 
+    @Test
+    fun `cancelling the coroutine immediately cancels the active provider call`() = runTest {
+        val entered = CompletableDeferred<Unit>()
+        val observedCancellation = CompletableDeferred<Unit>()
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            entered.complete(Unit)
+            while (!chain.call().isCanceled()) Thread.sleep(1)
+            observedCancellation.complete(Unit)
+            throw IOException("cancelled unit call")
+        }.build()
+        val client = PersonalCloudClient(
+            provider = CloudAiProvider.DEEPSEEK,
+            credential = { "unit-deepseek-key-1234567890" },
+            selectedModel = { "deepseek-v4-flash" },
+            client = http,
+        )
+        val streaming = launch {
+            client.stream(AiRequest(AiMode.FAST, listOf(AiConversationMessage("user", "test")))) { }
+        }
+
+        entered.await()
+        streaming.cancel()
+
+        withContext(Dispatchers.Default) {
+            withTimeout(2_000) {
+                observedCancellation.await()
+                streaming.join()
+            }
+        }
+        assertTrue(streaming.isCancelled)
+    }
+
+    @Test
+    fun `cancelling while SSE body is stalled cancels the call immediately`() = runTest {
+        val bodyReadStarted = CompletableDeferred<Unit>()
+        val observedCancellation = CompletableDeferred<Unit>()
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            blockingSseResponse(
+                request = chain.request(),
+                call = chain.call(),
+                bodyReadStarted = bodyReadStarted,
+                observedCancellation = observedCancellation,
+            )
+        }.build()
+        val client = PersonalCloudClient(
+            provider = CloudAiProvider.DEEPSEEK,
+            credential = { "unit-deepseek-key-1234567890" },
+            selectedModel = { "deepseek-v4-flash" },
+            client = http,
+        )
+        val streaming = launch {
+            client.stream(AiRequest(AiMode.FAST, listOf(AiConversationMessage("user", "test")))) { }
+        }
+
+        bodyReadStarted.await()
+        streaming.cancel()
+
+        withContext(Dispatchers.Default) {
+            withTimeout(2_000) {
+                observedCancellation.await()
+                streaming.join()
+            }
+        }
+        assertTrue(streaming.isCancelled)
+    }
+
     private fun cloudClientWithBody(body: String) = PersonalCloudClient(
         provider = CloudAiProvider.DEEPSEEK,
         credential = { "unit-deepseek-key-1234567890" },
@@ -205,4 +311,40 @@ class PersonalCloudClientTest {
         .message("unit")
         .body(body.toResponseBody("application/json; charset=utf-8".toMediaType()))
         .build()
+
+    private fun blockingSseResponse(
+        request: okhttp3.Request,
+        call: okhttp3.Call,
+        bodyReadStarted: CompletableDeferred<Unit>,
+        observedCancellation: CompletableDeferred<Unit>,
+    ): Response {
+        val closed = AtomicBoolean()
+        val source = object : Source {
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                bodyReadStarted.complete(Unit)
+                while (!call.isCanceled() && !closed.get()) Thread.sleep(1)
+                if (call.isCanceled()) observedCancellation.complete(Unit)
+                throw IOException("cancelled stalled SSE body")
+            }
+
+            override fun timeout(): Timeout = Timeout.NONE
+
+            override fun close() {
+                closed.set(true)
+            }
+        }
+        val responseBody = object : ResponseBody() {
+            private val bufferedSource = source.buffer()
+            override fun contentType() = "text/event-stream; charset=utf-8".toMediaType()
+            override fun contentLength(): Long = -1L
+            override fun source(): BufferedSource = bufferedSource
+        }
+        return Response.Builder()
+            .request(request)
+            .protocol(Protocol.HTTP_1_1)
+            .code(200)
+            .message("unit")
+            .body(responseBody)
+            .build()
+    }
 }

@@ -9,7 +9,9 @@ import android.os.BatteryManager
 import android.os.Debug
 import com.campusai.core.ai.AiEngine
 import com.campusai.core.ai.AiEvent
+import com.campusai.core.ai.AiExecutionEngine
 import com.campusai.core.ai.AiRequest
+import com.campusai.core.ai.ResolvedExecution
 import com.campusai.core.agent.CaesarToolCallParser
 import com.campusai.core.model.AiProvider
 import com.campusai.core.model.LocalModelState
@@ -28,6 +30,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.util.UUID
 
 class LocalMnnAiEngine(
     context: Context,
@@ -68,6 +71,7 @@ class LocalMnnAiEngine(
                     }
                 }
                 var loadMs = 0L
+                var hadImages = false
                 val outputGuard = LocalOutputGuard()
                 val rawOutput = StringBuilder()
                 val metrics = mutex.withLock {
@@ -78,12 +82,30 @@ class LocalMnnAiEngine(
                         loadMs = loaded.loadMs
                         if (!generation.attach(loaded.pointer)) return@withLock null
                         val messages = LocalPromptPolicy.prepare(request, runtime.selection.manifest.contextTokens)
-                        trySend(AiEvent.Meta("${runtime.selection.manifest.displayName} · ${runtime.selection.manifest.quantization}", AiProvider.LOCAL))
+                        val images = collectImages(messages, request.imagePaths)
+                        hadImages = images.isNotEmpty()
+                        if (images.isNotEmpty() && runtime.selection.manifest.files.none { it.path == "visual.mnn" }) {
+                            trySend(AiEvent.Error("local_vision_unavailable", "当前本地模型不包含视觉组件。"))
+                            return@withLock null
+                        }
+                        trySend(
+                            AiEvent.Meta(
+                                ResolvedExecution(
+                                    provider = AiProvider.LOCAL,
+                                    model = "${runtime.selection.manifest.displayName} · ${runtime.selection.manifest.quantization}",
+                                    engine = AiExecutionEngine.LOCAL_MNN,
+                                    requestId = UUID.randomUUID().toString(),
+                                ),
+                            ),
+                        )
                         trySend(AiEvent.Status("local_generating", 0))
                         MnnNativeBridge.generate(
                             pointer = loaded.pointer,
                             roles = messages.map { it.role }.toTypedArray(),
                             contents = messages.map { it.content }.toTypedArray(),
+                            imagePaths = images.map(NativeImageInput::path).toTypedArray(),
+                            imageMessageIndexes = images.map(NativeImageInput::messageIndex).toIntArray(),
+                            allowedImageRoot = File(appContext.noBackupFilesDir, "ai-conversations").apply { mkdirs() }.canonicalPath,
                             maxTokens = request.maxOutputTokens.coerceAtMost(runtime.selection.manifest.maxOutputTokens),
                             listener = MnnTokenListener { token ->
                                 if (!generation.cancelled.get() && token.isNotEmpty()) {
@@ -114,11 +136,15 @@ class LocalMnnAiEngine(
                     peakPssKb = peakPssKb.get(),
                     outputTokens = metrics.outputTokens,
                     elapsedMs = metrics.elapsedMs,
+                    visionMs = metrics.visionMicros / 1_000.0,
+                    visionPixels = metrics.visionPixels,
                     batteryTemperatureStartC = temperatureStart,
                     batteryTemperatureEndC = batteryTemperatureC(),
                 ))
                 if (!generation.cancelled.get()) {
-                    if (toolCall != null) {
+                    if (hadImages && (metrics.visionMicros <= 0L || metrics.visionPixels <= 0L)) {
+                        trySend(AiEvent.Error("local_vision_decode_failed", "本地模型没有成功读取图片，请重新选择图片后重试。"))
+                    } else if (toolCall != null) {
                         trySend(AiEvent.ToolCallRequested(toolCall.name, toolCall.arguments.toString(), toolCall.rawContent))
                     } else if (outputGuard.blocked || !outputGuard.hasVisibleOutput) {
                         trySend(
@@ -134,7 +160,13 @@ class LocalMnnAiEngine(
             } catch (error: Throwable) {
                 if (!generation.cancelled.get()) {
                     runCatching { releaseAndWait() }
-                    trySend(AiEvent.Error("local_inference_failed", error.message ?: "本地推理失败，请重试。"))
+                    val visionFailure = error.message?.startsWith("local_vision_") == true
+                    trySend(
+                        AiEvent.Error(
+                            if (visionFailure) "local_vision_decode_failed" else "local_inference_failed",
+                            if (visionFailure) "本地模型没有成功读取图片，请重新选择图片后重试。" else error.message ?: "本地推理失败，请重试。",
+                        ),
+                    )
                 }
             } finally {
                 performanceMonitor?.cancel()
@@ -152,6 +184,25 @@ class LocalMnnAiEngine(
     }
 
     private data class LoadedEngine(val pointer: Long, val loadMs: Long)
+
+    private data class NativeImageInput(val path: String, val messageIndex: Int)
+
+    private fun collectImages(
+        messages: List<com.campusai.core.model.AiConversationMessage>,
+        currentImagePaths: List<String>,
+    ): List<NativeImageInput> {
+        val attached = buildList {
+            messages.forEachIndexed { index, message ->
+                if (message.role == "user") {
+                    message.attachmentPaths.take(MAX_IMAGES_PER_MESSAGE).forEach { path -> add(NativeImageInput(path, index)) }
+                }
+            }
+        }
+        if (attached.isNotEmpty() || currentImagePaths.isEmpty()) return attached
+        val owner = messages.indexOfLast { it.role == "user" }
+        if (owner < 0) return emptyList()
+        return currentImagePaths.take(MAX_IMAGES_PER_MESSAGE).map { NativeImageInput(it, owner) }
+    }
 
     private fun ensureLoaded(runtime: LocalModelRuntime): LoadedEngine {
         val modelId = runtime.selection.manifest.id
@@ -230,6 +281,7 @@ class LocalMnnAiEngine(
     companion object {
         private const val IDLE_RELEASE_MS = 5 * 60 * 1_000L
         private const val MAX_CAPTURE_CHARS = 32_768
+        private const val MAX_IMAGES_PER_MESSAGE = 4
     }
 }
 

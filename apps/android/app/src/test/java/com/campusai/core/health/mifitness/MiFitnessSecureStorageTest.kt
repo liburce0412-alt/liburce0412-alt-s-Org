@@ -134,6 +134,42 @@ class MiFitnessSecureStorageTest {
     }
 
     @Test
+    fun `v3 health cache remains available offline and upgrades on the next write`() {
+        val storage = MemorySecretStorage()
+        val cache = MiFitnessStepsCache(storage)
+        val period = HealthPeriod(1_000L, 2_000L, "today")
+        val localDate = LocalDate.of(2026, 8, 27)
+        val scope = "0123456789abcdef0123456789abcdef"
+        val original = MiFitnessStepsSummary(
+            period = period,
+            localDate = localDate,
+            accountScope = scope,
+            steps = 3_210L,
+            recordCount = 4,
+            observedAt = 1_900L,
+            lastSyncAt = 1_900L,
+        )
+        cache.save(original).getOrThrow()
+        val key = storage.onlyKey()
+        val v3Fixture = JSONObject(checkNotNull(storage.values[key])).apply {
+            put("version", 3)
+            remove("workoutRevision")
+        }.toString()
+        storage.values[key] = v3Fixture
+
+        val restored = checkNotNull(cache.read(period, localDate, scope))
+
+        assertEquals(original, restored)
+        assertNull(restored.workoutRevision)
+        assertEquals(v3Fixture, storage.values[key])
+
+        cache.save(restored.copy(workoutRevision = "d".repeat(64))).getOrThrow()
+        val upgraded = JSONObject(checkNotNull(storage.values[key]))
+        assertEquals(4, upgraded.getInt("version"))
+        assertEquals("d".repeat(64), upgraded.getString("workoutRevision"))
+    }
+
+    @Test
     fun `steps cache rejects impossible summaries and corrupt payloads`() {
         val storage = MemorySecretStorage()
         val cache = MiFitnessStepsCache(storage)

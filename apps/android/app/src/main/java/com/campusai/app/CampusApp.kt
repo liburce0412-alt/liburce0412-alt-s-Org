@@ -1,8 +1,12 @@
 package com.campusai.app
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -55,6 +59,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
@@ -84,11 +89,24 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.core.content.ContextCompat
 import com.campusai.core.database.CampusDao
+import com.campusai.core.automation.ForegroundHealthTaskRunResult
+import com.campusai.core.automation.ForegroundHealthTaskRuntime
+import com.campusai.core.automation.HealthTaskDefaults
+import com.campusai.core.automation.ScheduledTaskConfig
+import com.campusai.core.automation.healthTaskNotificationsEnabled
+import com.campusai.core.automation.mergeDisabledHealthTaskConfig
+import com.campusai.core.automation.mergeEnabledHealthTaskConfig
+import com.campusai.core.automation.mutateWithRetry
 import com.campusai.core.auth.AuthRepository
 import com.campusai.core.designsystem.CampusTheme
 import com.campusai.core.designsystem.DefaultSpectraTokens
 import com.campusai.core.designsystem.GlassPanel
+import com.campusai.core.designsystem.OpticalGlassRegistry
 import com.campusai.core.designsystem.ProvideSpectraExperience
 import com.campusai.core.designsystem.ProvideSpectraTokens
 import com.campusai.core.designsystem.SpectraBackdrop
@@ -117,9 +135,11 @@ import com.campusai.core.localai.LocalMnnAiEngine
 import com.campusai.core.localai.LocalModelManager
 import com.campusai.core.agent.MnnAgentEngineFactory
 import com.campusai.core.network.PersonalCloudClient
+import com.campusai.core.ai.CloudAiProvider
 import com.campusai.core.security.PersonalAiProviderStore
 import com.campusai.core.profile.ProfileRepository
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -133,9 +153,86 @@ enum class MainDestination(val label: String, val icon: ImageVector) {
     PROFILE("我的", Icons.Rounded.Person),
 }
 
+/** One mutually-exclusive app surface; full-screen tasks never coexist with the main scaffold. */
+internal sealed interface AppSurface {
+    val returnDestination: MainDestination
+    val opticalRouteKey: String
+
+    data class Main(val destination: MainDestination) : AppSurface {
+        override val returnDestination: MainDestination = destination
+        override val opticalRouteKey: String = "main:${destination.name}"
+    }
+
+    data class Ai(override val returnDestination: MainDestination) : AppSurface {
+        override val opticalRouteKey: String = "fullscreen:ai"
+    }
+
+    data class Messages(override val returnDestination: MainDestination) : AppSurface {
+        override val opticalRouteKey: String = "fullscreen:messages"
+    }
+
+    data class Focus(
+        val presetMinutes: Int,
+        override val returnDestination: MainDestination = MainDestination.TIME,
+    ) : AppSurface {
+        override val opticalRouteKey: String = "fullscreen:focus"
+    }
+
+    data class Login(override val returnDestination: MainDestination) : AppSurface {
+        override val opticalRouteKey: String = "fullscreen:login"
+    }
+}
+
+internal val AppSurfaceSaver = Saver<AppSurface, String>(
+    save = { surface -> encodeAppSurface(surface) },
+    restore = { encoded -> decodeAppSurface(encoded) },
+)
+
+internal fun encodeAppSurface(surface: AppSurface): String = when (surface) {
+    is AppSurface.Main -> "main|${surface.destination.name}"
+    is AppSurface.Ai -> "ai|${surface.returnDestination.name}"
+    is AppSurface.Messages -> "messages|${surface.returnDestination.name}"
+    is AppSurface.Focus -> "focus|${surface.presetMinutes}|${surface.returnDestination.name}"
+    is AppSurface.Login -> "login|${surface.returnDestination.name}"
+}
+
+internal fun decodeAppSurface(encoded: String): AppSurface? {
+    val parts = encoded.split('|')
+    fun destinationAt(index: Int): MainDestination? = parts.getOrNull(index)
+        ?.let { value -> MainDestination.entries.firstOrNull { it.name == value } }
+    return when (parts.firstOrNull()) {
+        "main" -> destinationAt(1)?.let(AppSurface::Main)
+        "ai" -> destinationAt(1)?.let(AppSurface::Ai)
+        "messages" -> destinationAt(1)?.let(AppSurface::Messages)
+        "focus" -> parts.getOrNull(1)?.toIntOrNull()?.takeIf { it > 0 }?.let { minutes ->
+            AppSurface.Focus(minutes, destinationAt(2) ?: MainDestination.TIME)
+        }
+        "login" -> destinationAt(1)?.let(AppSurface::Login)
+        else -> null
+    }
+}
+
+internal enum class ExternalImageCompletionDisposition { NONE, ACK_STALE, CONSUME_AND_ACK }
+
+internal fun externalImageCompletionDisposition(
+    currentSharedUri: String?,
+    completedUri: String?,
+): ExternalImageCompletionDisposition = when {
+    completedUri == null -> ExternalImageCompletionDisposition.NONE
+    currentSharedUri == completedUri -> ExternalImageCompletionDisposition.CONSUME_AND_ACK
+    else -> ExternalImageCompletionDisposition.ACK_STALE
+}
+
 @Composable
-fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
+fun CampusApp(
+    dao: CampusDao,
+    initialSharedImage: Uri? = null,
+    onSharedImageConsumed: () -> Unit = {},
+    initialAutomationConversationId: String? = null,
+    onAutomationConversationConsumed: () -> Unit = {},
+) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val preferencesRepository = remember { UserPreferencesRepository(context.applicationContext) }
     val localModelManager = remember { LocalModelManager(context.applicationContext) }
     val localAiEngine = remember { LocalMnnAiEngine(context.applicationContext, localModelManager) }
@@ -143,6 +240,7 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
         MnnAgentEngineFactory.create(localAiEngine, localModelManager::manifestFor)
     }
     val personalAiProviderStore = remember { PersonalAiProviderStore(context.applicationContext) }
+    val foregroundHealthRuntime = remember { ForegroundHealthTaskRuntime.get(context.applicationContext, dao) }
     val profileRepository = remember { ProfileRepository() }
     val campusRepository = remember { CampusRepository() }
     val profileState by profileRepository.state.collectAsState()
@@ -177,6 +275,7 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
     val courses by timeViewModel.courses.collectAsState()
     val dailyTargetSnapshots by timeViewModel.dailyTargetSnapshots.collectAsState()
     val dailyGreeting by aiViewModel.dailyGreeting.collectAsState()
+    val aiHistory by aiViewModel.history.collectAsState()
     val contextPosts = when (val posts = campusState.posts) {
         is UiState.Data -> posts.value
         is UiState.Offline -> posts.value
@@ -191,36 +290,111 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
             AiPostContext(post.id, post.authorId, post.body, post.topic, post.likes, post.comments, post.createdAt)
         },
     )
-    var destination by rememberSaveable { mutableStateOf(MainDestination.HOME) }
-    var focusMinutes by rememberSaveable { mutableStateOf<Int?>(null) }
-    var showAi by rememberSaveable { mutableStateOf(false) }
-    var showLogin by rememberSaveable { mutableStateOf(false) }
-    var showMessages by rememberSaveable { mutableStateOf(false) }
+    var appSurface by rememberSaveable(stateSaver = AppSurfaceSaver) {
+        mutableStateOf<AppSurface>(AppSurface.Main(MainDestination.HOME))
+    }
+    // Set the route before any glass node can attach. Navigation below repeats this synchronously
+    // before changing Compose state, making a route transition an atomic registry boundary.
+    remember { OpticalGlassRegistry.beginRouteHost(appSurface.opticalRouteKey) }
+    fun navigateTo(surface: AppSurface) {
+        OpticalGlassRegistry.switchRouteScope(surface.opticalRouteKey)
+        appSurface = surface
+    }
     val snackbar = remember { SnackbarHostState() }
     val appScope = rememberCoroutineScope()
+    var healthAutomationConfig by remember { mutableStateOf<ScheduledTaskConfig?>(null) }
+    var healthAutomationSaving by remember { mutableStateOf(false) }
+    var healthAutomationMessage by remember { mutableStateOf<String?>(null) }
+    var healthAutomationMessageIsError by remember { mutableStateOf(false) }
+    var healthAutomationNotificationsEnabled by remember {
+        mutableStateOf(healthTaskNotificationsEnabled(context.applicationContext))
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        healthAutomationNotificationsEnabled = healthTaskNotificationsEnabled(context.applicationContext)
+    }
     val unreadMessages = when (val conversations = campusState.conversations) {
         is UiState.Data -> conversations.value.sumOf { it.unreadCount }
         is UiState.Offline -> conversations.value.sumOf { it.unreadCount }
         else -> 0
     }
-    val fullscreenOverlay = focusMinutes != null || showAi || showMessages
-
-    LaunchedEffect(initialSharedImage) {
-        initialSharedImage?.let {
-            showAi = true
-            aiViewModel.attachImage(it)
+    LaunchedEffect(
+        initialSharedImage,
+        aiRuntimeState.streaming,
+        aiRuntimeState.importingImage,
+        aiRuntimeState.pendingImages.size,
+        aiRuntimeState.completedExternalImageImport,
+    ) {
+        val shared = initialSharedImage ?: return@LaunchedEffect
+        if (aiRuntimeState.completedExternalImageImport == shared.toString()) return@LaunchedEffect
+        if (aiViewModel.attachImage(shared, externalShare = true)) {
+            navigateTo(AppSurface.Ai(appSurface.returnDestination))
         }
     }
 
-    BackHandler(enabled = showLogin || fullscreenOverlay) {
-        when {
-            showLogin -> { authRepository.clearError(); showLogin = false }
-            showAi -> showAi = false
-            showMessages -> {
-                if (campusState.activeConversationId != null) campusViewModel.closeMessageThread()
-                else showMessages = false
+    LaunchedEffect(initialSharedImage, aiRuntimeState.completedExternalImageImport) {
+        val completed = aiRuntimeState.completedExternalImageImport ?: return@LaunchedEffect
+        if (externalImageCompletionDisposition(initialSharedImage?.toString(), completed) ==
+            ExternalImageCompletionDisposition.CONSUME_AND_ACK
+        ) {
+            onSharedImageConsumed()
+        }
+        // A completion superseded by a different/non-share Intent is stale. Ack it as well so
+        // sharing the same content URI in a future Intent starts a fresh import.
+        aiViewModel.acknowledgeExternalImageImport(completed)
+    }
+
+    LaunchedEffect(initialAutomationConversationId, aiHistory, aiRuntimeState.streaming) {
+        val conversationId = initialAutomationConversationId ?: return@LaunchedEffect
+        if (aiRuntimeState.streaming) return@LaunchedEffect
+        val report = aiHistory.firstOrNull { it.id == conversationId } ?: return@LaunchedEffect
+        aiViewModel.openConversation(report)
+        navigateTo(AppSurface.Ai(appSurface.returnDestination))
+        onAutomationConversationConsumed()
+    }
+
+    LaunchedEffect(foregroundHealthRuntime, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (isActive) {
+                healthAutomationNotificationsEnabled = healthTaskNotificationsEnabled(context.applicationContext)
+                try {
+                    val config = foregroundHealthRuntime.store.read(HealthTaskDefaults.TASK_ID)
+                    healthAutomationConfig = config
+                    if (config?.enabled == true) {
+                        when (foregroundHealthRuntime.runner.run(HealthTaskDefaults.TASK_ID)) {
+                            is ForegroundHealthTaskRunResult.Updated,
+                            is ForegroundHealthTaskRunResult.Unchanged -> aiViewModel.refreshHealthStatus()
+                            else -> Unit
+                        }
+                        healthAutomationConfig = foregroundHealthRuntime.store.read(HealthTaskDefaults.TASK_ID)
+                    }
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // Preserve the last known value. Corruption is not an empty task
+                    // list and must not be silently replaced by a later settings save.
+                    healthAutomationMessage = "定时任务配置无法读取，请保留文件并重试。"
+                    healthAutomationMessageIsError = true
+                }
+                delay(FOREGROUND_TASK_TICK_MILLIS)
             }
-            focusMinutes != null -> focusMinutes = null
+        }
+    }
+
+    BackHandler(enabled = appSurface !is AppSurface.Main && appSurface !is AppSurface.Ai) {
+        when (val current = appSurface) {
+            is AppSurface.Login -> {
+                authRepository.clearError()
+                navigateTo(AppSurface.Main(current.returnDestination))
+            }
+            is AppSurface.Ai -> navigateTo(AppSurface.Main(current.returnDestination))
+            is AppSurface.Messages -> {
+                if (campusState.activeConversationId != null) campusViewModel.closeMessageThread()
+                else navigateTo(AppSurface.Main(current.returnDestination))
+            }
+            is AppSurface.Focus -> navigateTo(AppSurface.Main(current.returnDestination))
+            is AppSurface.Main -> Unit
         }
     }
 
@@ -264,34 +438,33 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
                 environment = preferences.environment,
                 quality = preferences.renderQuality,
                 motion = preferences.motionMode,
-                active = !showLogin,
-                phase = when {
-                    focusMinutes != null -> SpectraPhase.FOCUS
-                    aiRuntimeState.streaming -> SpectraPhase.THINKING
+                active = appSurface !is AppSurface.Login,
+                phase = when (appSurface) {
+                    is AppSurface.Focus -> SpectraPhase.FOCUS
+                    is AppSurface.Ai if aiRuntimeState.streaming -> SpectraPhase.THINKING
                     else -> SpectraPhase.AMBIENT
                 },
             )
-            if (!showLogin) {
-                Scaffold(
-                    containerColor = Color.Transparent,
-                    snackbarHost = { SnackbarHost(snackbar) },
-                    bottomBar = {
-                        AnimatedVisibility(
-                            visible = focusMinutes == null && !showAi && !showMessages,
-                            enter = slideInVertically { it } + fadeIn(),
-                            exit = slideOutVertically { it } + fadeOut(),
-                        ) {
-                            SpectraDock(
-                                destination = destination,
-                                motionEnabled = preferences.motionMode == MotionMode.ON,
-                                onDestination = { destination = it },
-                            )
-                        }
-                    },
-                ) { padding ->
-                    if (!fullscreenOverlay) {
+            when (val surface = appSurface) {
+                is AppSurface.Main -> {
+                    Scaffold(
+                        containerColor = Color.Transparent,
+                        snackbarHost = { SnackbarHost(snackbar) },
+                        bottomBar = {
+                            // The dock survives destination changes inside the main Scaffold. Key it
+                            // to the optical route so its Modifier nodes detach before the registry
+                            // advances, then attach with the new authorized generation.
+                            androidx.compose.runtime.key(surface.destination) {
+                                SpectraDock(
+                                    destination = surface.destination,
+                                    motionEnabled = preferences.motionMode == MotionMode.ON,
+                                    onDestination = { navigateTo(AppSurface.Main(it)) },
+                                )
+                            }
+                        },
+                    ) { padding ->
                         AnimatedContent(
-                            targetState = destination,
+                            targetState = surface.destination,
                             transitionSpec = {
                                 val direction = if (targetState.ordinal >= initialState.ordinal) 1 else -1
                                 if (preferences.motionMode == MotionMode.ON) {
@@ -317,8 +490,8 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
                                  dailyText = dailyGreeting?.text.orEmpty(),
                                  announcements = announcementState,
                                  onRefreshAnnouncements = campusViewModel::refreshAnnouncements,
-                                 onStartRecord = { destination = MainDestination.TIME },
-                                 onOpenAi = { showAi = true },
+                                 onStartRecord = { navigateTo(AppSurface.Main(MainDestination.TIME)) },
+                                 onOpenAi = { navigateTo(AppSurface.Ai(surface.destination)) },
                                  healthState = healthState,
                                  onRefreshHealth = aiViewModel::refreshHealthStatus,
                                  onSyncMiFitnessSteps = aiViewModel::refreshMiFitnessSteps,
@@ -327,7 +500,7 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
                             MainDestination.TIME -> TimeScreen(
                                 records = records,
                                 viewModel = timeViewModel,
-                                onStartFocus = { focusMinutes = it },
+                                onStartFocus = { navigateTo(AppSurface.Focus(it, surface.destination)) },
                                 onMessage = { message, action -> snackbar.showSnackbar(message, actionLabel = action) },
                                 contentPadding = padding,
                             )
@@ -339,7 +512,7 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
                                     .ifBlank { authState.email.substringBefore('@') }
                                     .ifBlank { "我" },
                                 viewModel = campusViewModel,
-                                onLogin = { showLogin = true },
+                                onLogin = { navigateTo(AppSurface.Login(surface.destination)) },
                                 contentPadding = padding,
                             )
                             MainDestination.MARKET -> MarketScreen(
@@ -347,10 +520,10 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
                                 signedIn = authState.signedIn,
                                 userId = authState.userId,
                                 viewModel = campusViewModel,
-                                onLogin = { showLogin = true },
+                                onLogin = { navigateTo(AppSurface.Login(surface.destination)) },
                                 onOpenConversation = { conversationId ->
                                     campusViewModel.openMessageThread(conversationId)
-                                    showMessages = true
+                                    navigateTo(AppSurface.Messages(surface.destination))
                                 },
                                 contentPadding = padding,
                             )
@@ -360,16 +533,16 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
                                 records = records,
                                 authState = authState,
                                 unreadMessages = unreadMessages,
-                                onLogin = { showLogin = true },
+                                onLogin = { navigateTo(AppSurface.Login(surface.destination)) },
                                 onSignOut = authRepository::signOut,
-                                onOpenMessages = { showMessages = true },
+                                onOpenMessages = { navigateTo(AppSurface.Messages(surface.destination)) },
                                 localModelManager = localModelManager,
                                 localAiEngine = localAiEngine,
                                  personalAiProviderStore = personalAiProviderStore,
                                  profileRepository = profileRepository,
                                  contentPadding = padding,
                                  dailyTargetSnapshots = dailyTargetSnapshots,
-                                 onOpenTimeRecordsForDay = { destination = MainDestination.TIME },
+                                 onOpenTimeRecordsForDay = { navigateTo(AppSurface.Main(MainDestination.TIME)) },
                                  miFitnessConfigured = healthState.miFitnessConfigured,
                                  miFitnessSyncing = healthState.miFitnessSyncing,
                                  miFitnessLastSyncAtMillis = healthState.miFitnessLastSyncAt,
@@ -384,62 +557,147 @@ fun CampusApp(dao: CampusDao, initialSharedImage: Uri? = null) {
                                              .validateConnection(modelId)
                                      }
                                  },
+                                 healthAutomationConfig = healthAutomationConfig,
+                                 healthAutomationSaving = healthAutomationSaving,
+                                 healthAutomationNotificationsEnabled = healthAutomationNotificationsEnabled,
+                                 healthAutomationMessage = healthAutomationMessage,
+                                 healthAutomationMessageIsError = healthAutomationMessageIsError,
+                                 onSaveHealthAutomation = saveAutomation@ { provider, rawModelId, intervalMinutes, includeSummary ->
+                                     if (healthAutomationSaving) return@saveAutomation
+                                     healthAutomationSaving = true
+                                     healthAutomationMessage = null
+                                     healthAutomationMessageIsError = false
+                                     appScope.launch {
+                                         val modelId = provider.normalizeModelId(rawModelId)
+                                         val validation = if (includeSummary) {
+                                             foregroundHealthRuntime.aiClient.validate(provider, modelId)
+                                         } else {
+                                             Result.failure(IllegalArgumentException("需要先允许附带必要的今日汇总。"))
+                                         }
+                                         validation.fold(
+                                             onSuccess = {
+                                                 foregroundHealthRuntime.store.mutateWithRetry(
+                                                     taskId = HealthTaskDefaults.TASK_ID,
+                                                 ) { current ->
+                                                     mergeEnabledHealthTaskConfig(
+                                                         current = current,
+                                                         provider = provider,
+                                                         modelId = modelId,
+                                                         intervalMinutes = intervalMinutes,
+                                                         includeHealthSummary = true,
+                                                     )
+                                                 }.fold(
+                                                     onSuccess = { mutation ->
+                                                         val saved = checkNotNull(mutation.updated)
+                                                         val wasEnabled = mutation.previous?.enabled == true
+                                                         healthAutomationConfig = saved
+                                                         healthAutomationMessage = "已启用，回到前台后会立即检查小米云。"
+                                                         healthAutomationMessageIsError = false
+                                                         if (
+                                                             !wasEnabled &&
+                                                             Build.VERSION.SDK_INT >= 33 &&
+                                                             ContextCompat.checkSelfPermission(
+                                                                 context,
+                                                                 Manifest.permission.POST_NOTIFICATIONS,
+                                                             ) != PackageManager.PERMISSION_GRANTED
+                                                         ) {
+                                                             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                                         }
+                                                     },
+                                                     onFailure = { error ->
+                                                         healthAutomationMessage = error.message ?: "任务设置保存失败。"
+                                                         healthAutomationMessageIsError = true
+                                                     },
+                                                 )
+                                             },
+                                             onFailure = { error ->
+                                                 healthAutomationMessage = error.message ?: "Provider 或模型验证失败。"
+                                                 healthAutomationMessageIsError = true
+                                             },
+                                         )
+                                         healthAutomationSaving = false
+                                     }
+                                 },
+                                  onDisableHealthAutomation = disableAutomation@ {
+                                     if (healthAutomationSaving) return@disableAutomation
+                                      healthAutomationSaving = true
+                                      appScope.launch {
+                                          foregroundHealthRuntime.store.mutateWithRetry(
+                                              taskId = HealthTaskDefaults.TASK_ID,
+                                              transform = ::mergeDisabledHealthTaskConfig,
+                                          ).fold(
+                                              onSuccess = { mutation ->
+                                                  healthAutomationConfig = mutation.updated
+                                                  healthAutomationMessage = "定时任务已停用。"
+                                                 healthAutomationMessageIsError = false
+                                             },
+                                             onFailure = { error ->
+                                                 healthAutomationMessage = error.message ?: "停用失败，请重试。"
+                                                 healthAutomationMessageIsError = true
+                                             },
+                                         )
+                                         healthAutomationSaving = false
+                                     }
+                                 },
                              )
                         }
                     }
-                    } else {
-                        Spacer(Modifier.fillMaxSize())
-                    }
                 }
-                focusMinutes?.let { preset ->
+                }
+                is AppSurface.Focus -> {
                     FocusSessionScreen(
-                        presetMinutes = preset,
+                        presetMinutes = surface.presetMinutes,
                         motionEnabled = preferences.motionMode == MotionMode.ON,
                         soundEnabled = preferences.soundEnabled,
-                        onMinimize = { focusMinutes = null },
+                        onMinimize = { navigateTo(AppSurface.Main(surface.returnDestination)) },
                         onFinish = { elapsedMinutes ->
                             val end = System.currentTimeMillis()
                             timeViewModel.addTimeRecord("专注 $elapsedMinutes 分钟", "专注", end - elapsedMinutes * 60_000L, end, "专注计时自动记录")
-                            focusMinutes = null
+                            navigateTo(AppSurface.Main(surface.returnDestination))
                         },
                     )
                 }
-                if (showAi && focusMinutes == null) {
+                is AppSurface.Ai -> {
                     AiScreen(
                         viewModel = aiViewModel,
                         snapshot = aiSnapshot,
                         motionEnabled = preferences.motionMode == MotionMode.ON,
                         visualStyle = preferences.visualStyle,
                         onVisualStyleChange = { style -> appScope.launch { preferencesRepository.setVisualStyle(style) } },
-                        onBack = { showAi = false },
+                        onBack = { navigateTo(AppSurface.Main(surface.returnDestination)) },
                     )
                 }
-                if (showMessages && focusMinutes == null && !showAi) {
+                is AppSurface.Messages -> {
                     MessageCenterScreen(
                         state = campusState,
                         userId = authState.userId,
                         viewModel = campusViewModel,
                         onBack = {
                             campusViewModel.closeMessageThread()
-                            showMessages = false
+                            navigateTo(AppSurface.Main(surface.returnDestination))
                         },
                     )
                 }
-            }
-            if (showLogin && focusMinutes == null) {
-                AuthScreen(
-                    state = authState,
-                    onSignIn = authRepository::signIn,
-                    onSignUp = authRepository::signUp,
-                    onClearMessage = authRepository::clearError,
-                    onBack = { authRepository.clearError(); showLogin = false },
-                )
+                is AppSurface.Login -> {
+                    AuthScreen(
+                        state = authState,
+                        onSignIn = authRepository::signIn,
+                        onSignUp = authRepository::signUp,
+                        onClearMessage = authRepository::clearError,
+                        onBack = {
+                            authRepository.clearError()
+                            navigateTo(AppSurface.Main(surface.returnDestination))
+                        },
+                    )
+                }
             }
         }
         }
         }
     }
 }
+
+private const val FOREGROUND_TASK_TICK_MILLIS = 15_000L
 
 private fun MiFitnessUiStatus.toSettingsStatus(): MiFitnessSettingsStatus = when (this) {
     MiFitnessUiStatus.IDLE -> MiFitnessSettingsStatus.IDLE

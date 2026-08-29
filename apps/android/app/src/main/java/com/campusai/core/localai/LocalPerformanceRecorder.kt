@@ -15,6 +15,8 @@ data class LocalPerformanceSample(
     val peakPssKb: Long,
     val outputTokens: Long,
     val elapsedMs: Long,
+    val visionMs: Double,
+    val visionPixels: Long,
     val batteryTemperatureStartC: Double?,
     val batteryTemperatureEndC: Double?,
 )
@@ -34,6 +36,8 @@ class LocalPerformanceRecorder(context: Context) {
             .put("peakPssKb", sample.peakPssKb)
             .put("outputTokens", sample.outputTokens)
             .put("elapsedMs", sample.elapsedMs)
+            .put("visionMs", sample.visionMs)
+            .put("visionPixels", sample.visionPixels)
             .put("batteryTemperatureStartC", sample.batteryTemperatureStartC ?: JSONObject.NULL)
             .put("batteryTemperatureEndC", sample.batteryTemperatureEndC ?: JSONObject.NULL)
         preferences.edit().putString(KEY_LATEST, json.toString()).apply()

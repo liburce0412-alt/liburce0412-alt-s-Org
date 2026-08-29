@@ -71,6 +71,21 @@ class CloudProviderCoreTest {
     }
 
     @Test
+    fun `cloud request never serializes local image paths`() {
+        val privatePath = "/data/user/0/com.campusai/no_backup/ai-conversations/unit/attachments/secret.jpg"
+        val prepared = OpenAiCompatibleRequestFactory.prepare(
+            CloudAiProvider.GOOGLE_GEMINI,
+            request(context = """{"imageOcr":[{"text":"private-ocr-text"}]}""")
+                .copy(imagePaths = listOf(privatePath), requiresLocal = true),
+            "gemini-3.7-flash",
+        ).payload.toString()
+
+        assertFalse(prepared.contains(privatePath))
+        assertFalse(prepared.contains("<img>"))
+        assertFalse(prepared.contains("private-ocr-text"))
+    }
+
+    @Test
     fun `health disclosure sends only typed daily aggregate when explicitly included`() {
         val excluded = OpenAiCompatibleRequestFactory.prepare(
             CloudAiProvider.GOOGLE_GEMINI,

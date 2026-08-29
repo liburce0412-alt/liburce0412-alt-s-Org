@@ -90,6 +90,12 @@ class MiFitnessAggregateMetricsTest {
         assertEquals(2, records.size)
         assertEquals(1, records.count { !it.deleted })
         assertTrue(records.none { it.idDigest.contains("synthetic-workout") })
+        val edited = MiFitnessSportParser.parse(raw.replaceFirst("\"value\":\"{}\"", "\"value\":\"{\\\"duration\\\":42}\""))
+            .getOrThrow()
+            .records
+        assertTrue(records.first().revisionDigest != edited.first().revisionDigest)
+        assertEquals(stableWorkoutRevision(records), stableWorkoutRevision(records + records.first()))
+        assertTrue(stableWorkoutRevision(records) != stableWorkoutRevision(edited))
     }
 
     private fun fixture(): JSONObject {

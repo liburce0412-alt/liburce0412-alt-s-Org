@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -198,6 +199,35 @@ class AiEngineRouterTest {
         ).toList()
 
         assertEquals(1, local.calls)
+    }
+
+    @Test fun `cloud once rejects image ownership metadata before selecting an engine`() = runTest {
+        val deepSeek = FakeEngine()
+        val router = AiEngineRouter(
+            personalDeepSeek = deepSeek,
+            local = FakeEngine(),
+            provider = { AiProvider.AUTO },
+            personalKeyAvailable = { true },
+            isOnline = { true },
+            localState = { LocalModelState.NotDownloaded },
+        )
+        val request = AiRequest(
+            mode = AiMode.FAST,
+            messages = listOf(
+                AiConversationMessage(
+                    role = "user",
+                    content = "看图",
+                    attachmentPaths = listOf("/data/user/0/com.campusai/no_backup/private.jpg"),
+                ),
+            ),
+            imagePaths = listOf("/data/user/0/com.campusai/no_backup/private.jpg"),
+        )
+
+        val failure = runCatching { router.streamCloudOnce(request, AiProvider.DEEPSEEK).toList() }.exceptionOrNull()
+
+        assertTrue(failure is com.campusai.core.ai.AiRoutingException)
+        assertFalse(failure?.message.orEmpty().contains("private.jpg"))
+        assertEquals(0, deepSeek.calls)
     }
 
     @Test fun `older flow completion does not clear a newer route using the same engine`() = runTest {

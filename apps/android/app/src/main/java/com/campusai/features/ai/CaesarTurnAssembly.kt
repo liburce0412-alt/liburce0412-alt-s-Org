@@ -1,8 +1,10 @@
 package com.campusai.features.ai
 
 import com.campusai.core.ai.AiRequest
+import com.campusai.core.ai.CloudHealthDisclosure
 import com.campusai.core.model.AiConversationMessage
 import com.campusai.core.model.AiMode
+import com.campusai.core.model.LocalImageRef
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -28,7 +30,12 @@ internal fun assembleCaesarTurnRequest(
     if (ocr.isNotEmpty()) context.put("imageOcr", JSONArray(ocr))
     return AiRequest(
         mode = mode,
-        messages = existingMessages + AiConversationMessage("user", prompt.trim()),
+        messages = existingMessages + AiConversationMessage(
+            role = "user",
+            content = prompt.trim(),
+            attachmentPaths = attachments.map(CaesarImageAttachment::localPath),
+            attachmentRefs = attachments.mapNotNull(CaesarImageAttachment::imageRef),
+        ),
         structuredContextJson = context.toString(),
         maxOutputTokens = 512,
         sessionId = sessionId,
@@ -43,13 +50,26 @@ internal fun assembleCaesarTurnRequest(
     )
 }
 
+/** Health summaries may cross the cloud boundary only by explicit per-turn consent; images never do. */
+internal fun AiRequest.withCloudHealthDisclosure(disclosure: CloudHealthDisclosure): AiRequest {
+    val hasImages = imagePaths.isNotEmpty() || messages.any { message ->
+        message.attachmentPaths.isNotEmpty() || message.attachmentRefs.isNotEmpty()
+    }
+    return copy(
+        cloudHealthDisclosure = disclosure,
+        requiresLocal = hasImages || (requiresLocal && disclosure !is CloudHealthDisclosure.Included),
+    )
+}
+
 internal object AiConversationCodec {
     fun encode(messages: List<AiConversationMessage>): String = JSONArray(messages.map { message ->
         JSONObject()
             .put("role", message.role)
             .put("content", message.content)
             .put("presentation", message.presentationJson ?: JSONObject.NULL)
-            .put("attachments", JSONArray(message.attachmentPaths))
+            .put("attachments", JSONArray(if (message.attachmentRefs.isEmpty()) message.attachmentPaths else emptyList<String>()))
+            .put("imageRefs", JSONArray(message.attachmentRefs.map { it.toJson() }))
+            .put("missingAttachmentCount", message.missingAttachmentCount)
             .put("cloudHealthSensitive", message.cloudHealthSensitive)
     }).toString()
 
@@ -71,6 +91,13 @@ internal object AiConversationCodec {
                                     attachments.optString(attachmentIndex).takeIf(String::isNotBlank)?.let(::add)
                                 }
                             },
+                            attachmentRefs = buildList {
+                                val refs = row.optJSONArray("imageRefs") ?: JSONArray()
+                                repeat(refs.length()) { refIndex ->
+                                    refs.optJSONObject(refIndex)?.toLocalImageRef()?.let(::add)
+                                }
+                            },
+                            missingAttachmentCount = row.optInt("missingAttachmentCount", 0).coerceIn(0, 4),
                             cloudHealthSensitive = row.optBoolean("cloudHealthSensitive", false),
                         ),
                     )
@@ -80,4 +107,57 @@ internal object AiConversationCodec {
     }.getOrDefault(emptyList())
 
     private val ALLOWED_ROLES = setOf("system", "user", "assistant", "tool")
+
+    private fun LocalImageRef.toJson(): JSONObject = JSONObject()
+        .put("assetId", assetId)
+        .put("relativePath", relativePath)
+        .put("mimeType", mimeType)
+        .put("width", width)
+        .put("height", height)
+        .put("byteSize", byteSize)
+        .put("sha256", sha256)
+
+    private fun JSONObject.toLocalImageRef(): LocalImageRef? = runCatching {
+        val sha256 = getString("sha256")
+        val assetId = getString("assetId")
+        val relativePath = getString("relativePath")
+        val mimeType = getString("mimeType")
+        val width = getInt("width")
+        val height = getInt("height")
+        val byteSize = getLong("byteSize")
+        require(SHA256.matches(sha256) && assetId == sha256)
+        require(RELATIVE_IMAGE_PATH.matches(relativePath) && mimeType == "image/jpeg")
+        require(width > 0 && height > 0 && byteSize > 0)
+        LocalImageRef(assetId, relativePath, mimeType, width, height, byteSize, sha256)
+    }.getOrNull()
+
+    private val SHA256 = Regex("[0-9a-f]{64}")
+    private val RELATIVE_IMAGE_PATH = Regex("ai-conversations/[A-Za-z0-9._-]{1,128}/attachments/[0-9a-f]{64}\\.jpg")
+}
+
+/** Keeps append-only automation messages when a foreground conversation saves a stale snapshot. */
+internal fun mergePersistedConversationMessages(
+    current: List<AiConversationMessage>,
+    persisted: List<AiConversationMessage>,
+): List<AiConversationMessage> {
+    if (persisted.isEmpty()) return current
+    val remaining = current.groupingBy { it.persistenceIdentity() }.eachCount().toMutableMap()
+    val missing = persisted.filter { message ->
+        val identity = message.persistenceIdentity()
+        val count = remaining[identity] ?: 0
+        if (count > 0) {
+            remaining[identity] = count - 1
+            false
+        } else {
+            true
+        }
+    }
+    return current + missing
+}
+
+private fun AiConversationMessage.persistenceIdentity(): String = buildString {
+    append(role).append('\u0000').append(content).append('\u0000')
+    append(presentationJson.orEmpty()).append('\u0000').append(cloudHealthSensitive)
+    attachmentRefs.forEach { append('\u0000').append(it.relativePath).append('|').append(it.sha256) }
+    if (attachmentRefs.isEmpty()) attachmentPaths.forEach { append('\u0000').append(it) }
 }

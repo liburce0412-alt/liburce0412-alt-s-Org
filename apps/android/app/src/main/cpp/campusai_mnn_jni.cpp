@@ -3,9 +3,12 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cstdlib>
+#include <limits.h>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
 #include <unordered_map>
 #include <vector>
 #include "llm/llm.hpp"
@@ -123,6 +126,38 @@ void throwState(JNIEnv* env, const char* message) {
     if (type) env->ThrowNew(type, message);
 }
 
+void throwVision(JNIEnv* env, const char* message) {
+    jclass type = env->FindClass("java/lang/IllegalArgumentException");
+    if (type) env->ThrowNew(type, message);
+}
+
+bool containsRawMediaTag(const std::string& input) {
+    std::string lowered;
+    lowered.reserve(input.size());
+    std::transform(input.begin(), input.end(), std::back_inserter(lowered), [](unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+    return lowered.find("<img") != std::string::npos ||
+        lowered.find("</img") != std::string::npos ||
+        lowered.find("<audio") != std::string::npos ||
+        lowered.find("</audio") != std::string::npos ||
+        lowered.find("<video") != std::string::npos ||
+        lowered.find("</video") != std::string::npos;
+}
+
+bool canonicalFileInside(const std::string& rawPath, const std::string& rawRoot, std::string& canonicalPath) {
+    char rootBuffer[PATH_MAX];
+    char pathBuffer[PATH_MAX];
+    if (!realpath(rawRoot.c_str(), rootBuffer) || !realpath(rawPath.c_str(), pathBuffer)) return false;
+    struct stat fileInfo {};
+    if (stat(pathBuffer, &fileInfo) != 0 || !S_ISREG(fileInfo.st_mode)) return false;
+    const std::string root(rootBuffer);
+    canonicalPath.assign(pathBuffer);
+    return canonicalPath.size() > root.size() &&
+        canonicalPath.compare(0, root.size(), root) == 0 &&
+        canonicalPath[root.size()] == '/';
+}
+
 // The pinned Qwen3.5 MNN export ends its generation prompt with an open
 // <think> block and does not consult jinja.context.enable_thinking.  MNN's
 // runtime config therefore cannot disable reasoning for this model revision.
@@ -167,13 +202,27 @@ Java_com_campusai_core_localai_MnnNativeBridge_nativeCreate(JNIEnv* env, jobject
 
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_com_campusai_core_localai_MnnNativeBridge_nativeGenerate(
-    JNIEnv* env, jobject, jlong pointer, jobjectArray roles, jobjectArray contents, jint maxTokens, jobject listener) {
+    JNIEnv* env,
+    jobject,
+    jlong pointer,
+    jobjectArray roles,
+    jobjectArray contents,
+    jobjectArray imagePaths,
+    jintArray imageMessageIndexes,
+    jstring allowedImageRoot,
+    jint maxTokens,
+    jobject listener) {
     const auto engine = findEngine(pointer);
     if (!engine || !engine->llm) { throwState(env, "Local model is not loaded"); return nullptr; }
     const jsize count = env->GetArrayLength(roles);
     if (count != env->GetArrayLength(contents) || count < 1 || count > 32) { throwState(env, "Invalid local conversation"); return nullptr; }
+    const jsize imageCount = env->GetArrayLength(imagePaths);
+    if (imageCount != env->GetArrayLength(imageMessageIndexes) || imageCount > count * 4) {
+        throwVision(env, "local_vision_decode_failed: invalid image ownership");
+        return nullptr;
+    }
     ChatMessages messages;
-    size_t inputBytes = 0;
+    messages.reserve(static_cast<size_t>(count));
     for (jsize i = 0; i < count; ++i) {
         auto roleObject = static_cast<jstring>(env->GetObjectArrayElement(roles, i));
         auto contentObject = static_cast<jstring>(env->GetObjectArrayElement(contents, i));
@@ -182,9 +231,45 @@ Java_com_campusai_core_localai_MnnNativeBridge_nativeGenerate(
         env->DeleteLocalRef(roleObject);
         env->DeleteLocalRef(contentObject);
         if (role != "system" && role != "user" && role != "assistant" && role != "tool") { throwState(env, "Invalid local message role"); return nullptr; }
-        inputBytes += content.size();
-        if (inputBytes > 96000) { throwState(env, "Local context is too long; keep it within 8192 tokens"); return nullptr; }
+        if (containsRawMediaTag(content)) {
+            throwVision(env, "local_vision_decode_failed: raw media tags are not accepted");
+            return nullptr;
+        }
         messages.emplace_back(std::move(role), std::move(content));
+    }
+    if (imageCount > 0) {
+        const std::string root = toUtf8(env, allowedImageRoot);
+        if (root.empty()) { throwVision(env, "local_vision_decode_failed: missing private image root"); return nullptr; }
+        std::vector<jint> owners(static_cast<size_t>(imageCount));
+        env->GetIntArrayRegion(imageMessageIndexes, 0, imageCount, owners.data());
+        if (env->ExceptionCheck()) return nullptr;
+        std::vector<int> imageCounts(static_cast<size_t>(count), 0);
+        std::vector<std::string> imagePrefixes(static_cast<size_t>(count));
+        for (jsize i = 0; i < imageCount; ++i) {
+            const jint owner = owners[static_cast<size_t>(i)];
+            if (owner < 0 || owner >= count || messages[static_cast<size_t>(owner)].first != "user" || ++imageCounts[static_cast<size_t>(owner)] > 4) {
+                throwVision(env, "local_vision_decode_failed: image is not owned by a user message");
+                return nullptr;
+            }
+            auto pathObject = static_cast<jstring>(env->GetObjectArrayElement(imagePaths, i));
+            const std::string rawPath = toUtf8(env, pathObject);
+            env->DeleteLocalRef(pathObject);
+            std::string canonicalPath;
+            if (!canonicalFileInside(rawPath, root, canonicalPath)) {
+                throwVision(env, "local_vision_decode_failed: image path escaped private storage");
+                return nullptr;
+            }
+            imagePrefixes[static_cast<size_t>(owner)].append("<img>").append(canonicalPath).append("</img>");
+        }
+        for (jsize i = 0; i < count; ++i) {
+            auto& prefix = imagePrefixes[static_cast<size_t>(i)];
+            if (!prefix.empty()) messages[static_cast<size_t>(i)].second.insert(0, prefix + "\n");
+        }
+    }
+    size_t inputBytes = 0;
+    for (const auto& message : messages) {
+        inputBytes += message.second.size();
+        if (inputBytes > 96000) { throwState(env, "Local context is too long; keep it within 8192 tokens"); return nullptr; }
     }
     jclass listenerClass = env->GetObjectClass(listener);
     jmethodID onToken = env->GetMethodID(listenerClass, "onToken", "(Ljava/lang/String;)Z");
@@ -222,21 +307,22 @@ Java_com_campusai_core_localai_MnnNativeBridge_nativeGenerate(
         ++emitted;
     }
     if (!engine->cancelled.load() && !pendingUtf8.empty()) {
-        jstring javaToken = fromUtf8(env, pendingUtf8);
-        env->CallBooleanMethod(listener, onToken, javaToken);
-        env->DeleteLocalRef(javaToken);
+        throwState(env, "Local model returned incomplete UTF-8 output");
+        return nullptr;
     }
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-    const jlong values[6] = {
+    const jlong values[8] = {
         context ? context->prompt_len : 0,
         context ? context->gen_seq_len : emitted,
         context ? context->prefill_us : 0,
         context ? context->decode_us : 0,
         context ? context->ttfa_us : 0,
         elapsed,
+        context ? context->vision_us : 0,
+        context ? static_cast<jlong>(context->pixels_mp * 1000000.0f) : 0,
     };
-    jlongArray result = env->NewLongArray(6);
-    env->SetLongArrayRegion(result, 0, 6, values);
+    jlongArray result = env->NewLongArray(8);
+    env->SetLongArrayRegion(result, 0, 8, values);
     return result;
 }
 

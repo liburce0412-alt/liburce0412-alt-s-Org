@@ -67,12 +67,37 @@ class MnnAgentEngineFactoryTest {
         assertEquals(null, delegate.lastRequest)
     }
 
+    @Test fun `koog adapter preserves typed terminal error for local repair policy`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val delegate = ErrorEngine(AiEvent.Error("local_output_rejected", "本地输出异常，正在重试。"))
+        val engine = MnnAgentEngineFactory.create(delegate) { modelId ->
+            LocalModelManifest.load(context, modelId.ifBlank { LocalModelManifest.DEFAULT_MODEL_ID })
+        }
+
+        val events = engine.stream(
+            AiRequest(
+                mode = AiMode.FAST,
+                messages = listOf(AiConversationMessage("user", "hello")),
+                localModelId = "qwen3.5-2b-mnn",
+                sessionId = "error-session",
+            ),
+        ).toList()
+
+        assertTrue(events.first() is AiEvent.Meta)
+        assertEquals("local_output_rejected", (events.last() as AiEvent.Error).code)
+    }
+
     private class RecordingEngine : AiEngine {
         var lastRequest: AiRequest? = null
         override fun stream(request: AiRequest): Flow<AiEvent> = flow {
             lastRequest = request
             emit(AiEvent.Done(1))
         }
+        override fun cancel() = Unit
+    }
+
+    private class ErrorEngine(private val terminal: AiEvent.Error) : AiEngine {
+        override fun stream(request: AiRequest): Flow<AiEvent> = flow { emit(terminal) }
         override fun cancel() = Unit
     }
 }

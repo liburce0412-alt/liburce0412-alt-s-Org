@@ -20,7 +20,7 @@ class PersonalDeepSeekClient(
     )
 
     suspend fun stream(request: AiRequest, onEvent: suspend (AiEvent) -> Unit) =
-        delegate.stream(request, onEvent)
+        delegate.stream(request, onEvent = onEvent)
 
     suspend fun listModels(): List<CloudProviderModel> = delegate.listModels()
 

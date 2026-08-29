@@ -11,7 +11,7 @@ object LocalPromptPolicy {
     fun prepare(request: AiRequest, contextTokens: Int = 8_192): List<AiConversationMessage> {
         val contextChars = (contextTokens.coerceAtLeast(1_024) * 3).coerceAtMost(MAX_CONTEXT_CHARS)
         val messageLimit = if (contextTokens >= 8_192) MAX_MESSAGES else 24
-        val context = request.structuredContextJson.take(contextChars / 2)
+        val context = neutralizeUntrustedMediaTags(request.structuredContextJson).take(contextChars / 2)
         val transportInstruction = """
             这是本地模型内部传输例外，标签会由 UI 剥离且不属于用户正文：正常回答优先输出唯一外层 <final>给用户看的答案</final>；如果无法稳定闭合该标签，则只输出最终答案正文。需要工具时必须且只能输出唯一外层 <tool_call>...</tool_call>。工具调用不得与正文混合、嵌套或附加其他文字，禁止输出 <think>。正常回答应在 160 个 token 内结束。
         """.trimIndent()
@@ -28,26 +28,26 @@ object LocalPromptPolicy {
         }.orEmpty()
         val system = AiConversationMessage(
             role = "system",
-            content = """
+            content = neutralizeUntrustedMediaTags("""
                 ${AiSystemPolicy.instruction(request.structuredContextJson)}
                 $transportInstruction
                 $toolInstruction
                 <private_context>$context</private_context>
-            """.trimIndent(),
+            """.trimIndent()),
         )
         var remaining = contextChars - system.content.length
         val selected = ArrayDeque<AiConversationMessage>()
-        var imagesAttached = false
         request.messages.asReversed().forEach { message ->
             if (selected.size >= messageLimit - 1 || remaining <= 0) return@forEach
-            val imagePrefix = if (!imagesAttached && message.role == "user" && request.imagePaths.isNotEmpty()) {
-                imagesAttached = true
-                request.imagePaths.take(4).joinToString(separator = "") { path -> "<img>$path</img>" } + "\n"
-            } else ""
-            val content = (imagePrefix + message.content).takeLast(remaining)
+            val content = neutralizeUntrustedMediaTags(message.content).takeLast(remaining)
             selected.addFirst(message.copy(content = content))
             remaining -= content.length
         }
         return listOf(system) + selected
     }
 }
+
+private val UNTRUSTED_MEDIA_TAG = Regex("(?i)<(?=\\s*/?\\s*(?:img|audio|video)\\b)")
+
+internal fun neutralizeUntrustedMediaTags(content: String): String =
+    UNTRUSTED_MEDIA_TAG.replace(content, "&lt;")

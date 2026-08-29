@@ -15,6 +15,7 @@ import kotlinx.coroutines.withTimeout
 import java.time.Clock
 import java.time.LocalDate
 import java.time.ZoneId
+import java.security.MessageDigest
 
 interface MiFitnessStepsTransport {
     suspend fun exchangePassToken(credential: MiFitnessCredential): MiFitnessSession
@@ -257,7 +258,8 @@ class MiFitnessStepsSyncService internal constructor(
             MiFitnessMetricRegistry.definitions.drop(1).forEach { definition ->
                 metricValues.mergeOptional(loadOptionalAggregate(session, definition, window))
             }
-            metricValues += loadWorkouts(session, window)
+            val workouts = loadWorkouts(session, window)
+            metricValues += workouts.metrics
             val metricTimeSeries = mapOf(
                 HealthMetricKey.STEPS to loadStepSeries(session, window),
             )
@@ -283,6 +285,7 @@ class MiFitnessStepsSyncService internal constructor(
                 lastSyncAt = syncedAt,
                 metricValues = metricValues.toMap(),
                 metricTimeSeries = metricTimeSeries,
+                workoutRevision = workouts.revision,
                 schemaProvisional = false,
                 aggregationProvisional = false,
             )
@@ -389,14 +392,14 @@ class MiFitnessStepsSyncService internal constructor(
     private suspend fun loadWorkouts(
         session: MiFitnessAuthenticatedSession,
         window: MiFitnessCnDayWindow,
-    ): Map<HealthMetricKey, HealthMetricValue> = try {
+    ): WorkoutLoadResult = try {
         val records = fetchSportRecords(session, window)
         val completed = records
             .asSequence()
             .filterNot(MiFitnessSportRecord::deleted)
             .distinctBy(MiFitnessSportRecord::idDigest)
             .toList()
-        if (records.isEmpty()) {
+        val metrics = if (records.isEmpty()) {
             MiFitnessMetricRegistry.unavailableValues(
                 MiFitnessMetricRegistry.workoutDefinition,
                 HealthMetricStatus.EMPTY,
@@ -414,35 +417,32 @@ class MiFitnessStepsSyncService internal constructor(
                 ),
             )
         }
+        WorkoutLoadResult(metrics, stableWorkoutRevision(records))
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (authentication: MiFitnessAuthenticationException) {
         throw authentication
     } catch (_: MiFitnessRateLimitException) {
-        MiFitnessMetricRegistry.unavailableValues(
-            MiFitnessMetricRegistry.workoutDefinition,
-            HealthMetricStatus.ERROR,
-            "rate_limited",
-        )
+        WorkoutLoadResult(errorWorkoutValues("rate_limited"), null)
     } catch (_: MiFitnessServerException) {
-        MiFitnessMetricRegistry.unavailableValues(
-            MiFitnessMetricRegistry.workoutDefinition,
-            HealthMetricStatus.ERROR,
-            "server_unavailable",
-        )
+        WorkoutLoadResult(errorWorkoutValues("server_unavailable"), null)
     } catch (_: MiFitnessNetworkException) {
-        MiFitnessMetricRegistry.unavailableValues(
-            MiFitnessMetricRegistry.workoutDefinition,
-            HealthMetricStatus.ERROR,
-            "network_failed",
-        )
+        WorkoutLoadResult(errorWorkoutValues("network_failed"), null)
     } catch (_: Exception) {
+        WorkoutLoadResult(errorWorkoutValues("response_invalid"), null)
+    }
+
+    private fun errorWorkoutValues(reason: String): Map<HealthMetricKey, HealthMetricValue> =
         MiFitnessMetricRegistry.unavailableValues(
             MiFitnessMetricRegistry.workoutDefinition,
             HealthMetricStatus.ERROR,
-            "response_invalid",
+            reason,
         )
-    }
+
+    private data class WorkoutLoadResult(
+        val metrics: Map<HealthMetricKey, HealthMetricValue>,
+        val revision: String?,
+    )
 
     private suspend fun loadStepSeries(
         session: MiFitnessAuthenticatedSession,
@@ -605,4 +605,16 @@ class MiFitnessStepsSyncService internal constructor(
         private fun <T> failure(code: String, message: String): Result<T> =
             Result.failure(error(code, message))
     }
+}
+
+/** Duplicate pages cannot manufacture a new revision; distinct versions/tombstones still can. */
+internal fun stableWorkoutRevision(records: List<MiFitnessSportRecord>): String {
+    val canonical = records
+        .map { record -> "${record.idDigest}|${record.revisionDigest}" }
+        .distinct()
+        .sorted()
+        .joinToString("\n")
+    return MessageDigest.getInstance("SHA-256")
+        .digest(canonical.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 }

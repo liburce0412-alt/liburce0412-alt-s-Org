@@ -9,6 +9,8 @@ data class NativeGenerationMetrics(
     val decodeMicros: Long,
     val firstTokenMicros: Long,
     val elapsedMs: Long,
+    val visionMicros: Long,
+    val visionPixels: Long,
 )
 
 @Keep
@@ -22,15 +24,34 @@ object MnnNativeBridge {
     init { System.loadLibrary("campusai_mnn") }
 
     private external fun nativeCreate(configPath: String, cachePath: String): Long
-    private external fun nativeGenerate(pointer: Long, roles: Array<String>, contents: Array<String>, maxTokens: Int, listener: MnnTokenListener): LongArray
+    private external fun nativeGenerate(
+        pointer: Long,
+        roles: Array<String>,
+        contents: Array<String>,
+        imagePaths: Array<String>,
+        imageMessageIndexes: IntArray,
+        allowedImageRoot: String,
+        maxTokens: Int,
+        listener: MnnTokenListener,
+    ): LongArray
     private external fun nativeCancel(pointer: Long)
     private external fun nativeRelease(pointer: Long)
 
     fun create(configPath: String, cachePath: String): Long = nativeCreate(configPath, cachePath)
-    fun generate(pointer: Long, roles: Array<String>, contents: Array<String>, maxTokens: Int, listener: MnnTokenListener): NativeGenerationMetrics {
-        val values = nativeGenerate(pointer, roles, contents, maxTokens, listener)
-        check(values.size == 6) { "MNN returned incomplete generation metrics" }
-        return NativeGenerationMetrics(values[0], values[1], values[2], values[3], values[4], values[5])
+    fun generate(
+        pointer: Long,
+        roles: Array<String>,
+        contents: Array<String>,
+        imagePaths: Array<String>,
+        imageMessageIndexes: IntArray,
+        allowedImageRoot: String,
+        maxTokens: Int,
+        listener: MnnTokenListener,
+    ): NativeGenerationMetrics {
+        require(imagePaths.size == imageMessageIndexes.size) { "Image ownership is incomplete" }
+        val values = nativeGenerate(pointer, roles, contents, imagePaths, imageMessageIndexes, allowedImageRoot, maxTokens, listener)
+        check(values.size == 8) { "MNN returned incomplete generation metrics" }
+        return NativeGenerationMetrics(values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7])
     }
     fun cancel(pointer: Long) { if (pointer != 0L) nativeCancel(pointer) }
     fun release(pointer: Long) { if (pointer != 0L) nativeRelease(pointer) }

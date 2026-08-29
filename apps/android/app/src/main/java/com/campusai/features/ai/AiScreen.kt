@@ -559,7 +559,7 @@ fun AiScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             items(state.messages) { message ->
-                                if (message.content.isNotBlank() || message.attachmentPaths.isNotEmpty() || message.presentationJson != null) {
+                                if (message.content.isNotBlank() || message.attachmentPaths.isNotEmpty() || message.missingAttachmentCount > 0 || message.presentationJson != null) {
                                     Box(
                                         Modifier.fillMaxWidth(),
                                         contentAlignment = if (message.role == "user") Alignment.CenterEnd else Alignment.CenterStart,
@@ -571,6 +571,14 @@ fun AiScreen(
                                                         AsyncImage(model = File(path), contentDescription = "对话图片", contentScale = ContentScale.Crop, modifier = Modifier.size(112.dp).background(MaterialTheme.colorScheme.surface, RoundedCornerShape(14.dp)))
                                                     }
                                                 }
+                                            }
+                                            if (message.missingAttachmentCount > 0) {
+                                                Text(
+                                                    text = "原图片已清理",
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.padding(bottom = 6.dp),
+                                                )
                                             }
                                             val surface = CaesarSurface.fromJson(message.presentationJson)
                                             val presentation = AiTaskPresentation.fromJson(message.presentationJson)

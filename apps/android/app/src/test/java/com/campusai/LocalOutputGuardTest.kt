@@ -133,6 +133,19 @@ class LocalOutputGuardTest {
         assertTrue(json.blocked)
     }
 
+    @Test fun `replacement characters and punctuation floods are rejected`() {
+        val invalidUtf8 = LocalOutputGuard()
+        assertTrue(invalidUtf8.accept("正常开头\uFFFD损坏").isEmpty())
+        assertTrue(invalidUtf8.blocked)
+        assertFalse(invalidUtf8.hasVisibleOutput)
+
+        val symbolFlood = LocalOutputGuard()
+        assertTrue(symbolFlood.accept("!@#%&~".repeat(40)).isEmpty())
+        assertTrue(symbolFlood.finish().isEmpty())
+        assertTrue(symbolFlood.blocked)
+        assertFalse(symbolFlood.hasVisibleOutput)
+    }
+
     @Test fun `marker guard covers every current private and transport marker`() {
         assertTrue(LocalOutputGuard.MARKER_GUARD_CHARS >= LocalOutputGuard.longestControlMarkerChars)
     }

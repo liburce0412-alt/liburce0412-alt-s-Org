@@ -6,6 +6,8 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
 import androidx.exifinterface.media.ExifInterface
+import com.campusai.core.model.AiConversationMessage
+import com.campusai.core.model.LocalImageRef
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
@@ -13,6 +15,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
+import java.io.FileInputStream
+import java.security.MessageDigest
 import java.util.UUID
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -24,13 +28,15 @@ data class CaesarImageAttachment(
     val localPath: String,
     val mimeType: String,
     val ocrText: String,
+    val imageRef: LocalImageRef? = null,
 )
 
 class CaesarImageProcessor(context: Context) {
     private val appContext = context.applicationContext
-    private val cacheDirectory = File(appContext.cacheDir, "caesar-images")
+    private val storageRoot = File(appContext.noBackupFilesDir, "ai-conversations")
 
-    suspend fun import(uri: Uri): CaesarImageAttachment = withContext(Dispatchers.IO) {
+    suspend fun import(uri: Uri, conversationId: String): CaesarImageAttachment = withContext(Dispatchers.IO) {
+        cleanupAbandonedTemps()
         val resolver = appContext.contentResolver
         val source = resolver.openInputStream(uri)?.use { input ->
             val bytes = input.readAtMost(MAX_SOURCE_BYTES + 1)
@@ -49,21 +55,64 @@ class CaesarImageProcessor(context: Context) {
         val oriented = decoded.orient(orientation)
         val scale = minOf(1f, MAX_EDGE.toFloat() / maxOf(oriented.width, oriented.height))
         val normalized = if (scale < 1f) Bitmap.createScaledBitmap(oriented, (oriented.width * scale).toInt().coerceAtLeast(1), (oriented.height * scale).toInt().coerceAtLeast(1), true) else oriented
-        cacheDirectory.mkdirs()
-        val output = File(cacheDirectory, "${UUID.randomUUID()}.jpg")
-        FileOutputStream(output).use { stream -> check(normalized.compress(Bitmap.CompressFormat.JPEG, 90, stream)); stream.fd.sync() }
+        val attachmentDirectory = attachmentDirectory(conversationId).apply { mkdirs() }
+        val temporary = File(attachmentDirectory, ".tmp-${UUID.randomUUID()}.jpg")
+        val normalizedWidth = normalized.width
+        val normalizedHeight = normalized.height
+        FileOutputStream(temporary).use { stream -> check(normalized.compress(Bitmap.CompressFormat.JPEG, 90, stream)); stream.fd.sync() }
         if (normalized !== oriented) normalized.recycle()
         if (oriented !== decoded) oriented.recycle()
         if (!decoded.isRecycled) decoded.recycle()
-        CaesarImageAttachment(output.absolutePath, "image/jpeg", "")
+        val stored = storeTemporaryJpeg(temporary, boundsWidth = normalizedWidth, boundsHeight = normalizedHeight)
+        CaesarImageAttachment(resolve(stored)?.absolutePath ?: error("图片持久化失败。"), stored.mimeType, "", stored)
     }.let { attachment ->
         val text = recognize(attachment.localPath)
         attachment.copy(ocrText = text.take(MAX_OCR_CHARS))
     }
 
-    fun delete(attachment: CaesarImageAttachment) {
+    fun delete(attachment: CaesarImageAttachment, protectedRefs: Set<String> = emptySet()) {
+        if (attachment.imageRef?.relativePath in protectedRefs) return
         val candidate = File(attachment.localPath)
-        if (candidate.parentFile?.canonicalFile == cacheDirectory.canonicalFile) candidate.delete()
+        if (isInsideStorage(candidate)) candidate.delete()
+    }
+
+    fun hydrate(messages: List<AiConversationMessage>): List<AiConversationMessage> = messages.map { message ->
+        if (message.attachmentRefs.isEmpty()) return@map message
+        val available = message.attachmentRefs.mapNotNull(::resolve)
+        message.copy(
+            attachmentPaths = available.map(File::getAbsolutePath),
+            missingAttachmentCount = message.attachmentRefs.size - available.size,
+        )
+    }
+
+    suspend fun migrateLegacy(
+        conversationId: String,
+        messages: List<AiConversationMessage>,
+    ): List<AiConversationMessage> = withContext(Dispatchers.IO) {
+        messages.map { message ->
+            if (message.attachmentRefs.isNotEmpty()) {
+                val available = message.attachmentRefs.mapNotNull(::resolve)
+                return@map message.copy(
+                    attachmentPaths = available.map(File::getAbsolutePath),
+                    missingAttachmentCount = message.attachmentRefs.size - available.size,
+                )
+            }
+            val migrated = message.attachmentPaths.take(MAX_IMAGES_PER_MESSAGE).mapNotNull { legacyPath ->
+                File(legacyPath).takeIf(File::isFile)?.let { migrateLegacyJpeg(it, conversationId) }
+            }
+            message.copy(
+                attachmentPaths = migrated.mapNotNull(::resolve).map(File::getAbsolutePath),
+                attachmentRefs = migrated,
+                missingAttachmentCount = (
+                    message.missingAttachmentCount + message.attachmentPaths.size - migrated.size
+                ).coerceAtMost(MAX_IMAGES_PER_MESSAGE),
+            )
+        }
+    }
+
+    fun deleteConversation(conversationId: String) {
+        val directory = runCatching { attachmentDirectory(conversationId).parentFile }.getOrNull() ?: return
+        if (directory != storageRoot && isInsideStorage(directory)) directory.deleteRecursively()
     }
 
     private suspend fun recognize(path: String): String = runCatching {
@@ -103,9 +152,87 @@ class CaesarImageProcessor(context: Context) {
         return output.toByteArray()
     }
 
+    private fun storeTemporaryJpeg(
+        temporary: File,
+        boundsWidth: Int,
+        boundsHeight: Int,
+    ): LocalImageRef {
+        val sha256 = temporary.sha256()
+        val target = File(temporary.parentFile, "$sha256.jpg")
+        if (target.exists()) {
+            temporary.delete()
+        } else {
+            check(temporary.renameTo(target)) { "无法原子保存图片。" }
+        }
+        return LocalImageRef(
+            assetId = sha256,
+            relativePath = target.relativeTo(appContext.noBackupFilesDir).invariantSeparatorsPath,
+            mimeType = "image/jpeg",
+            width = boundsWidth,
+            height = boundsHeight,
+            byteSize = target.length(),
+            sha256 = sha256,
+        )
+    }
+
+    private fun migrateLegacyJpeg(source: File, conversationId: String): LocalImageRef? = runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(source.absolutePath, bounds)
+        require(bounds.outWidth > 0 && bounds.outHeight > 0)
+        val directory = attachmentDirectory(conversationId).apply { mkdirs() }
+        val temporary = File(directory, ".tmp-${UUID.randomUUID()}.jpg")
+        FileInputStream(source).use { input ->
+            FileOutputStream(temporary).use { output -> input.copyTo(output); output.fd.sync() }
+        }
+        storeTemporaryJpeg(temporary, bounds.outWidth, bounds.outHeight)
+    }.getOrNull()
+
+    private fun attachmentDirectory(conversationId: String): File {
+        require(CONVERSATION_ID.matches(conversationId)) { "无效的会话标识。" }
+        val conversation = File(storageRoot, conversationId).canonicalFile
+        val root = storageRoot.canonicalFile
+        require(conversation.path.startsWith(root.path + File.separator)) { "无效的会话目录。" }
+        return File(conversation, "attachments")
+    }
+
+    private fun resolve(ref: LocalImageRef): File? = runCatching {
+        if (!SHA256.matches(ref.sha256) || ref.assetId != ref.sha256 || ref.mimeType != "image/jpeg") return@runCatching null
+        val candidate = File(appContext.noBackupFilesDir, ref.relativePath).canonicalFile
+        if (!isInsideStorage(candidate) || candidate.name != "${ref.sha256}.jpg" || !candidate.isFile) null else candidate
+    }.getOrNull()
+
+    private fun isInsideStorage(candidate: File): Boolean = runCatching {
+        val root = storageRoot.canonicalFile.path + File.separator
+        candidate.canonicalFile.path.startsWith(root)
+    }.getOrDefault(false)
+
+    private fun File.sha256(): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        inputStream().buffered().use { input ->
+            val bytes = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = input.read(bytes)
+                if (count < 0) break
+                digest.update(bytes, 0, count)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }
+
+    private fun cleanupAbandonedTemps() {
+        val cutoff = System.currentTimeMillis() - TEMP_MAX_AGE_MS
+        storageRoot.walkTopDown()
+            .filter { it.isFile && it.name.startsWith(".tmp-") && it.lastModified() < cutoff }
+            .forEach(File::delete)
+    }
+
     private companion object {
         const val MAX_SOURCE_BYTES = 15 * 1024 * 1024
         const val MAX_EDGE = 1600
         const val MAX_OCR_CHARS = 8_000
+        const val MAX_IMAGES_PER_MESSAGE = 4
+        const val TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1_000L
+        val CONVERSATION_ID = Regex("[A-Za-z0-9._-]{1,128}")
+        val SHA256 = Regex("[0-9a-f]{64}")
     }
 }

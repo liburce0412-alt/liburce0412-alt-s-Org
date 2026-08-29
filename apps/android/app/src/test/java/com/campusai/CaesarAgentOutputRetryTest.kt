@@ -92,7 +92,9 @@ class CaesarAgentOutputRetryTest {
             ),
         )
 
-        val events = CaesarAgentEngine(delegate, registry).stream(request("查看健康概览")).toList()
+        val events = CaesarAgentEngine(delegate, registry)
+            .stream(request("查看健康概览").copy(requiresLocal = true))
+            .toList()
 
         assertEquals(1, attempts.get())
         assertTrue(events.any { it is AiEvent.Error && it.code == "local_output_rejected" })

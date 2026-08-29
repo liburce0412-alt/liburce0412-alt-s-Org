@@ -5,6 +5,20 @@ import com.campusai.core.model.AiMode
 import com.campusai.core.model.AiProvider
 import kotlinx.coroutines.flow.Flow
 
+enum class AiExecutionEngine {
+    CLOUD_OPENAI_COMPATIBLE,
+    LOCAL_MNN,
+    LOCAL_DETERMINISTIC,
+}
+
+/** Immutable identity for one generation. UI and persistence must consume this value verbatim. */
+data class ResolvedExecution(
+    val provider: AiProvider,
+    val model: String,
+    val engine: AiExecutionEngine,
+    val requestId: String,
+)
+
 data class AiRequest(
     val mode: AiMode,
     val messages: List<AiConversationMessage>,
@@ -27,7 +41,19 @@ data class AiRequest(
 )
 
 sealed interface AiEvent {
-    data class Meta(val model: String, val provider: AiProvider) : AiEvent
+    data class Meta(val execution: ResolvedExecution) : AiEvent {
+        val model: String get() = execution.model
+        val provider: AiProvider get() = execution.provider
+
+        constructor(model: String, provider: AiProvider) : this(
+            ResolvedExecution(
+                provider = provider,
+                model = model,
+                engine = if (provider == AiProvider.LOCAL) AiExecutionEngine.LOCAL_MNN else AiExecutionEngine.CLOUD_OPENAI_COMPATIBLE,
+                requestId = "",
+            ),
+        )
+    }
     data class Status(val stage: String, val elapsedMs: Long) : AiEvent
     data class Delta(val text: String) : AiEvent
     data class ToolCallRequested(
