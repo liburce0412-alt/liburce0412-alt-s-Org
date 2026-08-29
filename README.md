@@ -7,27 +7,21 @@
 <p align="center"><strong>一个只属于你的、本地优先 Android 私人 Agent。</strong></p>
 
 <p align="center">
-  双端侧模型 · 多模态 · 类型化工具 · 可确认记忆 · Health Connect · Xiaomi Smart Band 9
+  双端侧模型 · 本地多模态 · DeepSeek / Gemini · 可确认记忆 · Mi Fitness 健康自动化
 </p>
 
 <p align="center">
   <a href="#快速开始">快速开始</a> ·
-  <a href="#v1-能做什么">能力边界</a> ·
+  <a href="#v2-能做什么">能力边界</a> ·
   <a href="#模型与联网">模型与联网</a> ·
   <a href="#小米手环与健康数据">手环接入</a> ·
   <a href="docs/local-ai-architecture.md">架构文档</a>
 </p>
 
-<p align="center">
-  <img src="design/visual-tests/caesar-v1-agent.png" width="420" alt="Caesar V1 本地 DEEP 4B 空会话界面" />
-</p>
-
-<p align="center"><sub>SPECTRA 流体环境 · OpticalGlass · Qwen3.5-4B DEEP · 真机截图</sub></p>
-
 > [!IMPORTANT]
-> **`v1.0.0` 是 Caesar∞ 的首个正式源码版本。** 当前重点适配 Xiaomi 15 Pro（Android 16、16 GB RAM）。模型权重、个人密钥、健康原始序列、设备日志和调试 APK 均不会进入仓库。请只从 [Releases](https://github.com/liburce0412-alt/liburce0412-alt-s-Org/releases) 下载同时提供 SHA-256 的正式 APK；如果某个版本没有 APK，表示发布签名尚未配置，请按源码构建，不要安装第三方重打包文件。
+> **`v2.0.0` 是 Caesar∞ 当前的源码与发布基线。** 当前重点适配 Xiaomi 15 Pro（Android 16、16 GB RAM）。模型权重、个人密钥、健康原始序列、设备日志和调试 APK 均不会进入仓库。请只从 [Releases](https://github.com/liburce0412-alt/Caesar-Infinity/releases) 下载同时提供 SHA-256 的正式 APK；如果某个版本没有 APK，表示发布签名尚未配置，请按源码构建，不要安装第三方重打包文件。
 
-## V1 是什么
+## V2 是什么
 
 Caesar∞ 把模型、工具、个人上下文和原生界面放进同一个受控运行时。模型负责理解与规划，代码负责权限、参数、确认、幂等和真实执行；动态数据始终来自 App、Health Connect 或明确授权的网络入口，而不是写进模型权重。
 
@@ -41,18 +35,29 @@ Caesar∞ 把模型、工具、个人上下文和原生界面放进同一个受�
 - **单一视觉场**：SPECTRA 提供全局流体环境，OpticalGlass 只用于高优先级区域，正文与图标保持锐利。
 - **不伪造状态**：缺失健康指标保持缺失；明确的「今日无记录」才可按展示规则显示 `0`。
 
-## V1 能做什么
+## V2 能做什么
 
-| 能力 | V1 实现 | 明确边界 |
+| 能力 | V2 实现 | 明确边界 |
 | --- | --- | --- |
 | 本地 Agent | Qwen3.5-2B FAST 与 Qwen3.5-4B DEEP，MNN Q4，按会话锁定 | 两个模型独立下载，不同时常驻，也不会在会话中静默换模 |
-| 多模态 | 文字、相册、拍照、截图分享、OCR 辅助、语音输入与 TTS | V1 不持续监听、持续摄像或理解视频 |
+| 多模态 | 文字、相册、拍照、截图分享、OCR 辅助、语音输入与 TTS | V2 不持续监听、持续摄像或理解视频 |
 | App 工具 | Tool Registry、DAG、类型校验、确认、幂等与动态结果卡片 | 模型不能绕过 Repository / UseCase 直接碰数据库或令牌 |
 | 个人记忆 | 短期任务状态、结构化摘要、确认式长期记忆 | 原始健康序列不写入记忆；拒绝后不落库 |
 | 健康感知 | Health Connect 聚合、来源、新鲜度、首页折叠卡和 Agent 健康工具 | Caesar∞ 解释状态与趋势，不提供医疗诊断 |
 | 小米手环健康 | Mi Fitness 每日健康汇总、步数分时趋势与本机加密缓存 | 新鲜度取决于 Mi Fitness 先完成手环到云端的同步；CampusAI 不建立 BLE/SPP 连接 |
+| 健康自动化 | App 前台按间隔只读检查 Mi Fitness 云端；数据变化时由锁定的 DeepSeek 或 Gemini 模型生成 2–3 条短消息 | 必须显式允许必要日汇总；不后台唤醒、不发送分钟级数据，也不静默换模 |
 | 动态界面 | 类型化 CaesarSurface Compose Renderer、A2UI 稳定子集适配 | 未知组件、任意 URI、代码、SQL 与未注册 `actionId` 会被拒绝 |
-| 受控联网 | Supabase 业务数据；用户主动选择时直连 DeepSeek 或 Google Gemini | 本地模型不会自行联网；V1 没有通用 `web.search` / `web.open` |
+| 受控联网 | Supabase 业务数据；用户主动选择时直连 DeepSeek 或 Google Gemini | 本地模型不会自行联网；V2 没有通用 `web.search` / `web.open` |
+
+## 真机预览
+
+<p align="center">
+  <a href="design/readme/caesar-home.png"><img src="design/readme/caesar-home.png" width="29%" alt="Caesar∞ 首页：行动记录与 Mi Fitness 今日健康" /></a>&nbsp;
+  <a href="design/readme/caesar-ai.png"><img src="design/readme/caesar-ai.png" width="29%" alt="Caesar∞ AI：Aurora 森屿环境与 DeepSeek" /></a>&nbsp;
+  <a href="design/readme/caesar-profile.png"><img src="design/readme/caesar-profile.png" width="29%" alt="Caesar∞ 个人页：年度节奏与成就" /></a>
+</p>
+
+<p align="center"><sub>首页 · 行动与健康　｜　AI · Aurora 森屿　｜　个人页 · 年度节奏</sub></p>
 
 ## 从一句话到一次可靠执行
 
@@ -123,12 +128,14 @@ npm run test
 
 ### 使用网络
 
-Caesar∞ V1 只有两类受控网络入口：
+Caesar∞ V2 只有两类受控网络入口：
 
 1. **Supabase**：登录、树洞、心愿墙、资料与同步等应用业务。
 2. **Agent Provider**：用户在设备上分别保存自己的 DeepSeek 或 Google Gemini Key，并在发起请求前显式选择 Provider。
 
 两类 Provider Key 均使用 Android Keystore 加密、不参与备份、不上传 Supabase。图片、手环设备信息和分钟级健康原始数据不会发送到云端；仅在用户本次明确勾选“附带健康摘要”时，才附带必要的当日汇总。
+
+健康自动化中不再手填模型 ID。保存对应个人 Key 后，App 会读取 DeepSeek 或 Google Gemini 账户的实时可用模型列表；切换 Provider 时分别保留当前选择。启用或保存前会再次在线验证，任务随后锁定所选模型，不会静默切换。若模型目录暂时不可用或所选模型已经下线，原选择会保留，但必须刷新并重新选择后才能保存。
 
 当前没有把 OkHttp、WebView、浏览器 Cookie 或任意 URL 暴露给模型。未来若加入通用联网，会以有限的只读 `web.search` / `web.open` 工具实现，并对 HTTPS、重定向、私网地址、响应类型、大小和超时做代码校验。网页内容始终视为不可信数据，不能修改系统指令、权限、记忆规则或工具风险级别。
 
@@ -146,6 +153,7 @@ Band 9 → Mi Fitness / 小米互联服务 → 小米健康云 → CampusAI 只�
 2. 在 CampusAI 设置中显式保存本机加密的小米账户凭据。
 3. 点击手动刷新，只读获取当天官方日汇总；缓存未命中时不会用 0 或其他数据源冒充。
 4. 在首页健康卡查看指标、来源、状态与最近同步时间。
+5. 如需定时检查，在「我的 → 健康自动化」选择 DeepSeek 或 Gemini 的实时可用模型，并明确授权必要的今日汇总。
 
 该链路不会抢占手环的蓝牙连接。云端暂无、部分、过期或读取失败的指标会显示明确状态，不会填入伪造值。历史逆向调研保留在 `docs/` 和 `work/` 中，但 Gadgetbridge/CaesarBandBridge 已不是产品运行链路。
 
@@ -171,13 +179,13 @@ scripts/                     评测、设备测试与数据诊断脚本
 
 小米云凭据与健康摘要使用 Android Keystore 包装的本机加密存储，并排除在备份和设备迁移之外。
 
-## V1 验证状态
+## V2 验证状态
 
 已完成：
 
 - Android 主应用 debug 构建；
 - arm64 MNN JNI 编译与链接；
-- 输出守卫、生成代次、路由并发、本地/云选择、健康证据和健康展示定向测试；
+- 输出守卫、生成代次、路由并发、本地/云选择、健康证据、前台健康自动化和 Provider 实时模型目录定向测试；
 - 2B / 4B 独立下载、Agent 闭环、幂等、图片、语音、Health Connect 与数据库迁移测试源码。
 
 仍需长期验证：
@@ -197,7 +205,8 @@ scripts/                     评测、设备测试与数据诊断脚本
 - [安全审计](docs/security-audit.md)
 - [上线接管](docs/live-cutover.md)
 - [SPECTRA / OpticalGlass 设计](design/caesar-adaptive-field-v1.md)
-- [v1.0.0 发布说明](docs/releases/v1.0.0.md)
+- [v2.0.0 发布说明](docs/releases/v2.0.0.md)
+- [v1.0.0 历史发布说明](docs/releases/v1.0.0.md)
 
 ## 许可
 
