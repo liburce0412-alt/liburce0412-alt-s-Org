@@ -28,6 +28,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Login
 import androidx.compose.material.icons.automirrored.rounded.Logout
@@ -93,6 +94,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -322,6 +324,7 @@ fun ProfileScreen(
                             engine = localAiEngine,
                             providerStore = personalAiProviderStore,
                             onTestConnection = onTestCloudProviderConnection,
+                            onListModels = onListCloudProviderModels,
                         )
                     }
                     ProfileSheet.MI_FITNESS -> item {
@@ -909,6 +912,7 @@ private fun aiProviderLabel(value: AiProvider) = when (value) {
     AiProvider.AUTO -> "自动 · 本地优先"
     AiProvider.DEEPSEEK -> "DeepSeek · 我的 Key"
     AiProvider.GOOGLE_GEMINI -> "Gemini · 我的 Key"
+    AiProvider.CODEX -> "Codex · 私有服务"
     AiProvider.LOCAL -> "本地模型"
 }
 private fun visualStyleLabel(value: SpectraVisualStyle) = when (value) { SpectraVisualStyle.CLASSIC -> "经典"; SpectraVisualStyle.FLUID -> "Strba Fluid" }
@@ -1463,6 +1467,7 @@ private fun LocalAiSettings(
     engine: LocalMnnAiEngine,
     providerStore: PersonalAiProviderStore,
     onTestConnection: (suspend (CloudAiProvider, String) -> Result<CloudProviderConnection>)?,
+    onListModels: (suspend (CloudAiProvider) -> Result<List<CloudProviderModel>>)? = null,
 ) {
     val scope = rememberCoroutineScope()
     val modelStates by manager.states.collectAsState()
@@ -1478,10 +1483,16 @@ private fun LocalAiSettings(
     var personalKeyMessage by remember { mutableStateOf<String?>(null) }
     var personalKeyMessageIsError by remember { mutableStateOf(false) }
     var providerRevision by remember { mutableStateOf(0) }
+    var catalogReload by remember { mutableStateOf(0) }
     var modelId by remember(cloudProvider, providerRevision) {
         mutableStateOf(providerStore.selectedModel(cloudProvider))
     }
+    var baseUrl by remember(cloudProvider, providerRevision) {
+        mutableStateOf(providerStore.baseUrl(cloudProvider))
+    }
     var availableModels by remember(cloudProvider) { mutableStateOf<List<CloudProviderModel>>(emptyList()) }
+    var loadingModels by remember(cloudProvider) { mutableStateOf(false) }
+    var modelCatalogError by remember(cloudProvider) { mutableStateOf<String?>(null) }
     var testingConnection by remember { mutableStateOf(false) }
     val providerConfiguration = remember(cloudProvider, providerRevision) {
         providerStore.configuration(cloudProvider)
@@ -1496,6 +1507,37 @@ private fun LocalAiSettings(
             }
         }
     }
+    val latestListModels by rememberUpdatedState(onListModels)
+    LaunchedEffect(
+        cloudProvider,
+        providerConfiguration.hasCredential,
+        providerConfiguration.baseUrl,
+        catalogReload,
+    ) {
+        availableModels = emptyList()
+        modelCatalogError = null
+        if (!providerConfiguration.hasCredential) {
+            loadingModels = false
+            return@LaunchedEffect
+        }
+        val listModels = latestListModels ?: return@LaunchedEffect
+        loadingModels = true
+        listModels(cloudProvider).fold(
+            onSuccess = { models ->
+                availableModels = models
+                if (modelId.isBlank()) {
+                    modelId = cloudProvider.defaultModel(AiMode.FAST)
+                        .takeIf { expected -> models.any { it.id == expected } }
+                        ?: models.firstOrNull()?.id.orEmpty()
+                }
+            },
+            onFailure = { error ->
+                modelCatalogError = (error as? CloudProviderException)?.message
+                    ?: "模型列表加载失败，请检查连接后重试。"
+            },
+        )
+        loadingModels = false
+    }
     val localModes = listOf(LocalModelMode.FAST, LocalModelMode.QUALITY)
     val largestDownload = localModes.maxOf { manager.manifestFor(it.modelId).totalBytes }
     GlassPanel(Modifier.fillMaxWidth(), radius = 16, emphasized = true) {
@@ -1505,6 +1547,7 @@ private fun LocalAiSettings(
                     AiProvider.AUTO -> "自动"
                     AiProvider.DEEPSEEK -> "DeepSeek"
                     AiProvider.GOOGLE_GEMINI -> "Gemini"
+                    AiProvider.CODEX -> "Codex"
                     AiProvider.LOCAL -> "本地模型"
                 }
             }) { scope.launch { repository.setAiProvider(it) } }
@@ -1513,6 +1556,7 @@ private fun LocalAiSettings(
                     AiProvider.AUTO -> "优先使用当前本地档位；本地不可用时只展示已配置的云端选项，绝不会自动上传对话。"
                     AiProvider.DEEPSEEK -> "固定使用你自己的 DeepSeek Key，不会自动切换本地，也不会调用任何平台共享额度。"
                     AiProvider.GOOGLE_GEMINI -> "固定使用你自己的 Google AI Studio Key，不会自动切换本地，也不会调用其他云端 Provider。"
+                    AiProvider.CODEX -> "固定直连你配置的 Codex OpenAI Compatible 服务；对话不经过 Supabase 或额外后端。"
                     AiProvider.LOCAL -> "提示词、学习统计、课程表与回复仅在本机处理；本地失败不会静默调用云端。"
                 },
                 Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
@@ -1555,6 +1599,59 @@ private fun LocalAiSettings(
                     personalKeyMessageIsError = false
                     availableModels = emptyList()
                 }
+                OutlinedTextField(
+                    value = baseUrl,
+                    onValueChange = {
+                        if (cloudProvider.baseUrlConfigurable) {
+                            baseUrl = it
+                            personalKeyMessage = null
+                            personalKeyMessageIsError = false
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Base URL") },
+                    placeholder = { Text(cloudProvider.defaultBaseUrl) },
+                    supportingText = {
+                        Text(
+                            if (cloudProvider.baseUrlConfigurable) {
+                                "仅允许 HTTPS；接口自动使用 /models 与 /chat/completions。"
+                            } else {
+                                "${cloudProvider.displayName} 官方地址已固定。"
+                            },
+                        )
+                    },
+                    readOnly = !cloudProvider.baseUrlConfigurable,
+                    singleLine = true,
+                )
+                if (cloudProvider.baseUrlConfigurable) {
+                    TextButton(
+                        onClick = {
+                            val originChanged = runCatching {
+                                cloudProvider.resolveBaseUrl(baseUrl) != providerConfiguration.baseUrl
+                            }.getOrDefault(false)
+                            providerStore.saveBaseUrl(cloudProvider, baseUrl).fold(
+                                onSuccess = {
+                                    personalKey = ""
+                                    availableModels = emptyList()
+                                    providerRevision++
+                                    catalogReload++
+                                    personalKeyMessageIsError = false
+                                    personalKeyMessage = if (originChanged) {
+                                        "Base URL 已保存。为避免把旧 Key 发往新地址，原 Key 已删除，请重新输入。"
+                                    } else {
+                                        "Base URL 已保存。"
+                                    }
+                                },
+                                onFailure = { error ->
+                                    personalKeyMessageIsError = true
+                                    personalKeyMessage = error.message ?: "Base URL 无效。"
+                                },
+                            )
+                        },
+                        enabled = baseUrl.isNotBlank() && !testingConnection,
+                        modifier = Modifier.align(Alignment.End),
+                    ) { Text("保存 Base URL") }
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Rounded.Key, null)
                     Spacer(Modifier.size(12.dp))
@@ -1571,6 +1668,7 @@ private fun LocalAiSettings(
                     when (cloudProvider) {
                         CloudAiProvider.DEEPSEEK -> "Key 使用 Android Keystore 加密保存，不参与备份；生成时只发送到 api.deepseek.com，不经过 Supabase。"
                         CloudAiProvider.GOOGLE_GEMINI -> "Key 使用 Android Keystore 加密保存，不参与备份；生成时只发送到 generativelanguage.googleapis.com，不经过 Supabase。"
+                        CloudAiProvider.CODEX -> "Key 使用 Android Keystore 加密保存，不参与备份；对话只发送到上方 Base URL，不经过 Supabase。"
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface.copy(.66f),
@@ -1581,6 +1679,10 @@ private fun LocalAiSettings(
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text(if (providerConfiguration.hasCredential) "粘贴新 Key 以替换" else "${cloudProvider.displayName} API Key") },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrectEnabled = false,
+                    ),
                     visualTransformation = if (personalKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
                     trailingIcon = {
                         IconButton(onClick = { personalKeyVisible = !personalKeyVisible }) {
@@ -1602,6 +1704,7 @@ private fun LocalAiSettings(
                             onSuccess = {
                                 personalKey = ""
                                 providerRevision++
+                                catalogReload++
                                 personalKeyMessageIsError = false
                                 personalKeyMessage = "已加密保存。下次 ${cloudProvider.displayName} 生成将使用这个 Key。"
                             },
@@ -1653,7 +1756,13 @@ private fun LocalAiSettings(
                                             providerStore.saveSelectedModel(cloudProvider, connection.selectedModelId)
                                             providerRevision++
                                             personalKeyMessageIsError = false
-                                            personalKeyMessage = "连接正常 · ${connection.latencyMs} ms · ${connection.models.size} 个可用模型"
+                                            personalKeyMessage = if (connection.chatVerified && connection.toolCallsVerified) {
+                                                "连接正常 · 已依次验证模型列表、OK 对话与工具调用 · ${connection.latencyMs} ms"
+                                            } else if (connection.chatVerified) {
+                                                "连接正常 · 已依次验证模型列表与 OK 对话 · ${connection.latencyMs} ms"
+                                            } else {
+                                                "连接正常 · ${connection.latencyMs} ms · ${connection.models.size} 个可用模型"
+                                            }
                                         },
                                         onFailure = { error ->
                                             personalKeyMessageIsError = true
@@ -1667,10 +1776,18 @@ private fun LocalAiSettings(
                         ) { Text(if (testingConnection) "测试中…" else "测试连接") }
                     }
                 }
+                if (loadingModels) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text("正在从 /models 获取可用模型…", style = MaterialTheme.typography.bodySmall)
+                }
+                modelCatalogError?.let { error ->
+                    Text(error, style = MaterialTheme.typography.bodyMedium, color = SpectraColors.Error)
+                    TextButton(onClick = { catalogReload++ }) { Text("重试加载模型") }
+                }
                 if (availableModels.isNotEmpty()) {
                     Text("可用模型", style = MaterialTheme.typography.labelLarge)
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(availableModels.take(12), key = CloudProviderModel::id) { model ->
+                        items(availableModels, key = CloudProviderModel::id) { model ->
                             GlassPanel(
                                 modifier = Modifier.height(38.dp),
                                 radius = 19,
@@ -1697,6 +1814,7 @@ private fun LocalAiSettings(
                         if (providerStore.deleteCredential(cloudProvider)) {
                             personalKey = ""
                             providerRevision++
+                            availableModels = emptyList()
                             personalKeyMessageIsError = false
                             personalKeyMessage = "${cloudProvider.displayName} Key 已从本机删除。"
                         } else {

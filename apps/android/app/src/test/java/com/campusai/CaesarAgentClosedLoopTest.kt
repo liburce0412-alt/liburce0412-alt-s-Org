@@ -148,6 +148,41 @@ class CaesarAgentClosedLoopTest {
         assertTrue(repeated.single() is AiEvent.Error && (repeated.single() as AiEvent.Error).code == "confirmation_expired")
     }
 
+    @Test
+    fun `Codex vision keeps current images across a tool continuation only when enabled`() = runTest {
+        val imagePath = "/data/user/0/com.campusai/no_backup/current.jpg"
+        val registry = CaesarToolRegistry(
+            listOf(
+                CaesarTool(
+                    ToolDefinition(
+                        name = "study.lookup",
+                        description = "根据图片查询学习信息",
+                        parameters = emptyList(),
+                        riskLevel = ToolRiskLevel.READ_ONLY,
+                        keywords = setOf("图片"),
+                    ),
+                ) { _, _ -> CaesarToolResult.Success("{\"ok\":true}") },
+            ),
+        )
+        fun visionRequest(enabled: Boolean) = request("查看图片").copy(
+            messages = listOf(
+                AiConversationMessage("user", "查看图片", attachmentPaths = listOf(imagePath)),
+            ),
+            imagePaths = listOf(imagePath),
+            allowCodexImageUpload = enabled,
+        )
+
+        val codexDelegate = ScriptedToolDelegate("study.lookup", JSONObject(), "已完成")
+        CaesarAgentEngine(codexDelegate, registry).stream(visionRequest(enabled = true)).toList()
+        val localDelegate = ScriptedToolDelegate("study.lookup", JSONObject(), "已完成")
+        CaesarAgentEngine(localDelegate, registry).stream(visionRequest(enabled = false)).toList()
+
+        assertEquals(2, codexDelegate.requests.size)
+        assertEquals(listOf(imagePath), codexDelegate.requests[1].imagePaths)
+        assertEquals(2, localDelegate.requests.size)
+        assertTrue(localDelegate.requests[1].imagePaths.isEmpty())
+    }
+
     private fun request(prompt: String, requiresLocal: Boolean = false) = AiRequest(
         mode = AiMode.FAST,
         messages = listOf(AiConversationMessage("user", prompt)),

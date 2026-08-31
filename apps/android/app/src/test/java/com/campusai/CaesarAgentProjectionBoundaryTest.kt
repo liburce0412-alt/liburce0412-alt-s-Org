@@ -82,6 +82,81 @@ class CaesarAgentProjectionBoundaryTest {
     }
 
     @Test
+    fun `web search is not projected or executed without explicit cloud capability`() = runTest {
+        val searchCalls = AtomicInteger()
+        val delegate = UnprojectedToolDelegate("web.search", "{}")
+        val registry = CaesarToolRegistry(
+            listOf(
+                readTool("web.search", setOf("联网", "搜索")) {
+                    searchCalls.incrementAndGet()
+                    CaesarToolResult.Success("{\"results\":[]}")
+                },
+            ),
+        )
+
+        val events = CaesarAgentEngine(delegate, registry)
+            .stream(request("联网搜索最新校园新闻", allowWebSearch = false))
+            .toList()
+
+        assertEquals(0, searchCalls.get())
+        assertFalse(delegate.requests.first().caesarToolsJson.contains("web.search"))
+        assertEquals("tool_not_projected", delegate.lastToolFailureCode())
+        assertTrue(events.any { it is AiEvent.ToolFinished && it.name == "web.search" && !it.success })
+    }
+
+    @Test
+    fun `web search is never projected when request is forced local`() = runTest {
+        val searchCalls = AtomicInteger()
+        val delegate = UnprojectedToolDelegate("web.search", "{}")
+        val registry = CaesarToolRegistry(
+            listOf(
+                readTool("web.search", setOf("联网", "搜索")) {
+                    searchCalls.incrementAndGet()
+                    CaesarToolResult.Success("{\"results\":[]}")
+                },
+            ),
+        )
+
+        val events = CaesarAgentEngine(delegate, registry)
+            .stream(
+                request(
+                    prompt = "联网搜索最新校园新闻",
+                    requiresLocal = true,
+                    allowWebSearch = true,
+                ),
+            )
+            .toList()
+
+        assertEquals(0, searchCalls.get())
+        assertFalse(delegate.requests.first().caesarToolsJson.contains("web.search"))
+        assertEquals("tool_not_projected", delegate.lastToolFailureCode())
+        assertTrue(events.any { it is AiEvent.ToolFinished && it.name == "web.search" && !it.success })
+    }
+
+    @Test
+    fun `web search is projected and executed only with explicit cloud capability`() = runTest {
+        val searchCalls = AtomicInteger()
+        val delegate = UnprojectedToolDelegate("web.search", "{}")
+        val registry = CaesarToolRegistry(
+            listOf(
+                readTool("web.search", setOf("联网", "搜索")) {
+                    searchCalls.incrementAndGet()
+                    CaesarToolResult.Success("{\"results\":[]}")
+                },
+            ),
+        )
+
+        val events = CaesarAgentEngine(delegate, registry)
+            .stream(request("联网搜索最新校园新闻", allowWebSearch = true))
+            .toList()
+
+        assertEquals(1, searchCalls.get())
+        assertTrue(delegate.requests.first().caesarToolsJson.contains("web.search"))
+        assertTrue(events.any { it is AiEvent.ToolFinished && it.name == "web.search" && it.success })
+        assertTrue(delegate.requests.last().messages.any { it.role == "tool" && it.content.contains("\"results\":[]") })
+    }
+
+    @Test
     fun `confirmation resumes with only the original projected tools`() = runTest {
         val confirmedCalls = AtomicInteger()
         val blockedCalls = AtomicInteger()
@@ -141,13 +216,18 @@ class CaesarAgentProjectionBoundaryTest {
         ),
     ) { _, _ -> execute() }
 
-    private fun request(prompt: String, requiresLocal: Boolean = false) = AiRequest(
+    private fun request(
+        prompt: String,
+        requiresLocal: Boolean = false,
+        allowWebSearch: Boolean = false,
+    ) = AiRequest(
         mode = AiMode.FAST,
         messages = listOf(AiConversationMessage("user", prompt)),
         sessionId = "projection-boundary-session",
         ownerUserId = "owner",
         userPrompt = prompt,
         requiresLocal = requiresLocal,
+        allowWebSearch = allowWebSearch,
     )
 
     private class UnprojectedToolDelegate(

@@ -20,6 +20,7 @@ internal fun assembleCaesarTurnRequest(
     ownerUserId: String,
     localModelId: String,
     cloudOnce: Boolean = false,
+    allowCodexImageUpload: Boolean = false,
 ): AiRequest {
     val context = JSONObject(structuredContext.toString()).put("locale", "zh-CN")
     val ocr = attachments.mapIndexedNotNull { index, image ->
@@ -43,21 +44,23 @@ internal fun assembleCaesarTurnRequest(
         userPrompt = displayPrompt.trim(),
         requiresLocal = !cloudOnce && CaesarLocalityPolicy.requiresLocal(
             prompt = displayPrompt,
-            hasImages = attachments.isNotEmpty(),
+            hasImages = attachments.isNotEmpty() && !allowCodexImageUpload,
         ),
         localModelId = localModelId,
         imagePaths = attachments.map(CaesarImageAttachment::localPath),
+        allowCodexImageUpload = allowCodexImageUpload,
     )
 }
 
-/** Health summaries may cross the cloud boundary only by explicit per-turn consent; images never do. */
+/** Health summaries remain consent-gated; current-turn images may cross only on the explicit Codex path. */
 internal fun AiRequest.withCloudHealthDisclosure(disclosure: CloudHealthDisclosure): AiRequest {
     val hasImages = imagePaths.isNotEmpty() || messages.any { message ->
         message.attachmentPaths.isNotEmpty() || message.attachmentRefs.isNotEmpty()
     }
     return copy(
         cloudHealthDisclosure = disclosure,
-        requiresLocal = hasImages || (requiresLocal && disclosure !is CloudHealthDisclosure.Included),
+        requiresLocal = (hasImages && !allowCodexImageUpload) ||
+            (requiresLocal && disclosure !is CloudHealthDisclosure.Included),
     )
 }
 
@@ -139,10 +142,12 @@ internal object AiConversationCodec {
 internal fun mergePersistedConversationMessages(
     current: List<AiConversationMessage>,
     persisted: List<AiConversationMessage>,
+    replacedTail: List<AiConversationMessage> = emptyList(),
 ): List<AiConversationMessage> {
     if (persisted.isEmpty()) return current
+    val retainedPersisted = persisted.withoutLastMatchingSequence(replacedTail)
     val remaining = current.groupingBy { it.persistenceIdentity() }.eachCount().toMutableMap()
-    val missing = persisted.filter { message ->
+    val missing = retainedPersisted.filter { message ->
         val identity = message.persistenceIdentity()
         val count = remaining[identity] ?: 0
         if (count > 0) {
@@ -153,6 +158,48 @@ internal fun mergePersistedConversationMessages(
         }
     }
     return current + missing
+}
+
+private fun List<AiConversationMessage>.withoutLastMatchingSequence(
+    sequence: List<AiConversationMessage>,
+): List<AiConversationMessage> {
+    if (sequence.isEmpty() || size < sequence.size) return this
+    val expected = sequence.map(AiConversationMessage::persistenceIdentity)
+    for (start in size - sequence.size downTo 0) {
+        val matches = expected.indices.all { offset ->
+            this[start + offset].persistenceIdentity() == expected[offset]
+        }
+        if (matches) return take(start) + drop(start + sequence.size)
+    }
+    return this
+}
+
+internal data class AiRegenerationPlan(
+    val assistantIndex: Int,
+    val history: List<AiConversationMessage>,
+    val prompt: AiConversationMessage,
+    val replacedTail: List<AiConversationMessage>,
+)
+
+internal fun planAiRegeneration(messages: List<AiConversationMessage>): AiRegenerationPlan? {
+    val assistantIndex = messages.indexOfLast { it.role == "assistant" && it.content.isNotBlank() }
+    if (assistantIndex < 0 || assistantIndex != messages.lastIndex) return null
+    val userIndex = (assistantIndex - 1 downTo 0).firstOrNull { messages[it].role == "user" } ?: return null
+    val prompt = messages[userIndex]
+    if (
+        prompt.content.isBlank() ||
+        prompt.cloudHealthSensitive ||
+        prompt.attachmentPaths.isNotEmpty() ||
+        prompt.attachmentRefs.isNotEmpty() ||
+        prompt.missingAttachmentCount > 0 ||
+        messages[assistantIndex].presentationJson != null
+    ) return null
+    return AiRegenerationPlan(
+        assistantIndex = assistantIndex,
+        history = messages.take(userIndex),
+        prompt = prompt,
+        replacedTail = messages.drop(userIndex),
+    )
 }
 
 private fun AiConversationMessage.persistenceIdentity(): String = buildString {

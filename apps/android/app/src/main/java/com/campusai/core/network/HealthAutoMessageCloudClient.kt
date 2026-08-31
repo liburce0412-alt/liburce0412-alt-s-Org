@@ -98,6 +98,7 @@ class PersonalCloudHealthAutoMessageClient(
         provider = provider,
         credential = { store.readCredential(provider)?.value.orEmpty() },
         selectedModel = { modelId },
+        baseUrl = { store.baseUrl(provider) },
         client = defaultCloudHttpClient(),
     )
 

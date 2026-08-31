@@ -3,6 +3,7 @@ package com.campusai.core.ai
 import com.campusai.core.network.PersonalDeepSeekClient
 import com.campusai.core.network.CloudProviderException
 import com.campusai.core.network.PersonalCloudClient
+import com.campusai.core.network.providerConnectivityError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
@@ -42,6 +43,7 @@ internal fun personalCloudEventFlow(
     } catch (error: CloudProviderException) {
         send(AiEvent.Error(error.code, error.message, error.recoverable))
     } catch (_: Exception) {
-        send(AiEvent.Error("provider_unavailable", "无法连接 ${provider.displayName}。请检查网络后重试。"))
+        val failure = providerConnectivityError(provider)
+        send(AiEvent.Error(failure.code, failure.message, failure.recoverable))
     }
 }

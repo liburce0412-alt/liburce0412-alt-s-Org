@@ -1,5 +1,6 @@
 package com.campusai.core.security
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -53,11 +54,12 @@ object SecurePreferences {
         }
     }
 
+    // Secret writes must report durable success before the UI claims the Key was saved.
+    @SuppressLint("ApplySharedPref")
     fun encrypt(context: Context, key: String, plainText: String): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (plainText.isEmpty()) {
-            prefs.edit().remove(key).remove("${key}_iv").apply()
-            return true
+            return prefs.edit().remove(key).remove("${key}_iv").commit()
         }
         return try {
             val secretKey = getSecretKey()
@@ -73,8 +75,7 @@ object SecurePreferences {
                 prefs.edit()
                     .putString("${key}_iv", ivString)
                     .putString(key, encryptedString)
-                    .apply()
-                true
+                    .commit()
             } else {
                 Log.e("SecurePrefs", "Android KeyStore unavailable; refusing to persist secret")
                 false

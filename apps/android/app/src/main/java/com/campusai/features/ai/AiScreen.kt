@@ -61,6 +61,7 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -85,6 +86,7 @@ import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Policy
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Today
 import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -219,6 +221,9 @@ fun AiScreen(
         locked.copy(state = localModelStates[locked.manifest.id] ?: locked.state)
     } ?: selectedLocalModel
     val localRouteSelected = state.provider == AiProvider.AUTO || state.provider == AiProvider.LOCAL
+    val regeneratableAssistantIndex = remember(state.messages, state.streaming) {
+        if (state.streaming) -1 else planAiRegeneration(state.messages)?.assistantIndex ?: -1
+    }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> uri?.let(viewModel::attachImage) }
     var cameraUriValue by rememberSaveable { mutableStateOf<String?>(null) }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
@@ -558,7 +563,7 @@ fun AiScreen(
                             contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 4.dp, bottom = 12.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            items(state.messages) { message ->
+                            itemsIndexed(state.messages) { messageIndex, message ->
                                 if (message.content.isNotBlank() || message.attachmentPaths.isNotEmpty() || message.missingAttachmentCount > 0 || message.presentationJson != null) {
                                     Box(
                                         Modifier.fillMaxWidth(),
@@ -589,13 +594,25 @@ fun AiScreen(
                                                     Modifier.fillMaxWidth(if (message.role == "user") .82f else .94f),
                                                     radius = 16,
                                                     shadowed = false,
-                                                ) { Text(plainAiText(message.content), Modifier.padding(15.dp), style = MaterialTheme.typography.bodyLarge) }
+                                                ) { AiMarkdownText(message.content, Modifier.padding(15.dp)) }
                                             }
                                             if (message.role == "assistant" && message.content.isNotBlank()) {
-                                                IconButton(onClick = {
-                                                    val engine = tts ?: return@IconButton
-                                                    if (engine.isSpeaking) engine.stop() else engine.speak(plainAiText(message.content), TextToSpeech.QUEUE_FLUSH, null, "caesar-${message.hashCode()}")
-                                                }, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.VolumeUp, "朗读或停止", modifier = Modifier.size(18.dp)) }
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    IconButton(onClick = {
+                                                        val engine = tts ?: return@IconButton
+                                                        if (engine.isSpeaking) engine.stop() else engine.speak(plainAiText(message.content), TextToSpeech.QUEUE_FLUSH, null, "caesar-${message.hashCode()}")
+                                                    }, modifier = Modifier.size(40.dp)) { Icon(Icons.Rounded.VolumeUp, "朗读或停止", modifier = Modifier.size(18.dp)) }
+                                                    if (messageIndex == regeneratableAssistantIndex) {
+                                                        TextButton(
+                                                            onClick = { viewModel.regenerateLastResponse(snapshot) },
+                                                            modifier = Modifier.heightIn(min = 48.dp),
+                                                        ) {
+                                                            Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                                                            Spacer(Modifier.size(5.dp))
+                                                            Text("重新生成")
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -797,22 +814,29 @@ private fun runtimeSummary(
     AiProvider.LOCAL -> "本机 · ${localModel.mode.displayLabel()}"
     AiProvider.DEEPSEEK -> "DeepSeek"
     AiProvider.GOOGLE_GEMINI -> "Google Gemini"
+    AiProvider.CODEX -> "Codex · 私有服务"
 }
 
-private fun providerIndex(provider: AiProvider): Int = when (provider) {
-    AiProvider.AUTO -> 0
-    AiProvider.LOCAL -> 1
-    AiProvider.DEEPSEEK -> 2
-    AiProvider.GOOGLE_GEMINI -> 3
+private val AI_RUNTIME_PROVIDERS = listOf(
+    AiProvider.AUTO,
+    AiProvider.LOCAL,
+    AiProvider.CODEX,
+    AiProvider.DEEPSEEK,
+    AiProvider.GOOGLE_GEMINI,
+)
+
+private fun providerIndex(provider: AiProvider): Int = AI_RUNTIME_PROVIDERS.indexOf(provider).coerceAtLeast(0)
+
+private fun providerSelectorLabel(provider: AiProvider): String = when (provider) {
+    AiProvider.AUTO -> "自动"
+    AiProvider.LOCAL -> "本机"
+    AiProvider.CODEX -> "Codex"
+    AiProvider.DEEPSEEK -> "DeepSeek"
+    AiProvider.GOOGLE_GEMINI -> "Gemini"
 }
 
 private fun selectProvider(index: Int, viewModel: AiViewModel) {
-    when (index) {
-        0 -> viewModel.setProvider(AiProvider.AUTO)
-        1 -> viewModel.setProvider(AiProvider.LOCAL)
-        2 -> viewModel.setProvider(AiProvider.DEEPSEEK)
-        else -> viewModel.setProvider(AiProvider.GOOGLE_GEMINI)
-    }
+    AI_RUNTIME_PROVIDERS.getOrNull(index)?.let(viewModel::setProvider)
 }
 
 @Composable
@@ -914,7 +938,7 @@ private fun ClassicAiChrome(
     if (showHistory) return
 
     CaesarSlidingSelector(
-        options = listOf("自动", "本机", "DeepSeek"),
+        options = AI_RUNTIME_PROVIDERS.map(::providerSelectorLabel),
         selectedIndex = providerIndex(provider),
         enabled = !streaming,
         motionEnabled = motionEnabled,
@@ -942,6 +966,7 @@ private fun ClassicAiChrome(
                     when (provider) {
                         AiProvider.DEEPSEEK -> "DEEPSEEK"
                         AiProvider.GOOGLE_GEMINI -> "GEMINI"
+                        AiProvider.CODEX -> "CODEX · TAILSCALE"
                         AiProvider.AUTO, AiProvider.LOCAL -> "${localModel.mode.displayLabel()} · 本机"
                     },
                     style = MaterialTheme.typography.labelLarge,
@@ -1028,14 +1053,14 @@ private fun AiRuntimeSheet(
             )
             Text("运行方式", style = MaterialTheme.typography.labelLarge)
             CaesarSlidingSelector(
-                options = listOf("自动", "本机", "DeepSeek", "Gemini"),
+                options = AI_RUNTIME_PROVIDERS.map(::providerSelectorLabel),
                 selectedIndex = providerIndex(provider),
                 enabled = !streaming,
                 motionEnabled = motionEnabled,
                 onSelected = onProviderSelected,
                 modifier = Modifier.fillMaxWidth(),
             )
-            if (provider == AiProvider.DEEPSEEK || provider == AiProvider.GOOGLE_GEMINI) {
+            if (provider == AiProvider.DEEPSEEK || provider == AiProvider.GOOGLE_GEMINI || provider == AiProvider.CODEX) {
                 CaesarSlidingSelector(
                     options = listOf("快速", "深度"),
                     selectedIndex = if (mode == AiMode.FAST) 0 else 1,
@@ -1086,12 +1111,14 @@ private fun providerLabel(provider: AiProvider) = when (provider) {
     AiProvider.LOCAL -> "本地"
     AiProvider.DEEPSEEK -> "DeepSeek"
     AiProvider.GOOGLE_GEMINI -> "Gemini"
+    AiProvider.CODEX -> "Codex"
     AiProvider.AUTO -> "自动"
 }
 
 internal fun selectedCloudProviderStatus(provider: AiProvider): String = when (provider) {
     AiProvider.DEEPSEEK -> "DEEPSEEK · 已选择"
     AiProvider.GOOGLE_GEMINI -> "GEMINI · 已选择"
+    AiProvider.CODEX -> "CODEX · 已选择"
     AiProvider.LOCAL, AiProvider.AUTO -> "本机 · 已选择"
 }
 
@@ -2377,6 +2404,7 @@ private fun AiErrorCard(state: AiUiState, error: String, onCloudOnce: (AiProvide
                 when (state.errorCode) {
                     "local_model_not_ready", "offline_model_missing", "local_required" -> "前往“我的 → AI 运行方式”查看当前锁定档位；切换档位后需新建会话。"
                     "personal_key_missing" -> "前往“我的 → AI 运行方式”安全保存自己的 DeepSeek Key。"
+                    "codex_key_missing" -> "前往“我的 → AI 运行方式”设置 Codex Base URL 并安全保存 Key。"
                     "local_output_rejected" -> "Caesar∞ 没有展示内部过程。可以重试，或切换到 DeepSeek。"
                     else -> "根据上面的原因恢复后可以重试。"
                 },
@@ -2390,6 +2418,7 @@ private fun AiErrorCard(state: AiUiState, error: String, onCloudOnce: (AiProvide
                             when (provider) {
                                 AiProvider.DEEPSEEK -> "确认：本次使用我的 DeepSeek Key"
                                 AiProvider.GOOGLE_GEMINI -> "确认：本次使用我的 Gemini Key"
+                                AiProvider.CODEX -> "确认：本次使用我的 Codex 服务"
                                 else -> ""
                             },
                         )

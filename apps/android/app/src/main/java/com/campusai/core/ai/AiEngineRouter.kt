@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import java.util.concurrent.atomic.AtomicReference
 
-enum class AiRoute { PERSONAL_DEEPSEEK, PERSONAL_GOOGLE_GEMINI, LOCAL }
+enum class AiRoute { PERSONAL_DEEPSEEK, PERSONAL_GOOGLE_GEMINI, PERSONAL_CODEX, LOCAL }
 
 sealed interface AiRouteDecision {
     data class Use(val route: AiRoute) : AiRouteDecision
@@ -21,10 +21,11 @@ fun decideAiRoute(
     localReady: Boolean,
     personalKeyAvailable: Boolean = false,
     geminiKeyAvailable: Boolean = false,
+    codexKeyAvailable: Boolean = false,
 ): AiRouteDecision = when (provider) {
     AiProvider.AUTO -> when {
         localReady -> AiRouteDecision.Use(AiRoute.LOCAL)
-        online && (personalKeyAvailable || geminiKeyAvailable) -> AiRouteDecision.Block(
+        online && (personalKeyAvailable || geminiKeyAvailable || codexKeyAvailable) -> AiRouteDecision.Block(
             "local_model_not_ready",
             "本地模型尚未就绪。你可以先下载模型，或只为本次明确选择一个已配置的云端 Provider。",
             canUseCloudOnce = true,
@@ -41,6 +42,14 @@ fun decideAiRoute(
     } else {
         AiRouteDecision.Block("gemini_offline", "Google Gemini 云端需要网络连接。恢复网络后重试；不会自动切换到其他模型。")
     }
+    AiProvider.CODEX -> if (online) {
+        cloudRoute(CloudAiProvider.CODEX, codexKeyAvailable)
+    } else {
+        AiRouteDecision.Block(
+            "codex_offline",
+            "Codex 连接不可用。请检查：手机是否开启 Tailscale；电脑是否开机；CPA 与 Clash 是否正在运行。",
+        )
+    }
     AiProvider.LOCAL -> when {
         localReady -> AiRouteDecision.Use(AiRoute.LOCAL)
         else -> AiRouteDecision.Block("local_model_not_ready", "本地模型尚未就绪。请先在“我的 → AI 运行方式”下载并完成校验。", canUseCloudOnce = online)
@@ -52,10 +61,15 @@ private fun cloudRoute(provider: CloudAiProvider, keyAvailable: Boolean): AiRout
         when (provider) {
             CloudAiProvider.DEEPSEEK -> AiRoute.PERSONAL_DEEPSEEK
             CloudAiProvider.GOOGLE_GEMINI -> AiRoute.PERSONAL_GOOGLE_GEMINI
+            CloudAiProvider.CODEX -> AiRoute.PERSONAL_CODEX
         },
     )
     else -> AiRouteDecision.Block(
-        if (provider == CloudAiProvider.DEEPSEEK) "personal_key_missing" else "gemini_key_missing",
+        when (provider) {
+            CloudAiProvider.DEEPSEEK -> "personal_key_missing"
+            CloudAiProvider.GOOGLE_GEMINI -> "gemini_key_missing"
+            CloudAiProvider.CODEX -> "codex_key_missing"
+        },
         "已选择“我的 ${provider.displayName} Key”，但设备上尚未保存 Key。请前往“我的 → AI 运行方式”保存后重试。",
     )
 }
@@ -69,6 +83,8 @@ class AiEngineRouter(
     private val localState: (modelId: String) -> LocalModelState,
     private val personalGoogleGemini: AiEngine? = null,
     private val geminiKeyAvailable: () -> Boolean = { false },
+    private val personalCodex: AiEngine? = null,
+    private val codexKeyAvailable: () -> Boolean = { false },
 ) : AiEngine {
     private data class ActiveRoute(val engine: AiEngine)
 
@@ -76,16 +92,22 @@ class AiEngineRouter(
 
     override fun stream(request: AiRequest): Flow<AiEvent> = flow {
         val selectedLocalState = localState(request.localModelId)
-        val decision = if (request.requiresLocal) {
+        val selectedProvider = provider()
+        val hasImages = request.imagePaths.isNotEmpty() || request.messages.any { message ->
+            message.attachmentPaths.isNotEmpty() || message.attachmentRefs.isNotEmpty()
+        }
+        val codexVisionTurn = selectedProvider == AiProvider.CODEX && request.allowCodexImageUpload
+        val decision = if (request.requiresLocal || (hasImages && !codexVisionTurn)) {
             if (selectedLocalState == LocalModelState.Ready) AiRouteDecision.Use(AiRoute.LOCAL)
             else AiRouteDecision.Block("local_required", "本会话锁定的本地模型尚未就绪。请完成该模型下载与校验，或新建会话后选择其他档位。")
         } else decideAiRoute(
-            provider = provider(),
+            provider = selectedProvider,
             mode = request.mode,
             online = isOnline(),
             localReady = selectedLocalState == LocalModelState.Ready,
             personalKeyAvailable = personalKeyAvailable(),
             geminiKeyAvailable = geminiKeyAvailable(),
+            codexKeyAvailable = codexKeyAvailable(),
         )
         val engine = engineFor(decision)
         val route = ActiveRoute(engine)
@@ -108,10 +130,23 @@ class AiEngineRouter(
         val cloudProvider = CloudAiProvider.from(provider)
             ?: throw AiRoutingException("cloud_provider_invalid", "本次云端请求未指定受支持的 Provider。")
         if (!isOnline()) {
-            val code = if (cloudProvider == CloudAiProvider.DEEPSEEK) "deepseek_offline" else "gemini_offline"
-            throw AiRoutingException(code, "${cloudProvider.displayName} 云端需要网络连接。恢复网络后重试。")
+            val code = when (cloudProvider) {
+                CloudAiProvider.DEEPSEEK -> "deepseek_offline"
+                CloudAiProvider.GOOGLE_GEMINI -> "gemini_offline"
+                CloudAiProvider.CODEX -> "codex_offline"
+            }
+            val message = if (cloudProvider == CloudAiProvider.CODEX) {
+                "Codex 连接不可用。请检查：手机是否开启 Tailscale；电脑是否开机；CPA 与 Clash 是否正在运行。"
+            } else {
+                "${cloudProvider.displayName} 云端需要网络连接。恢复网络后重试。"
+            }
+            throw AiRoutingException(code, message)
         }
-        val keyAvailable = if (cloudProvider == CloudAiProvider.DEEPSEEK) personalKeyAvailable() else geminiKeyAvailable()
+        val keyAvailable = when (cloudProvider) {
+            CloudAiProvider.DEEPSEEK -> personalKeyAvailable()
+            CloudAiProvider.GOOGLE_GEMINI -> geminiKeyAvailable()
+            CloudAiProvider.CODEX -> codexKeyAvailable()
+        }
         val engine = engineFor(cloudRoute(cloudProvider, keyAvailable))
         val route = ActiveRoute(engine)
         active.set(route)
@@ -127,6 +162,8 @@ class AiEngineRouter(
             AiRoute.PERSONAL_DEEPSEEK -> personalDeepSeek
             AiRoute.PERSONAL_GOOGLE_GEMINI -> personalGoogleGemini
                 ?: throw AiRoutingException("gemini_not_configured", "Google Gemini 引擎尚未接入当前运行时。")
+            AiRoute.PERSONAL_CODEX -> personalCodex
+                ?: throw AiRoutingException("codex_not_configured", "Codex 引擎尚未接入当前运行时。")
             AiRoute.LOCAL -> local
         }
         is AiRouteDecision.Block -> throw AiRoutingException(decision.code, decision.message, decision.canUseCloudOnce)

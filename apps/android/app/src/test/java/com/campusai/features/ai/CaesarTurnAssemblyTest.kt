@@ -42,6 +42,39 @@ class CaesarTurnAssemblyTest {
     }
 
     @Test
+    fun `selected Codex marks current images uploadable without unlocking health prompts`() {
+        val codexImage = assembleCaesarTurnRequest(
+            mode = AiMode.FAST,
+            existingMessages = emptyList(),
+            prompt = "看看这张图",
+            displayPrompt = "看看这张图",
+            structuredContext = JSONObject(),
+            attachments = listOf(CaesarImageAttachment("C:/private/current.jpg", "image/jpeg", "")),
+            sessionId = "codex-vision",
+            ownerUserId = "owner",
+            localModelId = "qwen3.5-2b-mnn",
+            allowCodexImageUpload = true,
+        ).withCloudHealthDisclosure(CloudHealthDisclosure.Excluded)
+        val healthImage = assembleCaesarTurnRequest(
+            mode = AiMode.FAST,
+            existingMessages = emptyList(),
+            prompt = "分析这张图里的心率数据",
+            displayPrompt = "分析这张图里的心率数据",
+            structuredContext = JSONObject(),
+            attachments = listOf(CaesarImageAttachment("C:/private/health.jpg", "image/jpeg", "")),
+            sessionId = "codex-health-vision",
+            ownerUserId = "owner",
+            localModelId = "qwen3.5-2b-mnn",
+            allowCodexImageUpload = true,
+        ).withCloudHealthDisclosure(CloudHealthDisclosure.Excluded)
+
+        assertTrue(codexImage.allowCodexImageUpload)
+        assertFalse(codexImage.requiresLocal)
+        assertTrue(healthImage.allowCodexImageUpload)
+        assertTrue(healthImage.requiresLocal)
+    }
+
+    @Test
     fun `conversation codec preserves surfaces attachments and rejects malformed recovery`() {
         val sha = "a".repeat(64)
         val original = listOf(
@@ -98,6 +131,97 @@ class CaesarTurnAssemblyTest {
         assertEquals(4, merged.size)
         assertEquals("刚刚有新数据了", merged.last().content)
         assertTrue(merged.last().cloudHealthSensitive)
+    }
+
+    @Test
+    fun `regeneration replaces the persisted old tail and keeps concurrent append`() {
+        val history = AiConversationMessage("assistant", "之前的回答")
+        val prompt = AiConversationMessage("user", "只回复 OK")
+        val oldAnswer = AiConversationMessage("assistant", "不是 OK")
+        val newAnswer = AiConversationMessage("assistant", "OK")
+        val concurrent = AiConversationMessage(
+            "assistant",
+            "自动任务刚刚追加的消息",
+            cloudHealthSensitive = true,
+        )
+
+        val merged = mergePersistedConversationMessages(
+            current = listOf(history, prompt, newAnswer),
+            persisted = listOf(history, prompt, oldAnswer, concurrent),
+            replacedTail = listOf(prompt, oldAnswer),
+        )
+
+        assertEquals(listOf(history, prompt, newAnswer, concurrent), merged)
+    }
+
+    @Test
+    fun `plain final assistant turn produces a precise regeneration plan`() {
+        val history = AiConversationMessage("assistant", "你好")
+        val prompt = AiConversationMessage("user", "解释 SSE")
+        val tool = AiConversationMessage("tool", "内部工具结果")
+        val answer = AiConversationMessage("assistant", "SSE 是流式事件协议。")
+        val messages = listOf(history, prompt, tool, answer)
+
+        val plan = planAiRegeneration(messages)
+
+        assertEquals(3, plan?.assistantIndex)
+        assertEquals(listOf(history), plan?.history)
+        assertEquals(prompt, plan?.prompt)
+        assertEquals(listOf(prompt, tool, answer), plan?.replacedTail)
+    }
+
+    @Test
+    fun `regeneration rejects protected attachments presentations and nonfinal answers`() {
+        val protectedPrompt = AiConversationMessage(
+            role = "user",
+            content = "看这张图片",
+            attachmentPaths = listOf("C:/private.jpg"),
+        )
+        assertEquals(
+            null,
+            planAiRegeneration(listOf(protectedPrompt, AiConversationMessage("assistant", "看到了"))),
+        )
+
+        assertEquals(
+            null,
+            planAiRegeneration(
+                listOf(
+                    AiConversationMessage("user", "上一张图", missingAttachmentCount = 1),
+                    AiConversationMessage("assistant", "原图片已不存在"),
+                ),
+            ),
+        )
+
+        assertEquals(
+            null,
+            planAiRegeneration(
+                listOf(
+                    AiConversationMessage("user", "分析健康数据", cloudHealthSensitive = true),
+                    AiConversationMessage("assistant", "健康建议"),
+                ),
+            ),
+        )
+
+        assertEquals(
+            null,
+            planAiRegeneration(
+                listOf(
+                    AiConversationMessage("user", "生成卡片"),
+                    AiConversationMessage("assistant", "完成", presentationJson = "{}"),
+                ),
+            ),
+        )
+
+        assertEquals(
+            null,
+            planAiRegeneration(
+                listOf(
+                    AiConversationMessage("user", "第一个问题"),
+                    AiConversationMessage("assistant", "旧答案"),
+                    AiConversationMessage("user", "后续消息"),
+                ),
+            ),
+        )
     }
 
     @Test

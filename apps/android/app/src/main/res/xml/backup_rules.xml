@@ -3,4 +3,6 @@
     <exclude domain="root" path="models/" />
     <exclude domain="file" path="models/" />
     <exclude domain="sharedpref" path="campus_ai_secure_prefs.xml" />
+    <!-- AI conversations share campus_database; keep every Room database on this device only. -->
+    <exclude domain="database" path="." />
 </full-backup-content>

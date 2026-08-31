@@ -27,6 +27,10 @@ data class AiRequest(
     val maxOutputTokens: Int = 512,
     /** App-private, normalized image paths. Cloud engines must not upload these implicitly. */
     val imagePaths: List<String> = emptyList(),
+    /** Explicit request capability: only the selected Codex provider may encode current-turn JPEGs. */
+    val allowCodexImageUpload: Boolean = false,
+    /** Explicit cloud-only capability: permits projection and execution of the read-only web.search tool. */
+    val allowWebSearch: Boolean = false,
     /** A compact JSON schema for the tools projected into this turn. */
     val caesarToolsJson: String = "[]",
     /** Vision, health-live and other device-only turns bypass automatic cloud routing. */

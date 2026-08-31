@@ -6,6 +6,8 @@ import com.campusai.core.ai.CloudDailyHealthSummary
 import com.campusai.core.ai.CloudHealthDisclosure
 import com.campusai.core.model.AiConversationMessage
 import com.campusai.core.model.AiMode
+import java.io.File
+import java.io.RandomAccessFile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -17,6 +19,40 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class CloudProviderCoreTest {
+    @Test
+    fun `Codex uses its requested defaults while accepting a dynamic HTTPS model catalog`() {
+        val provider = CloudAiProvider.CODEX
+
+        assertEquals("https://node.tail9a6cbb.ts.net/v1", provider.defaultBaseUrl)
+        assertEquals("https://node.tail9a6cbb.ts.net/v1/models", provider.modelsUrl)
+        assertEquals("https://node.tail9a6cbb.ts.net/v1/chat/completions", provider.chatCompletionsUrl)
+        assertEquals("gpt-5.6-sol", provider.defaultModel(AiMode.FAST))
+        assertEquals("gpt-5.6-sol", provider.defaultModel(AiMode.DEEP))
+        assertEquals(
+            "https://private-node.example/v2/models",
+            provider.modelsUrl("  https://private-node.example/v2/  "),
+        )
+        assertEquals(
+            "https://private-node.example/v2/chat/completions",
+            provider.chatCompletionsUrl("https://private-node.example/v2/"),
+        )
+
+        assertTrue(provider.acceptsModelId("gpt-5.6-sol"))
+        assertTrue(provider.acceptsModelId("o3"))
+        assertTrue(provider.acceptsModelId("future-reasoner_2027.04"))
+        assertFalse(provider.acceptsModelId("not/a/model"))
+        val parsed = OpenAiCompatibleModelParser.parse(
+            provider,
+            """{"data":[{"id":"gpt-5.6-sol"},{"id":"o3"},{"id":"future-reasoner_2027.04"},{"id":"not/a/model"}]}""",
+        )
+        assertEquals(listOf("gpt-5.6-sol", "o3", "future-reasoner_2027.04"), parsed.map { it.id })
+
+        assertTrue(runCatching { provider.resolveBaseUrl("http://private-node.example/v1") }.isFailure)
+        assertTrue(runCatching { provider.resolveBaseUrl("https://user:pass@private-node.example/v1") }.isFailure)
+        assertTrue(runCatching { provider.resolveBaseUrl("https://private-node.example/v1?token=secret") }.isFailure)
+        assertTrue(runCatching { provider.resolveBaseUrl("https://private-node.example/v1#fragment") }.isFailure)
+    }
+
     @Test
     fun `providers use only official fixed endpoints and validate their own model namespace`() {
         assertEquals("https://api.deepseek.com/chat/completions", CloudAiProvider.DEEPSEEK.chatCompletionsUrl)
@@ -83,6 +119,114 @@ class CloudProviderCoreTest {
         assertFalse(prepared.contains(privatePath))
         assertFalse(prepared.contains("<img>"))
         assertFalse(prepared.contains("private-ocr-text"))
+    }
+
+    @Test
+    fun `Codex sends only current normalized JPEGs as OpenAI image content parts`() {
+        val historicalPath = "/data/user/0/com.campusai/no_backup/ai-conversations/old/attachments/history.jpg"
+        val currentImage = File.createTempFile("campusai-codex-vision", ".jpg")
+        currentImage.writeBytes(
+            byteArrayOf(
+                0xff.toByte(),
+                0xd8.toByte(),
+                0x01,
+                0x02,
+                0xff.toByte(),
+                0xd9.toByte(),
+            ),
+        )
+        try {
+            val visionRequest = request(
+                messages = listOf(
+                    AiConversationMessage("user", "上一张图", attachmentPaths = listOf(historicalPath)),
+                    AiConversationMessage("assistant", "已经看过。"),
+                    AiConversationMessage("user", "只分析这张新图", attachmentPaths = listOf(currentImage.absolutePath)),
+                ),
+            ).copy(
+                imagePaths = listOf(currentImage.absolutePath),
+                allowCodexImageUpload = true,
+            )
+
+            val codexPayload = OpenAiCompatibleRequestFactory.prepare(
+                CloudAiProvider.CODEX,
+                visionRequest,
+                "gpt-5.6-sol",
+            ).payload
+            val codexJson = codexPayload.toString()
+            val encodedUser = codexPayload.getJSONArray("messages")
+                .getJSONObject(codexPayload.getJSONArray("messages").length() - 1)
+                .getJSONArray("content")
+
+            assertEquals("text", encodedUser.getJSONObject(0).getString("type"))
+            assertEquals("只分析这张新图", encodedUser.getJSONObject(0).getString("text"))
+            assertEquals("image_url", encodedUser.getJSONObject(1).getString("type"))
+            assertTrue(
+                encodedUser.getJSONObject(1).getJSONObject("image_url").getString("url")
+                    .startsWith("data:image/jpeg;base64,"),
+            )
+            assertFalse(codexJson.contains(currentImage.absolutePath))
+            assertFalse(codexJson.contains(historicalPath))
+
+            val geminiPayload = OpenAiCompatibleRequestFactory.prepare(
+                CloudAiProvider.GOOGLE_GEMINI,
+                visionRequest,
+                "gemini-3.7-flash",
+            ).payload.toString()
+            assertFalse(geminiPayload.contains("data:image"))
+            assertFalse(geminiPayload.contains(currentImage.absolutePath))
+        } finally {
+            currentImage.delete()
+        }
+    }
+
+    @Test
+    fun `Codex rejects more than four current turn images before reading paths`() {
+        val failure = runCatching {
+            OpenAiCompatibleRequestFactory.prepare(
+                CloudAiProvider.CODEX,
+                request().copy(
+                    imagePaths = List(5) { index -> "/private/missing-$index.jpg" },
+                    allowCodexImageUpload = true,
+                ),
+                "gpt-5.6-sol",
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is CloudProviderException)
+        assertEquals("codex_image_limit", (failure as CloudProviderException).code)
+        assertFalse(failure.message.orEmpty().contains("missing-"))
+    }
+
+    @Test
+    fun `Codex rejects an oversized normalized image without serializing its path`() {
+        val oversized = File.createTempFile("campusai-codex-oversized", ".jpg")
+        RandomAccessFile(oversized, "rw").use { file -> file.setLength(4L * 1024 * 1024 + 1) }
+        try {
+            val failure = runCatching {
+                OpenAiCompatibleRequestFactory.prepare(
+                    CloudAiProvider.CODEX,
+                    request(
+                        messages = listOf(
+                            AiConversationMessage(
+                                "user",
+                                "分析图片",
+                                attachmentPaths = listOf(oversized.absolutePath),
+                            ),
+                        ),
+                    ).copy(
+                        imagePaths = listOf(oversized.absolutePath),
+                        allowCodexImageUpload = true,
+                    ),
+                    "gpt-5.6-sol",
+                )
+            }.exceptionOrNull()
+
+            assertTrue(failure is CloudProviderException)
+            assertEquals("codex_image_too_large", (failure as CloudProviderException).code)
+            assertFalse(failure.message.orEmpty().contains(oversized.absolutePath))
+        } finally {
+            oversized.delete()
+        }
     }
 
     @Test

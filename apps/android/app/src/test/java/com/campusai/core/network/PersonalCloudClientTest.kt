@@ -25,6 +25,7 @@ import okio.BufferedSource
 import okio.Source
 import okio.Timeout
 import okio.buffer
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -34,6 +35,214 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class PersonalCloudClientTest {
+    @Test
+    fun `Codex validation fetches models then verifies chat and tool calls before a multiturn stream`() = runTest {
+        val requests = mutableListOf<okhttp3.Request>()
+        val key = "codex-unit-secret-key"
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            requests += chain.request()
+            val body = when (requests.size) {
+                1 -> """{"object":"list","data":[{"id":"gpt-5.6-sol"},{"id":"future-reasoner_2027.04"}]}"""
+                2 -> """
+                    data: {"choices":[{"delta":{"content":"O"}}]}
+
+                    data: {"choices":[{"delta":{"content":"K"}}]}
+
+                    data: [DONE]
+
+                """.trimIndent()
+                3 -> """
+                    data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_probe","type":"function","function":{"name":"connection_probe","arguments":"{\"value\":\"OK\"}"}}]}}]}
+
+                    data: [DONE]
+
+                """.trimIndent()
+                else -> """
+                    data: {"choices":[{"delta":{"content":"收到"}}]}
+
+                    data: [DONE]
+
+                """.trimIndent()
+            }
+            response(chain.request(), 200, body)
+        }.build()
+        val client = PersonalCloudClient(
+            provider = CloudAiProvider.CODEX,
+            credential = { key },
+            selectedModel = { "gpt-5.6-sol" },
+            baseUrl = { "https://private-node.example/v2/" },
+            client = http,
+        )
+
+        val connection = client.validateConnection()
+        client.stream(
+            AiRequest(
+                mode = AiMode.FAST,
+                messages = listOf(
+                    AiConversationMessage("user", "第一问"),
+                    AiConversationMessage("assistant", "第一答"),
+                    AiConversationMessage("user", "第二问"),
+                ),
+            ),
+        ) { }
+
+        assertTrue(connection.chatVerified)
+        assertTrue(connection.toolCallsVerified)
+        assertEquals("gpt-5.6-sol", connection.selectedModelId)
+        assertEquals(listOf("gpt-5.6-sol", "future-reasoner_2027.04"), connection.models.map { it.id })
+        assertEquals(listOf("GET", "POST", "POST", "POST"), requests.map { it.method })
+        assertEquals("https://private-node.example/v2/models", requests[0].url.toString())
+        assertEquals("https://private-node.example/v2/chat/completions", requests[1].url.toString())
+        assertEquals("https://private-node.example/v2/chat/completions", requests[2].url.toString())
+        assertEquals("https://private-node.example/v2/chat/completions", requests[3].url.toString())
+        assertTrue(requests.all { it.header("Authorization") == "Bearer $key" })
+
+        val verification = requestBodyJson(requests[1])
+        assertEquals("gpt-5.6-sol", verification.getString("model"))
+        assertTrue(verification.getBoolean("stream"))
+        assertTrue(verification.getJSONObject("stream_options").getBoolean("include_usage"))
+        assertEquals("只回复 OK", verification.getJSONArray("messages").getJSONObject(0).getString("content"))
+
+        val probe = requestBodyJson(requests[2])
+        assertEquals("gpt-5.6-sol", probe.getString("model"))
+        assertTrue(probe.getBoolean("stream"))
+        assertTrue(probe.getJSONObject("stream_options").getBoolean("include_usage"))
+        assertEquals(64, probe.getInt("max_tokens"))
+        assertFalse(probe.getBoolean("parallel_tool_calls"))
+        assertEquals(2, probe.getJSONArray("messages").length())
+        assertEquals(
+            "connection_probe",
+            probe.getJSONObject("tool_choice").getJSONObject("function").getString("name"),
+        )
+        val tool = probe.getJSONArray("tools").getJSONObject(0)
+        assertEquals("function", tool.getString("type"))
+        val function = tool.getJSONObject("function")
+        assertEquals("connection_probe", function.getString("name"))
+        val parameters = function.getJSONObject("parameters")
+        assertEquals("object", parameters.getString("type"))
+        assertFalse(parameters.getBoolean("additionalProperties"))
+        assertEquals("value", parameters.getJSONArray("required").getString(0))
+        assertEquals(
+            "OK",
+            parameters
+                .getJSONObject("properties")
+                .getJSONObject("value")
+                .getJSONArray("enum")
+                .getString(0),
+        )
+
+        val conversation = requestBodyJson(requests[3]).getJSONArray("messages")
+        val tail = (conversation.length() - 3 until conversation.length()).map { index ->
+            val message = conversation.getJSONObject(index)
+            message.getString("role") to message.getString("content")
+        }
+        assertEquals(
+            listOf("user" to "第一问", "assistant" to "第一答", "user" to "第二问"),
+            tail,
+        )
+    }
+
+    @Test
+    fun `Codex connection validation rejects an incorrect forced tool call`() = runTest {
+        var requestCount = 0
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            requestCount += 1
+            val body = when (requestCount) {
+                1 -> """{"data":[{"id":"gpt-5.6-sol"}]}"""
+                2 -> "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n"
+                else -> """
+                    data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_probe","type":"function","function":{"name":"connection_probe","arguments":"{\"value\":\"NOT_OK\"}"}}]}}]}
+
+                    data: [DONE]
+
+                """.trimIndent()
+            }
+            response(chain.request(), 200, body)
+        }.build()
+        val client = PersonalCloudClient(
+            provider = CloudAiProvider.CODEX,
+            credential = { "codex-unit-secret-key" },
+            selectedModel = { "gpt-5.6-sol" },
+            baseUrl = { CloudAiProvider.CODEX.defaultBaseUrl },
+            client = http,
+        )
+
+        val error = runCatching { client.validateConnection() }.exceptionOrNull() as CloudProviderException
+
+        assertEquals("provider_tool_verification_failed", error.code)
+        assertFalse(error.recoverable)
+        assertEquals(3, requestCount)
+    }
+
+    @Test
+    fun `Codex real chat validation requires the exact OK answer`() = runTest {
+        var requestCount = 0
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            requestCount += 1
+            response(
+                chain.request(),
+                200,
+                if (requestCount == 1) {
+                    """{"data":[{"id":"gpt-5.6-sol"}]}"""
+                } else {
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"OK!\"}}]}\n\ndata: [DONE]\n\n"
+                },
+            )
+        }.build()
+        val client = PersonalCloudClient(
+            provider = CloudAiProvider.CODEX,
+            credential = { "codex-unit-secret-key" },
+            selectedModel = { "gpt-5.6-sol" },
+            baseUrl = { CloudAiProvider.CODEX.defaultBaseUrl },
+            client = http,
+        )
+
+        val error = runCatching { client.validateConnection() }.exceptionOrNull() as CloudProviderException
+
+        assertEquals("provider_chat_verification_failed", error.code)
+        assertFalse(error.recoverable)
+        assertEquals(2, requestCount)
+    }
+
+    @Test
+    fun `default cloud client allows at least two minutes for connect read and write`() {
+        val client = defaultCloudHttpClient()
+
+        assertTrue(client.connectTimeoutMillis >= 120_000)
+        assertTrue(client.readTimeoutMillis >= 120_000)
+        assertTrue(client.writeTimeoutMillis >= 120_000)
+        assertEquals(0, client.callTimeoutMillis)
+        assertFalse(client.followRedirects)
+        assertFalse(client.followSslRedirects)
+    }
+
+    @Test
+    fun `Codex IOException after SSE starts is an interrupted stream with local recovery guidance`() = runTest {
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            interruptingSseResponse(
+                chain.request(),
+                "data: {\"choices\":[{\"delta\":{\"content\":\"部分回复\"}}]}\n\n",
+            )
+        }.build()
+        val client = PersonalCloudClient(
+            provider = CloudAiProvider.CODEX,
+            credential = { "codex-unit-secret-key" },
+            selectedModel = { "gpt-5.6-sol" },
+            client = http,
+        )
+
+        val error = runCatching {
+            client.stream(AiRequest(AiMode.FAST, listOf(AiConversationMessage("user", "测试中断")))) { }
+        }.exceptionOrNull() as CloudProviderException
+
+        assertEquals("provider_stream_interrupted", error.code)
+        assertTrue(error.recoverable)
+        assertTrue(error.message.contains("Tailscale"))
+        assertTrue(error.message.contains("电脑是否开机"))
+        assertTrue(error.message.contains("CPA"))
+        assertTrue(error.message.contains("Clash"))
+    }
+
     @Test
     fun `connection validation uses fixed model endpoint and exact account model`() = runTest {
         val requests = mutableListOf<okhttp3.Request>()
@@ -363,6 +572,39 @@ class PersonalCloudClientTest {
         .message("unit")
         .body(body.toResponseBody("application/json; charset=utf-8".toMediaType()))
         .build()
+
+    private fun requestBodyJson(request: okhttp3.Request): JSONObject {
+        val buffer = Buffer()
+        checkNotNull(request.body).writeTo(buffer)
+        return JSONObject(buffer.readUtf8())
+    }
+
+    private fun interruptingSseResponse(request: okhttp3.Request, body: String): Response {
+        val remaining = Buffer().writeUtf8(body)
+        val source = object : Source {
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                if (remaining.size == 0L) throw IOException("simulated private network interruption")
+                return remaining.read(sink, minOf(byteCount, remaining.size))
+            }
+
+            override fun timeout(): Timeout = Timeout.NONE
+
+            override fun close() = Unit
+        }
+        val responseBody = object : ResponseBody() {
+            private val bufferedSource = source.buffer()
+            override fun contentType() = "text/event-stream; charset=utf-8".toMediaType()
+            override fun contentLength(): Long = -1L
+            override fun source(): BufferedSource = bufferedSource
+        }
+        return Response.Builder()
+            .request(request)
+            .protocol(Protocol.HTTP_1_1)
+            .code(200)
+            .message("unit")
+            .body(responseBody)
+            .build()
+    }
 
     private fun blockingSseResponse(
         request: okhttp3.Request,

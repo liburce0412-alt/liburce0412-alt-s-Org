@@ -12,6 +12,8 @@ import com.campusai.core.ai.ResolvedExecution
 import com.campusai.core.model.AiConversationMessage
 import com.campusai.core.model.AiMode
 import com.campusai.core.security.PersonalAiProviderStore
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.security.MessageDigest
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -32,6 +34,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.ByteString.Companion.toByteString
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -39,12 +42,14 @@ class PersonalCloudClient internal constructor(
     val provider: CloudAiProvider,
     private val credential: () -> String,
     private val selectedModel: () -> String,
+    private val baseUrl: () -> String = { provider.defaultBaseUrl },
     private val client: OkHttpClient,
 ) {
     constructor(provider: CloudAiProvider, store: PersonalAiProviderStore) : this(
         provider = provider,
         credential = { store.readCredential(provider)?.value.orEmpty() },
         selectedModel = { store.selectedModel(provider) },
+        baseUrl = { store.baseUrl(provider) },
         client = defaultCloudHttpClient(),
     )
 
@@ -62,7 +67,7 @@ class PersonalCloudClient internal constructor(
             throw CloudProviderException("model_invalid", "已选择的 ${provider.displayName} 模型 ID 无效。", false)
         }
         val prepared = OpenAiCompatibleRequestFactory.prepare(provider, request, model)
-        val httpRequest = authenticatedRequest(provider.chatCompletionsUrl, apiKey)
+        val httpRequest = authenticatedRequest(provider.chatCompletionsUrl(requireBaseUrl()), apiKey)
             .post(prepared.payload.toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
         val call = client.newCall(httpRequest)
@@ -78,6 +83,7 @@ class PersonalCloudClient internal constructor(
         var inputTokens: Long? = null
         var outputTokens: Long? = null
         var streamCompleted = false
+        var streamStarted = false
         val assistantContent = StringBuilder()
         val reasoningContent = StringBuilder()
         val toolCalls = OpenAiToolCallAccumulator(provider, prepared.originalToolNamesByWireName)
@@ -98,6 +104,7 @@ class PersonalCloudClient internal constructor(
                 if (!response.isSuccessful) throw providerError(provider, response.code)
                 val source = response.body?.source()
                     ?: throw CloudProviderException("empty_response", "${provider.displayName} 没有返回数据流，请重试。")
+                streamStarted = true
                 val events = SseEventReader(source)
                 while (true) {
                     currentCoroutineContext().ensureActive()
@@ -136,10 +143,7 @@ class PersonalCloudClient internal constructor(
                 }
             }
             if (!streamCompleted) {
-                throw CloudProviderException(
-                    "provider_stream_interrupted",
-                    "${provider.displayName} 数据流在完成前中断，请重试。",
-                )
+                throw providerStreamInterruptedError(provider)
             }
             outputGuard.finish(outputTokens).forEach { visible -> onEvent(AiEvent.Delta(visible)) }
             val replayReasoning = reasoningContent.toString().takeIf(String::isNotBlank)
@@ -173,7 +177,7 @@ class PersonalCloudClient internal constructor(
             }
         } catch (failure: IOException) {
             currentCoroutineContext().ensureActive()
-            throw failure
+            throw if (streamStarted) providerStreamInterruptedError(provider) else providerConnectivityError(provider)
         } finally {
             cancellationWatcher.cancel()
             activeCall.compareAndSet(call, null)
@@ -182,7 +186,7 @@ class PersonalCloudClient internal constructor(
 
     suspend fun listModels(): List<CloudProviderModel> = withContext(Dispatchers.IO) {
         val apiKey = requireCredential()
-        val call = client.newCall(authenticatedRequest(provider.modelsUrl, apiKey).get().build())
+        val call = client.newCall(authenticatedRequest(provider.modelsUrl(requireBaseUrl()), apiKey).get().build())
         activeCall.set(call)
         val cancellationWatcher = launch(start = CoroutineStart.UNDISPATCHED) {
             try {
@@ -200,7 +204,7 @@ class PersonalCloudClient internal constructor(
             }
         } catch (failure: IOException) {
             currentCoroutineContext().ensureActive()
-            throw failure
+            throw providerConnectivityError(provider)
         } finally {
             cancellationWatcher.cancel()
             activeCall.compareAndSet(call, null)
@@ -218,7 +222,16 @@ class PersonalCloudClient internal constructor(
         if (models.none { it.id == resolved }) {
             throw CloudProviderException("model_unavailable", "${provider.displayName} 账户当前不可使用模型 $resolved。", false)
         }
-        return CloudProviderConnection(provider, resolved, models, System.currentTimeMillis() - started)
+        val chatVerified = provider == CloudAiProvider.CODEX && validateChatCompletion(resolved)
+        val toolCallsVerified = provider == CloudAiProvider.CODEX && validateToolCall(resolved)
+        return CloudProviderConnection(
+            provider = provider,
+            selectedModelId = resolved,
+            models = models,
+            latencyMs = System.currentTimeMillis() - started,
+            chatVerified = chatVerified,
+            toolCallsVerified = toolCallsVerified,
+        )
     }
 
     fun cancel() {
@@ -227,6 +240,221 @@ class PersonalCloudClient internal constructor(
 
     private fun requireCredential(): String = credential().takeIf(String::isNotBlank)
         ?: throw CloudProviderException("provider_key_missing", "尚未保存个人 ${provider.displayName} Key。请前往设置保存后重试。", false)
+
+    private fun requireBaseUrl(): String = try {
+        provider.resolveBaseUrl(baseUrl())
+    } catch (_: IllegalArgumentException) {
+        throw CloudProviderException("base_url_invalid", "${provider.displayName} Base URL 无效，请在设置中修正。", false)
+    }
+
+    private suspend fun validateChatCompletion(model: String): Boolean = withContext(Dispatchers.IO) {
+        val apiKey = requireCredential()
+        val payload = JSONObject()
+            .put("model", model)
+            .put("stream", true)
+            .put("stream_options", JSONObject().put("include_usage", true))
+            .put("max_tokens", 16)
+            .put(
+                "messages",
+                JSONArray().put(JSONObject().put("role", "user").put("content", "只回复 OK")),
+            )
+        val request = authenticatedRequest(provider.chatCompletionsUrl(requireBaseUrl()), apiKey)
+            .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+        val call = client.newCall(request)
+        activeCall.set(call)
+        val cancellationWatcher = launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                awaitCancellation()
+            } finally {
+                call.cancel()
+            }
+        }
+        val answer = StringBuilder()
+        var completed = false
+        var streamStarted = false
+        try {
+            call.awaitResponse().use { response ->
+                if (!response.isSuccessful) throw providerError(provider, response.code)
+                val source = response.body?.source()
+                    ?: throw CloudProviderException("empty_response", "${provider.displayName} 没有返回对话数据流。")
+                streamStarted = true
+                val events = SseEventReader(source)
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val data = events.next()?.data?.trim() ?: break
+                    if (data == "[DONE]") {
+                        completed = true
+                        break
+                    }
+                    if (OpenAiCompatibleStreamParser.containsProviderError(data)) {
+                        throw CloudProviderException("provider_stream_error", "${provider.displayName} 真实对话验证返回了错误。")
+                    }
+                    val chunk = OpenAiCompatibleStreamParser.parse(data)
+                        ?: throw CloudProviderException("provider_stream_malformed", "${provider.displayName} 真实对话验证返回了损坏的数据流。")
+                    chunk.delta?.let { delta ->
+                        if (answer.length + delta.length > MAX_CONNECTION_TEST_CHARS) {
+                            throw CloudProviderException("provider_chat_verification_failed", "${provider.displayName} 真实对话验证返回内容异常。", false)
+                        }
+                        answer.append(delta)
+                    }
+                }
+            }
+            if (!completed) {
+                throw providerStreamInterruptedError(provider, verification = true)
+            }
+            if (answer.toString().trim() != "OK") {
+                throw CloudProviderException(
+                    "provider_chat_verification_failed",
+                    "${provider.displayName} 模型列表可用，但真实对话没有按要求回复 OK。",
+                    false,
+                )
+            }
+            true
+        } catch (failure: IOException) {
+            currentCoroutineContext().ensureActive()
+            throw if (streamStarted) {
+                providerStreamInterruptedError(provider, verification = true)
+            } else {
+                providerConnectivityError(provider)
+            }
+        } finally {
+            cancellationWatcher.cancel()
+            activeCall.compareAndSet(call, null)
+        }
+    }
+
+    /** Verifies OpenAI-compatible tool_calls without executing any application action. */
+    private suspend fun validateToolCall(model: String): Boolean = withContext(Dispatchers.IO) {
+        val apiKey = requireCredential()
+        val parameters = JSONObject()
+            .put("type", "object")
+            .put(
+                "properties",
+                JSONObject().put(
+                    "value",
+                    JSONObject()
+                        .put("type", "string")
+                        .put("enum", JSONArray().put(CONNECTION_PROBE_VALUE)),
+                ),
+            )
+            .put("required", JSONArray().put("value"))
+            .put("additionalProperties", false)
+        val payload = JSONObject()
+            .put("model", model)
+            .put("stream", true)
+            .put("stream_options", JSONObject().put("include_usage", true))
+            .put("max_tokens", 64)
+            .put(
+                "messages",
+                JSONArray()
+                    .put(
+                        JSONObject()
+                            .put("role", "system")
+                            .put("content", "这是连接能力测试。只调用指定函数，不要输出正文。"),
+                    )
+                    .put(
+                        JSONObject()
+                            .put("role", "user")
+                            .put("content", "请调用 connection_probe，并将 value 设为 OK。"),
+                    ),
+            )
+            .put(
+                "tools",
+                JSONArray().put(
+                    JSONObject()
+                        .put("type", "function")
+                        .put(
+                            "function",
+                            JSONObject()
+                                .put("name", CONNECTION_PROBE_TOOL)
+                                .put("description", "无副作用的连接能力探针；不会执行任何业务动作。")
+                                .put("parameters", parameters),
+                        ),
+                ),
+            )
+            .put(
+                "tool_choice",
+                JSONObject()
+                    .put("type", "function")
+                    .put("function", JSONObject().put("name", CONNECTION_PROBE_TOOL)),
+            )
+            .put("parallel_tool_calls", false)
+        val request = authenticatedRequest(provider.chatCompletionsUrl(requireBaseUrl()), apiKey)
+            .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+        val call = client.newCall(request)
+        activeCall.set(call)
+        val cancellationWatcher = launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                awaitCancellation()
+            } finally {
+                call.cancel()
+            }
+        }
+        val toolCalls = OpenAiToolCallAccumulator(
+            provider = provider,
+            originalNamesByWireName = mapOf(CONNECTION_PROBE_TOOL to CONNECTION_PROBE_TOOL),
+        )
+        var completed = false
+        var streamStarted = false
+        var visibleChars = 0
+        try {
+            call.awaitResponse().use { response ->
+                if (!response.isSuccessful) throw providerError(provider, response.code)
+                val source = response.body?.source()
+                    ?: throw CloudProviderException("empty_response", "${provider.displayName} 没有返回工具调用数据流。")
+                streamStarted = true
+                val events = SseEventReader(source)
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val data = events.next()?.data?.trim() ?: break
+                    if (data == "[DONE]") {
+                        completed = true
+                        break
+                    }
+                    if (OpenAiCompatibleStreamParser.containsProviderError(data)) {
+                        throw CloudProviderException("provider_stream_error", "${provider.displayName} 工具调用验证返回了错误。")
+                    }
+                    val chunk = OpenAiCompatibleStreamParser.parse(data)
+                        ?: throw CloudProviderException("provider_stream_malformed", "${provider.displayName} 工具调用验证返回了损坏的数据流。")
+                    visibleChars += chunk.delta?.length ?: 0
+                    if (visibleChars > MAX_CONNECTION_TEST_CHARS) throw toolVerificationFailed()
+                    chunk.toolCallFragments.forEach(toolCalls::append)
+                }
+            }
+            if (!completed) throw providerStreamInterruptedError(provider, verification = true)
+            val toolCall = runCatching { toolCalls.complete() }.getOrNull()
+                ?: throw toolVerificationFailed()
+            val arguments = runCatching { JSONObject(toolCall.argumentsJson) }.getOrNull()
+                ?: throw toolVerificationFailed()
+            val keys = arguments.keys().asSequence().toSet()
+            if (
+                toolCall.originalName != CONNECTION_PROBE_TOOL ||
+                keys != setOf("value") ||
+                arguments.optString("value") != CONNECTION_PROBE_VALUE
+            ) {
+                throw toolVerificationFailed()
+            }
+            true
+        } catch (failure: IOException) {
+            currentCoroutineContext().ensureActive()
+            throw if (streamStarted) {
+                providerStreamInterruptedError(provider, verification = true)
+            } else {
+                providerConnectivityError(provider)
+            }
+        } finally {
+            cancellationWatcher.cancel()
+            activeCall.compareAndSet(call, null)
+        }
+    }
+
+    private fun toolVerificationFailed() = CloudProviderException(
+        "provider_tool_verification_failed",
+        "${provider.displayName} 模型列表和对话可用，但未通过 tool_calls 能力验证。",
+        false,
+    )
 
     private fun authenticatedRequest(url: String, apiKey: String): Request.Builder = Request.Builder()
         .url(url)
@@ -277,6 +505,9 @@ class PersonalCloudClient internal constructor(
     }
 
     private companion object {
+        const val CONNECTION_PROBE_TOOL = "connection_probe"
+        const val CONNECTION_PROBE_VALUE = "OK"
+        const val MAX_CONNECTION_TEST_CHARS = 128
         const val MAX_PROVIDER_ASSISTANT_CHARS = 65_536
         const val MAX_PROVIDER_REASONING_CHARS = 262_144
     }
@@ -297,6 +528,7 @@ internal object OpenAiCompatibleRequestFactory {
     fun prepare(provider: CloudAiProvider, request: AiRequest, model: String): PreparedOpenAiRequest {
         val context = CloudRequestBoundary.sanitizeStructuredContext(request.structuredContextJson)
         val tools = OpenAiToolProjection.parse(request.caesarToolsJson)
+        val codexImageDataUris = CodexVisionPayloadEncoder.encode(provider, request)
         val messages = JSONArray().apply {
             put(JSONObject().put("role", "system").put("content", AiSystemPolicy.instruction(context)))
             if (context != "{}") {
@@ -316,6 +548,7 @@ internal object OpenAiCompatibleRequestFactory {
                 deepSeekThinkingTools = provider == CloudAiProvider.DEEPSEEK &&
                     request.mode == AiMode.DEEP &&
                     tools.wireTools.length() > 0,
+                codexImageDataUris = codexImageDataUris,
             ).forEach(::put)
         }
         val payload = JSONObject()
@@ -334,12 +567,14 @@ internal object OpenAiCompatibleRequestFactory {
             // Let the model use its supported defaults and control only reasoning effort.
             CloudAiProvider.GOOGLE_GEMINI ->
                 payload.put("reasoning_effort", if (request.mode == AiMode.FAST) "low" else "high")
+            CloudAiProvider.CODEX ->
+                payload.put("reasoning_effort", if (request.mode == AiMode.FAST) "low" else "high")
         }
         if (tools.wireTools.length() > 0) {
             payload.put("tools", tools.wireTools)
             // DeepSeek V4 thinking mode rejects tool_choice, even though the rest of the
             // request follows the OpenAI shape. Gemini accepts the explicit auto choice.
-            if (provider == CloudAiProvider.GOOGLE_GEMINI) payload.put("tool_choice", "auto")
+            if (provider != CloudAiProvider.DEEPSEEK) payload.put("tool_choice", "auto")
             payload.put("parallel_tool_calls", false)
         }
         return PreparedOpenAiRequest(payload, tools.originalNamesByWireName)
@@ -349,7 +584,13 @@ internal object OpenAiCompatibleRequestFactory {
         provider: CloudAiProvider,
         messages: List<AiConversationMessage>,
         deepSeekThinkingTools: Boolean,
+        codexImageDataUris: List<String>,
     ): List<JSONObject> = buildList {
+        val visionMessageIndex = if (codexImageDataUris.isEmpty()) {
+            -1
+        } else {
+            messages.indexOfLast { it.role == "user" }
+        }
         var index = 0
         while (index < messages.size) {
             val message = messages[index]
@@ -376,10 +617,30 @@ internal object OpenAiCompatibleRequestFactory {
                 continue
             }
             if (message.role == "user" || message.role == "assistant") {
+                val content: Any = if (index == visionMessageIndex && message.role == "user") {
+                    JSONArray()
+                        .put(JSONObject().put("type", "text").put("text", message.content))
+                        .apply {
+                            codexImageDataUris.forEach { dataUri ->
+                                put(
+                                    JSONObject()
+                                        .put("type", "image_url")
+                                        .put(
+                                            "image_url",
+                                            JSONObject()
+                                                .put("url", dataUri)
+                                                .put("detail", "auto"),
+                                        ),
+                                )
+                            }
+                        }
+                } else {
+                    message.content
+                }
                 add(
                     JSONObject()
                         .put("role", message.role)
-                        .put("content", message.content)
+                        .put("content", content)
                         .apply {
                             if (provider == CloudAiProvider.DEEPSEEK && message.role == "assistant") {
                                 val reasoning = message.providerReasoningContent
@@ -397,6 +658,104 @@ internal object OpenAiCompatibleRequestFactory {
 
     private const val MAX_TOOL_RESULT_CHARS = 32_768
     private const val MAX_REASONING_CONTENT_CHARS = 262_144
+}
+
+/**
+ * Encodes only normalized JPEGs attached to the current turn. Saved historical attachments are
+ * deliberately ignored, so a later text-only turn never re-uploads earlier images.
+ */
+internal object CodexVisionPayloadEncoder {
+    fun encode(provider: CloudAiProvider, request: AiRequest): List<String> {
+        if (
+            provider != CloudAiProvider.CODEX ||
+            !request.allowCodexImageUpload ||
+            request.imagePaths.isEmpty()
+        ) return emptyList()
+        if (request.imagePaths.size > MAX_IMAGES_PER_TURN) {
+            throw CloudProviderException(
+                "codex_image_limit",
+                "Codex 每次最多可上传 $MAX_IMAGES_PER_TURN 张图片。",
+                false,
+            )
+        }
+        val currentUserPaths = request.messages.lastOrNull { it.role == "user" }?.attachmentPaths.orEmpty()
+        if (request.imagePaths != currentUserPaths) {
+            throw CloudProviderException(
+                "codex_image_ownership_invalid",
+                "Codex 只能上传当前输入中已导入的图片，请重新选择。",
+                false,
+            )
+        }
+
+        var totalBytes = 0L
+        return request.imagePaths.map { rawPath ->
+            val file = runCatching { File(rawPath).canonicalFile }.getOrNull()
+                ?.takeIf { it.isAbsolute && it.isFile && it.extension.equals("jpg", ignoreCase = true) }
+                ?: throw imageUnavailable()
+            val declaredSize = file.length()
+            if (declaredSize !in 1..MAX_IMAGE_BYTES) throw imageTooLarge()
+            if (totalBytes + declaredSize > MAX_TOTAL_IMAGE_BYTES) throw totalImagesTooLarge()
+            val bytes = runCatching { file.readBounded(MAX_IMAGE_BYTES) }.getOrElse {
+                if (it is CloudProviderException) throw it
+                throw imageUnavailable()
+            }
+            if (totalBytes + bytes.size > MAX_TOTAL_IMAGE_BYTES) throw totalImagesTooLarge()
+            if (!bytes.isNormalizedJpeg()) {
+                throw CloudProviderException(
+                    "codex_image_invalid",
+                    "Codex 只会上传设备端已去除元数据的 JPEG 图片。请重新选择图片。",
+                    false,
+                )
+            }
+            totalBytes += bytes.size.toLong()
+            "data:image/jpeg;base64,${bytes.toByteString().base64()}"
+        }
+    }
+
+    private fun File.readBounded(limit: Long): ByteArray = inputStream().buffered().use { input ->
+        val output = ByteArrayOutputStream(length().coerceAtMost(limit).toInt())
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            if (output.size().toLong() + count > limit) throw imageTooLarge()
+            output.write(buffer, 0, count)
+        }
+        output.toByteArray()
+    }
+
+    private fun ByteArray.isNormalizedJpeg(): Boolean =
+        size >= 4 &&
+            this[0] == JPEG_START_FIRST &&
+            this[1] == JPEG_START_SECOND &&
+            this[lastIndex - 1] == JPEG_END_FIRST &&
+            this[lastIndex] == JPEG_END_SECOND
+
+    private fun imageUnavailable() = CloudProviderException(
+        "codex_image_unavailable",
+        "Codex 无法读取当前图片，请重新选择后再试。",
+        false,
+    )
+
+    private fun imageTooLarge() = CloudProviderException(
+        "codex_image_too_large",
+        "单张 Codex 图片处理后不能超过 4 MiB，请重新选择。",
+        false,
+    )
+
+    private fun totalImagesTooLarge() = CloudProviderException(
+        "codex_images_too_large",
+        "本次 Codex 图片总大小不能超过 8 MiB，请减少图片。",
+        false,
+    )
+
+    private const val MAX_IMAGES_PER_TURN = 4
+    private const val MAX_IMAGE_BYTES = 4L * 1024 * 1024
+    private const val MAX_TOTAL_IMAGE_BYTES = 8L * 1024 * 1024
+    private const val JPEG_START_FIRST: Byte = -1
+    private const val JPEG_START_SECOND: Byte = -40
+    private const val JPEG_END_FIRST: Byte = -1
+    private const val JPEG_END_SECOND: Byte = -39
 }
 
 internal object CloudRequestBoundary {
@@ -806,13 +1165,45 @@ private fun providerError(provider: CloudAiProvider, status: Int): CloudProvider
     402 -> CloudProviderException("provider_balance_empty", "个人 ${provider.displayName} 账户余额或配额不足。", false)
     404 -> CloudProviderException("model_unavailable", "所选 ${provider.displayName} 模型不存在或当前账户不可用。", false)
     429 -> CloudProviderException("provider_rate_limited", "个人 ${provider.displayName} 账户请求过于频繁，请稍后重试。")
-    in 500..599 -> CloudProviderException("provider_unavailable", "${provider.displayName} 服务暂时不可用（$status），请稍后重试。")
+    in 500..599 -> if (provider == CloudAiProvider.CODEX) {
+        providerConnectivityError(provider)
+    } else {
+        CloudProviderException("provider_unavailable", "${provider.displayName} 服务暂时不可用（$status），请稍后重试。")
+    }
     else -> CloudProviderException("provider_error", "个人 ${provider.displayName} 请求失败（$status）。请检查 Key 和账户状态后重试。")
 }
 
+internal fun providerConnectivityError(provider: CloudAiProvider): CloudProviderException =
+    if (provider == CloudAiProvider.CODEX) {
+        CloudProviderException(
+            "provider_unavailable",
+            "无法连接 Codex。请检查：手机是否开启 Tailscale；电脑是否开机；CPA 与 Clash 是否正在运行。",
+        )
+    } else {
+        CloudProviderException("provider_unavailable", "无法连接 ${provider.displayName}。请检查网络后重试。")
+    }
+
+private fun providerStreamInterruptedError(
+    provider: CloudAiProvider,
+    verification: Boolean = false,
+): CloudProviderException {
+    val phase = if (verification) "真实对话验证" else "数据流"
+    val recovery = if (provider == CloudAiProvider.CODEX) {
+        "请检查：手机是否开启 Tailscale；电脑是否开机；CPA 与 Clash 是否正在运行。"
+    } else {
+        "请检查网络后重试。"
+    }
+    return CloudProviderException(
+        "provider_stream_interrupted",
+        "${provider.displayName} $phase 在完成前中断。$recovery",
+    )
+}
+
 internal fun defaultCloudHttpClient(): OkHttpClient = OkHttpClient.Builder()
-    .connectTimeout(15, TimeUnit.SECONDS)
+    .connectTimeout(120, TimeUnit.SECONDS)
     .readTimeout(130, TimeUnit.SECONDS)
+    .writeTimeout(120, TimeUnit.SECONDS)
+    .callTimeout(0, TimeUnit.SECONDS)
     .followRedirects(false)
     .followSslRedirects(false)
     .build()

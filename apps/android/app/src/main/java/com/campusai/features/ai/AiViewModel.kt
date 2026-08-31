@@ -151,6 +151,9 @@ class AiViewModel(
     private val personalGeminiEngine: AiEngine = PersonalCloudAiEngine(
         PersonalCloudClient(CloudAiProvider.GOOGLE_GEMINI, personalProviderStore),
     ),
+    private val personalCodexEngine: AiEngine = PersonalCloudAiEngine(
+        PersonalCloudClient(CloudAiProvider.CODEX, personalProviderStore),
+    ),
 ) : ViewModel() {
     private val appContext = context.applicationContext
     private val provider = AtomicReference(AiProvider.AUTO)
@@ -170,6 +173,8 @@ class AiViewModel(
         localState = { modelId -> modelManager.runtimeFor(modelId).selection.state },
         personalGoogleGemini = personalGeminiEngine,
         geminiKeyAvailable = { personalProviderStore.hasCredential(CloudAiProvider.GOOGLE_GEMINI) },
+        personalCodex = personalCodexEngine,
+        codexKeyAvailable = { personalProviderStore.hasCredential(CloudAiProvider.CODEX) },
     )
     private val caesarEngine = CaesarAgentEngine(
         delegate = router,
@@ -201,6 +206,7 @@ class AiViewModel(
     val dailyGreeting: StateFlow<DailyGreeting?> = _dailyGreeting.asStateFlow()
 
     private var generation: Job? = null
+    private var pendingRegeneratedTail: List<AiConversationMessage>? = null
     private val generationEpoch = AiGenerationEpoch()
     private val imageImportGate = AiImageImportGate()
     private var activeGenerationRollback: (() -> Unit)? = null
@@ -656,6 +662,7 @@ class AiViewModel(
     fun newConversation() {
         if (_state.value.streaming) return
         imageImportGate.invalidate()
+        pendingRegeneratedTail = null
         val referenced = _state.value.messages.flatMap { it.attachmentRefs }.map { it.relativePath }.toSet()
         _state.value.pendingImages.forEach { imageProcessor.delete(it, referenced) }
         conversationId = UUID.randomUUID().toString()
@@ -680,6 +687,25 @@ class AiViewModel(
         }
         val base = CampusAiTaskFactory.create(CampusAiTask.CHAT, snapshot.records, snapshot.courses, prompt)
         sendInternal(base.withContext(CampusAiTask.CHAT, prompt, snapshot), cloudOnce = false)
+    }
+
+    fun regenerateLastResponse(snapshot: AiContextSnapshot) {
+        if (_state.value.streaming || _state.value.importingImage) return
+        val originalMessages = _state.value.messages
+        val plan = planAiRegeneration(originalMessages) ?: return
+        activeOwnerUserId = snapshot.userId
+        pendingRegeneratedTail = plan.replacedTail
+        _state.value = _state.value.copy(
+            messages = plan.history,
+            error = null,
+            errorCode = null,
+        )
+        val base = CampusAiTaskFactory.create(CampusAiTask.CHAT, snapshot.records, snapshot.courses, plan.prompt.content)
+        sendInternal(
+            payload = base.withContext(CampusAiTask.CHAT, plan.prompt.content, snapshot),
+            cloudOnce = false,
+            failureMessagesOverride = originalMessages,
+        )
     }
 
     private fun appendDeterministicReply(prompt: String, reply: String) {
@@ -755,6 +781,7 @@ class AiViewModel(
     fun openConversation(report: AiReport) {
         if (_state.value.streaming) return
         imageImportGate.invalidate()
+        pendingRegeneratedTail = null
         val previousRefs = _state.value.messages.flatMap { it.attachmentRefs }.map { it.relativePath }.toSet()
         _state.value.pendingImages.forEach { imageProcessor.delete(it, previousRefs) }
         val decoded = parseMessages(report.messagesJson)
@@ -932,6 +959,8 @@ class AiViewModel(
         caesarEngine.cancel()
         router.cancel()
         personalDeepSeekEngine.cancel()
+        personalGeminiEngine.cancel()
+        personalCodexEngine.cancel()
         localEngine.cancel()
         activeJob?.cancel()
         _state.value = _state.value.copy(streaming = false, stage = "", error = "已停止本次生成。", errorCode = "cancelled")
@@ -942,6 +971,7 @@ class AiViewModel(
         cloudOnce: Boolean,
         cloudOnceProvider: AiProvider = AiProvider.DEEPSEEK,
         cloudHealthDisclosureOverride: CloudHealthDisclosure? = null,
+        failureMessagesOverride: List<AiConversationMessage>? = null,
     ) {
         val prompt = payload.prompt
         val displayPrompt = payload.displayPrompt.ifBlank { prompt }
@@ -974,6 +1004,12 @@ class AiViewModel(
             ?: modelManager.selection.value.manifest.id.also { conversationLocalModelId = it }
         if (conversationTitle.isBlank()) conversationTitle = displayPrompt.trim().take(42)
         val cloudHealthDisclosure = cloudHealthDisclosureOverride ?: currentCloudHealthDisclosure()
+        val selectedProviderForTurn = if (cloudOnce) cloudOnceProvider else provider.get()
+        val allowWebSearch = selectedProviderForTurn in setOf(
+            AiProvider.DEEPSEEK,
+            AiProvider.GOOGLE_GEMINI,
+            AiProvider.CODEX,
+        )
         val cloudHealthSensitive = cloudHealthDisclosure is CloudHealthDisclosure.Included
         val initial = existing +
             AiConversationMessage(
@@ -1022,7 +1058,8 @@ class AiViewModel(
             ownerUserId = activeOwnerUserId,
             localModelId = localModelId,
             cloudOnce = cloudOnce,
-        ).withCloudHealthDisclosure(cloudHealthDisclosure)
+            allowCodexImageUpload = !cloudOnce && provider.get() == AiProvider.CODEX,
+        ).withCloudHealthDisclosure(cloudHealthDisclosure).copy(allowWebSearch = allowWebSearch)
         activeGenerationRollback = {
             val failed = _state.value
             _state.value = failed.withFailureExecutionFallback(
@@ -1030,7 +1067,7 @@ class AiViewModel(
                 previousModel = modelBeforeTurn,
                 previousResolvedProvider = resolvedProviderBeforeTurn,
             ).copy(
-                messages = existing,
+                messages = failureMessagesOverride ?: existing,
                 pendingImages = pendingImagesAtStart,
                 streaming = false,
                 stage = "",
@@ -1038,6 +1075,7 @@ class AiViewModel(
                 error = failed.error ?: "生成中断，请重试。",
                 errorCode = failed.errorCode ?: "generation_incomplete",
             )
+            pendingRegeneratedTail = null
         }
         launchGeneration { token ->
             val completion = AiGenerationCompletionTracker()
@@ -1095,6 +1133,7 @@ class AiViewModel(
     private fun configuredCloudProviders(): List<AiProvider> = buildList {
         if (personalProviderStore.hasCredential(CloudAiProvider.DEEPSEEK)) add(AiProvider.DEEPSEEK)
         if (personalProviderStore.hasCredential(CloudAiProvider.GOOGLE_GEMINI)) add(AiProvider.GOOGLE_GEMINI)
+        if (personalProviderStore.hasCredential(CloudAiProvider.CODEX)) add(AiProvider.CODEX)
     }
 
     private fun currentCloudHealthDisclosure(): CloudHealthDisclosure {
@@ -1205,7 +1244,11 @@ class AiViewModel(
                 ?.messagesJson
                 ?.let(::parseMessages)
                 .orEmpty()
-            val mergedMessages = mergePersistedConversationMessages(messagesToPersist, persisted)
+            val mergedMessages = mergePersistedConversationMessages(
+                current = messagesToPersist,
+                persisted = persisted,
+                replacedTail = pendingRegeneratedTail.orEmpty(),
+            )
             val mergedSummary = mergedMessages.lastOrNull { it.role == "assistant" }?.content.orEmpty()
             if (mergedSummary.isBlank()) return@withLock messagesToPersist
             val report = AiReport(
@@ -1230,6 +1273,7 @@ class AiViewModel(
             dao.insertAiReport(AiReportEntity.fromDomain(report))
             mergedMessages
         }
+        pendingRegeneratedTail = null
         if (merged != messagesToPersist && conversationId == savingConversationId) {
             _state.value = _state.value.copy(messages = imageProcessor.hydrate(merged))
         }
@@ -1248,6 +1292,7 @@ class AiViewModel(
         greetingJob?.cancel()
         recentlyDeletedCleanup?.cancel()
         generationEpoch.invalidate()
+        pendingRegeneratedTail = null
         router.cancel()
         super.onCleared()
     }

@@ -38,7 +38,9 @@ class CaesarAgentEngine(
         // Only requests already forced onto the local engine may see them; cloud turns receive
         // the separately typed, consented daily summary carried by CloudHealthDisclosure.
         val projected = tools.project(prompt).filter { definition ->
-            request.requiresLocal || !definition.name.startsWith(HEALTH_TOOL_PREFIX)
+            (request.requiresLocal || !definition.name.startsWith(HEALTH_TOOL_PREFIX)) &&
+                (!definition.name.startsWith(WEB_TOOL_PREFIX) ||
+                    (request.allowWebSearch && !request.requiresLocal))
         }
         val projectedToolNames = projected.mapTo(linkedSetOf()) { it.name }
         val current = request.copy(
@@ -214,12 +216,14 @@ class CaesarAgentEngine(
     }
 
     private fun AiRequest.withToolResult(call: AiEvent.ToolCallRequested, resultJson: String) = copy(
-        imagePaths = emptyList(),
+        // OpenAI chat completions are stateless: a Codex vision turn must resend its current-turn
+        // image while completing a tool loop. Saved historical images are never placed here.
+        imagePaths = if (allowCodexImageUpload) imagePaths else emptyList(),
         messages = messages + AiConversationMessage("assistant", call.rawContent) + AiConversationMessage("tool", resultJson),
     )
 
     private fun AiRequest.withToolFailure(call: AiEvent.ToolCallRequested, code: String, message: String) = copy(
-        imagePaths = emptyList(),
+        imagePaths = if (allowCodexImageUpload) imagePaths else emptyList(),
         messages = messages +
             AiConversationMessage("assistant", call.rawContent) +
             AiConversationMessage("tool", JSONObject().put("ok", false).put("code", code).put("message", message).toString()),
@@ -227,6 +231,7 @@ class CaesarAgentEngine(
 
     private companion object {
         const val HEALTH_TOOL_PREFIX = "health."
+        const val WEB_TOOL_PREFIX = "web."
     }
 
     private fun AiRequest.forOutputRepair(): AiRequest {

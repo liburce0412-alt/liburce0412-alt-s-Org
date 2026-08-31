@@ -2,6 +2,7 @@ package com.campusai.features.ai
 
 /**
  * Keeps device-private turns on the local model even when the user has selected a cloud provider.
+ * The caller passes [hasImages] as false only for the separately gated Codex vision capability.
  * This is intentionally deterministic: model-generated tool choices must never decide whether
  * local images or health data are allowed to leave the device.
  */

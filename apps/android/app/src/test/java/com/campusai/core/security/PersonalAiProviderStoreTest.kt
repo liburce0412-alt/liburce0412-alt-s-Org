@@ -11,6 +11,46 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class PersonalAiProviderStoreTest {
     @Test
+    fun `Codex base URL credential and selected model persist only in its secure provider slot`() {
+        val storage = MemoryProviderStorage()
+        val store = PersonalAiProviderStore(storage)
+        val key = "codex-unit-secret-key"
+
+        assertTrue(store.saveBaseUrl(CloudAiProvider.CODEX, "https://private-node.example/v2/").isSuccess)
+        assertTrue(store.saveCredential(CloudAiProvider.CODEX, key).isSuccess)
+        assertTrue(store.saveSelectedModel(CloudAiProvider.CODEX, "future-reasoner_2027.04").isSuccess)
+
+        val reloaded = PersonalAiProviderStore(storage)
+        val codex = reloaded.configuration(CloudAiProvider.CODEX)
+        assertEquals("https://private-node.example/v2", codex.baseUrl)
+        assertEquals("future-reasoner_2027.04", codex.selectedModelId)
+        assertTrue(codex.hasCredential)
+        assertFalse(codex.toString().contains(key))
+        assertTrue(reloaded.hasCredential(CloudAiProvider.CODEX))
+        assertFalse(reloaded.hasCredential(CloudAiProvider.DEEPSEEK))
+        assertFalse(reloaded.hasCredential(CloudAiProvider.GOOGLE_GEMINI))
+        assertTrue(storage.values.containsKey("personal_codex_provider_v1"))
+        assertFalse(storage.values.containsKey("personal_deepseek_api_key"))
+        assertFalse(storage.values.containsKey("personal_google_gemini_provider_v1"))
+    }
+
+    @Test
+    fun `changing Codex request origin clears bearer credential and selected model`() {
+        val storage = MemoryProviderStorage()
+        val store = PersonalAiProviderStore(storage)
+        assertTrue(store.saveCredential(CloudAiProvider.CODEX, "codex-unit-secret-key").isSuccess)
+        assertTrue(store.saveSelectedModel(CloudAiProvider.CODEX, "gpt-5.6-sol").isSuccess)
+
+        assertTrue(store.saveBaseUrl(CloudAiProvider.CODEX, "https://replacement-node.example/v1").isSuccess)
+
+        val changed = PersonalAiProviderStore(storage).configuration(CloudAiProvider.CODEX)
+        assertEquals("https://replacement-node.example/v1", changed.baseUrl)
+        assertFalse(changed.hasCredential)
+        assertEquals("", changed.selectedModelId)
+        assertFalse(storage.values.getValue("personal_codex_provider_v1").contains("codex-unit-secret-key"))
+    }
+
+    @Test
     fun `credentials and selected models remain isolated by provider`() {
         val storage = MemoryProviderStorage()
         val store = PersonalAiProviderStore(storage)
@@ -57,6 +97,7 @@ class PersonalAiProviderStoreTest {
     fun `invalid credentials and cross provider models fail closed`() {
         val store = PersonalAiProviderStore(MemoryProviderStorage())
 
+        assertTrue(store.saveCredential(CloudAiProvider.CODEX, "x").isSuccess)
         assertTrue(store.saveCredential(CloudAiProvider.GOOGLE_GEMINI, "contains whitespace and is invalid").isFailure)
         assertTrue(store.saveCredential(CloudAiProvider.DEEPSEEK, "short").isFailure)
         assertTrue(store.saveSelectedModel(CloudAiProvider.GOOGLE_GEMINI, "deepseek-v4-pro").isFailure)

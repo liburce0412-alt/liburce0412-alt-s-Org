@@ -31,6 +31,7 @@ class AiEngineRouterTest {
     fun `empty state labels the selected cloud provider without claiming a connection`() {
         assertEquals("DEEPSEEK · 已选择", selectedCloudProviderStatus(AiProvider.DEEPSEEK))
         assertEquals("GEMINI · 已选择", selectedCloudProviderStatus(AiProvider.GOOGLE_GEMINI))
+        assertEquals("CODEX · 已选择", selectedCloudProviderStatus(AiProvider.CODEX))
     }
 
     @Test fun `auto follows online and offline rules`() {
@@ -91,6 +92,47 @@ class AiEngineRouterTest {
         )
     }
 
+    @Test fun `Codex requires its own key and routes only when available`() {
+        val missing = decideAiRoute(
+            provider = AiProvider.CODEX,
+            mode = AiMode.FAST,
+            online = true,
+            localReady = true,
+            personalKeyAvailable = true,
+            geminiKeyAvailable = true,
+            codexKeyAvailable = false,
+        ) as AiRouteDecision.Block
+
+        assertEquals("codex_key_missing", missing.code)
+        assertEquals(
+            AiRouteDecision.Use(AiRoute.PERSONAL_CODEX),
+            decideAiRoute(
+                provider = AiProvider.CODEX,
+                mode = AiMode.DEEP,
+                online = true,
+                localReady = false,
+                personalKeyAvailable = false,
+                geminiKeyAvailable = false,
+                codexKeyAvailable = true,
+            ),
+        )
+    }
+
+    @Test fun `offline Codex explains every local connectivity prerequisite`() {
+        val blocked = decideAiRoute(
+            provider = AiProvider.CODEX,
+            mode = AiMode.FAST,
+            online = false,
+            localReady = true,
+            codexKeyAvailable = true,
+        ) as AiRouteDecision.Block
+
+        assertEquals("codex_offline", blocked.code)
+        listOf("Tailscale", "电脑", "CPA", "Clash").forEach { prerequisite ->
+            assertTrue(blocked.message.contains(prerequisite))
+        }
+    }
+
     @Test fun `local engine failure does not call cloud`() = runTest {
         val personalDeepSeek = FakeEngine()
         val local = FakeEngine(fail = true)
@@ -143,6 +185,62 @@ class AiEngineRouterTest {
         assertEquals(0, deepSeek.calls)
         assertEquals(1, gemini.calls)
         assertEquals(0, local.calls)
+    }
+
+    @Test fun `selected Codex routes an explicitly enabled image turn to Codex only`() = runTest {
+        val deepSeek = FakeEngine()
+        val codex = FakeEngine()
+        val local = FakeEngine()
+        val router = AiEngineRouter(
+            personalDeepSeek = deepSeek,
+            local = local,
+            provider = { AiProvider.CODEX },
+            personalKeyAvailable = { true },
+            isOnline = { true },
+            localState = { LocalModelState.NotDownloaded },
+            personalCodex = codex,
+            codexKeyAvailable = { true },
+        )
+        val path = "/data/user/0/com.campusai/no_backup/current.jpg"
+
+        router.stream(
+            AiRequest(
+                mode = AiMode.FAST,
+                messages = listOf(AiConversationMessage("user", "看图", attachmentPaths = listOf(path))),
+                imagePaths = listOf(path),
+                allowCodexImageUpload = true,
+            ),
+        ).toList()
+
+        assertEquals(0, deepSeek.calls)
+        assertEquals(1, codex.calls)
+        assertEquals(0, local.calls)
+    }
+
+    @Test fun `image upload flag cannot unlock another cloud provider`() = runTest {
+        val deepSeek = FakeEngine()
+        val local = FakeEngine()
+        val router = AiEngineRouter(
+            personalDeepSeek = deepSeek,
+            local = local,
+            provider = { AiProvider.DEEPSEEK },
+            personalKeyAvailable = { true },
+            isOnline = { true },
+            localState = { LocalModelState.Ready },
+        )
+        val path = "/data/user/0/com.campusai/no_backup/current.jpg"
+
+        router.stream(
+            AiRequest(
+                mode = AiMode.FAST,
+                messages = listOf(AiConversationMessage("user", "看图", attachmentPaths = listOf(path))),
+                imagePaths = listOf(path),
+                allowCodexImageUpload = true,
+            ),
+        ).toList()
+
+        assertEquals(0, deepSeek.calls)
+        assertEquals(1, local.calls)
     }
 
     @Test fun `locked unavailable quality model never falls back to ready fast model`() = runTest {

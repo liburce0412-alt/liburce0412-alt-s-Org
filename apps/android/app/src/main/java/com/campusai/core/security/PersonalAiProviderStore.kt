@@ -34,14 +34,14 @@ class PersonalAiProviderStore internal constructor(
             return Result.failure(IllegalArgumentException(message))
         }
         val current = readPayload(provider)
-        return write(provider, credential, current.modelId)
+        return write(provider, credential, current.modelId, current.baseUrl)
     }
 
     fun hasCredential(provider: CloudAiProvider): Boolean = readCredential(provider) != null
 
     fun deleteCredential(provider: CloudAiProvider): Boolean {
         val current = readPayload(provider)
-        return write(provider, "", current.modelId).isSuccess
+        return write(provider, "", current.modelId, current.baseUrl).isSuccess
     }
 
     fun saveSelectedModel(provider: CloudAiProvider, rawModelId: String): Result<Unit> {
@@ -50,15 +50,33 @@ class PersonalAiProviderStore internal constructor(
             return Result.failure(IllegalArgumentException("不支持的 ${provider.displayName} 模型 ID。"))
         }
         val current = readPayload(provider)
-        return write(provider, current.credential, modelId)
+        return write(provider, current.credential, modelId, current.baseUrl)
     }
 
     fun selectedModel(provider: CloudAiProvider): String = readPayload(provider).modelId
+
+    fun saveBaseUrl(provider: CloudAiProvider, rawBaseUrl: String): Result<Unit> {
+        val baseUrl = try {
+            provider.resolveBaseUrl(rawBaseUrl)
+        } catch (error: IllegalArgumentException) {
+            return Result.failure(error)
+        }
+        val current = readPayload(provider)
+        return if (baseUrl == current.baseUrl) {
+            Result.success(Unit)
+        } else {
+            // Never reuse a bearer token after the request origin changes.
+            write(provider, credential = "", modelId = "", baseUrl = baseUrl)
+        }
+    }
+
+    fun baseUrl(provider: CloudAiProvider): String = readPayload(provider).baseUrl
 
     fun configuration(provider: CloudAiProvider): CloudProviderConfiguration {
         val payload = readPayload(provider)
         return CloudProviderConfiguration(
             provider = provider,
+            baseUrl = payload.baseUrl,
             selectedModelId = payload.modelId,
             hasCredential = payload.credential.isNotBlank(),
             maskedCredential = mask(payload.credential),
@@ -68,14 +86,20 @@ class PersonalAiProviderStore internal constructor(
     internal fun readCredential(provider: CloudAiProvider): ProviderCredential? =
         readPayload(provider).credential.takeIf(String::isNotBlank)?.let(::ProviderCredential)
 
-    private fun write(provider: CloudAiProvider, credential: String, modelId: String): Result<Unit> {
-        val value = if (credential.isBlank() && modelId.isBlank()) {
+    private fun write(provider: CloudAiProvider, credential: String, modelId: String, baseUrl: String): Result<Unit> {
+        val normalizedBaseUrl = try {
+            provider.resolveBaseUrl(baseUrl)
+        } catch (error: IllegalArgumentException) {
+            return Result.failure(error)
+        }
+        val value = if (credential.isBlank() && modelId.isBlank() && normalizedBaseUrl == provider.defaultBaseUrl) {
             ""
         } else {
             JSONObject()
                 .put("version", FORMAT_VERSION)
                 .put("credential", credential)
                 .put("modelId", modelId)
+                .put("baseUrl", normalizedBaseUrl)
                 .toString()
         }
         return if (storage.write(provider.storageKey(), value)) {
@@ -87,29 +111,31 @@ class PersonalAiProviderStore internal constructor(
 
     private fun readPayload(provider: CloudAiProvider): StoredProviderPayload {
         val raw = storage.read(provider.storageKey())
-        if (raw.isBlank()) return StoredProviderPayload()
+        if (raw.isBlank()) return StoredProviderPayload(baseUrl = provider.defaultBaseUrl)
         val structured = runCatching {
             val json = JSONObject(raw)
             if (json.optInt("version") != FORMAT_VERSION) return@runCatching null
             val credential = json.optString("credential").trim()
             val modelId = provider.normalizeModelId(json.optString("modelId"))
+            val baseUrl = provider.resolveBaseUrl(json.optString("baseUrl", provider.defaultBaseUrl))
             if (credential.isNotBlank() && credentialValidationError(provider, credential) != null) return@runCatching null
             if (modelId.isNotBlank() && !provider.acceptsModelId(modelId)) return@runCatching null
-            StoredProviderPayload(credential, modelId)
+            StoredProviderPayload(credential, modelId, baseUrl)
         }.getOrNull()
         if (structured != null) return structured
 
         // The previous DeepSeek implementation stored one encrypted raw key in this same slot.
         return if (provider == CloudAiProvider.DEEPSEEK && credentialValidationError(provider, raw) == null) {
-            StoredProviderPayload(raw, "")
+            StoredProviderPayload(raw, "", provider.defaultBaseUrl)
         } else {
-            StoredProviderPayload()
+            StoredProviderPayload(baseUrl = provider.defaultBaseUrl)
         }
     }
 
     private fun CloudAiProvider.storageKey(): String = when (this) {
         CloudAiProvider.DEEPSEEK -> "personal_deepseek_api_key"
         CloudAiProvider.GOOGLE_GEMINI -> "personal_google_gemini_provider_v1"
+        CloudAiProvider.CODEX -> "personal_codex_provider_v1"
     }
 
     private fun mask(credential: String): String = when {
@@ -121,13 +147,15 @@ class PersonalAiProviderStore internal constructor(
     private data class StoredProviderPayload(
         val credential: String = "",
         val modelId: String = "",
+        val baseUrl: String,
     )
 
     companion object {
         private const val FORMAT_VERSION = 1
         private val PRINTABLE_KEY_PATTERN = Regex("[!-~]{20,512}")
+        private val CODEX_KEY_PATTERN = Regex("[!-~]{1,512}")
         internal fun credentialValidationError(provider: CloudAiProvider, credential: String): String? = when {
-            !PRINTABLE_KEY_PATTERN.matches(credential) ->
+            !(if (provider == CloudAiProvider.CODEX) CODEX_KEY_PATTERN else PRINTABLE_KEY_PATTERN).matches(credential) ->
                 "Key 格式无效：请粘贴完整的 ${provider.displayName} API Key，且不要包含空格。"
             else -> null
         }
